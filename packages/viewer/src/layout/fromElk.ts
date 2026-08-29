@@ -1,0 +1,130 @@
+// layout/fromElk.ts — the two-pass coordinate flattening (spec §5.3).
+//
+// ELK returns coordinates relative to a parent, and the rule DIFFERS
+// between nodes and edges:
+//
+// - Node x/y are relative to the parent node's origin.
+// - Edge section coordinates are relative to the edge's CONTAINER,
+//   which ELK picks as the lowest common ancestor of source and
+//   target (toElk declares each edge in exactly that container). An
+//   edge from inside a group to a root node has the root as
+//   container; an edge between two siblings inside a group has that
+//   group as container.
+//
+// So no uniform offset works. Pass 1 walks the node tree accumulating
+// absolute origins for every node and group. Pass 2 walks EDGES,
+// offsetting each edge's points by its container's absolute origin —
+// the container being the ELK node whose `edges` array carries it.
+//
+// Pure function, no DOM. Output geometry lives only in viewer memory
+// and is NEVER persisted to the document (spec §1.4/§3.1).
+
+import type { ElkNode } from 'elkjs';
+
+/** An absolute rectangle, in root coordinates. Never persisted (§1.4). */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface AbsPoint {
+  x: number;
+  y: number;
+}
+
+/** An edge label placed by ELK, in absolute root coordinates. */
+export interface AbsEdgeLabel {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A flattened edge: absolute polyline points (+ labels when ELK placed any). */
+export interface AbsEdge {
+  id: string;
+  points: AbsPoint[];
+  labels?: AbsEdgeLabel[];
+}
+
+/** Result of flattening an ELK layout to absolute coordinates. */
+export interface LaidOut {
+  /** Total laid-out canvas size (the ELK root's dimensions). */
+  width: number;
+  height: number;
+  /** Absolute rects for every node AND group, keyed by element id. */
+  nodes: Map<string, Rect>;
+  /** Edges as absolute point arrays. */
+  edges: AbsEdge[];
+}
+
+/**
+ * Flatten an ELK layout result (relative coordinates) into absolute
+ * root-space geometry. `elkRoot` is the synthetic root container that
+ * toElk built; it is excluded from the output rects, but its size
+ * becomes the canvas width/height.
+ */
+export function flatten(elkRoot: ElkNode): LaidOut {
+  // Absolute origin of every container (root included — pass 2 needs
+  // it to offset root-contained edges).
+  const origins = new Map<string, AbsPoint>();
+  const nodes = new Map<string, Rect>();
+
+  // Pass 1 — walk nodes, accumulating absolute origins for every node
+  // and group. Node x/y are parent-relative, so each child adds its
+  // own offset to the parent's absolute origin.
+  (function walk(n: ElkNode, ox: number, oy: number): void {
+    const ax = ox + (n.x ?? 0);
+    const ay = oy + (n.y ?? 0);
+    origins.set(n.id, { x: ax, y: ay });
+    if (n !== elkRoot) {
+      nodes.set(n.id, {
+        x: ax,
+        y: ay,
+        width: n.width ?? 0,
+        height: n.height ?? 0,
+      });
+    }
+    n.children?.forEach((c) => walk(c, ax, ay));
+  })(elkRoot, 0, 0);
+
+  // Pass 2 — walk EDGES, offset by their CONTAINER's absolute origin.
+  // The container is the ELK node whose `edges` array holds the edge
+  // (the LCA of its endpoints), NOT the endpoints' parents.
+  const edges: AbsEdge[] = [];
+  (function walkEdges(n: ElkNode): void {
+    const o = origins.get(n.id);
+    if (o !== undefined) {
+      for (const e of n.edges ?? []) {
+        const labels: AbsEdgeLabel[] = (e.labels ?? []).map((l) => ({
+          text: l.text ?? '',
+          x: (l.x ?? 0) + o.x,
+          y: (l.y ?? 0) + o.y,
+          width: l.width ?? 0,
+          height: l.height ?? 0,
+        }));
+        for (const s of e.sections ?? []) {
+          const pts = [s.startPoint, ...(s.bendPoints ?? []), s.endPoint].map(
+            (p) => ({ x: p.x + o.x, y: p.y + o.y }),
+          );
+          edges.push(
+            labels.length > 0
+              ? { id: e.id, points: pts, labels }
+              : { id: e.id, points: pts },
+          );
+        }
+      }
+    }
+    n.children?.forEach(walkEdges);
+  })(elkRoot);
+
+  return {
+    width: elkRoot.width ?? 0,
+    height: elkRoot.height ?? 0,
+    nodes,
+    edges,
+  };
+}
