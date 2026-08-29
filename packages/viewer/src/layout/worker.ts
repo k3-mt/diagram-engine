@@ -24,7 +24,7 @@
 
 import type { GraphDoc } from '@diagram-engine/core';
 import type { ElkNode } from 'elkjs';
-import { layoutElkGraph } from './runLayout.js';
+import { layoutElkGraph, type ElkEngine } from './runLayout.js';
 import { toElk } from './toElk.js';
 import type { LaidOut } from './fromElk.js';
 
@@ -50,9 +50,14 @@ export type LayoutResponse =
  */
 export async function handleLayoutRequest(
   req: LayoutRequest,
+  elk?: ElkEngine,
 ): Promise<LayoutResponse> {
   try {
-    return { id: req.id, ok: true, laidOut: await layoutElkGraph(req.graph) };
+    return {
+      id: req.id,
+      ok: true,
+      laidOut: await layoutElkGraph(req.graph, elk),
+    };
   } catch (err) {
     return {
       id: req.id,

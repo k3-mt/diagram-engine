@@ -19,6 +19,7 @@ import {
   type LayoutRequest,
   type WorkerLike,
 } from '../layout/worker.js';
+import { elkWithOwnWorker } from '../layout/elkBrowser.js';
 import type { LaidOut } from '../layout/fromElk.js';
 import { FIXTURES, type FixtureEntry } from './fixtures.js';
 import { buildFrame, type DebugFrame } from './frame.js';
@@ -29,21 +30,20 @@ const GROUP_FILL = '#f2f2f2';
 const PAD = 16; // px of breathing room around the fit-to-content viewBox
 
 /**
- * Real module Worker when available; otherwise an inline stand-in that
- * feeds handleLayoutRequest on this thread. Both speak the §5.4 protocol,
- * so LayoutClient's stale-response discarding covers both paths.
+ * WorkerLike speaking the §5.4 protocol on this thread. The heavy ELK
+ * computation still leaves the UI thread: when the environment has
+ * Worker, requests run on an ElkEngine backed by elkjs's OWN worker
+ * (elk-worker.min.js). We cannot host elk.bundled.js inside a worker we
+ * own — in worker scope it registers itself as an elk worker and exports
+ * no constructor (see runLayout.ts / elkBrowser.ts) — so the protocol
+ * stays inline and LayoutClient's stale-response discarding is unchanged.
  */
 function makeLayoutWorker(): { worker: WorkerLike; dispose: () => void } {
-  if (typeof Worker !== 'undefined') {
-    const w = new Worker(new URL('../layout/worker.ts', import.meta.url), {
-      type: 'module',
-    });
-    return { worker: w, dispose: () => w.terminate() };
-  }
+  const elk = typeof Worker !== 'undefined' ? elkWithOwnWorker() : undefined;
   const listeners: ((ev: { data: unknown }) => void)[] = [];
   const inline: WorkerLike = {
     postMessage(msg) {
-      void handleLayoutRequest(msg as LayoutRequest).then((res) => {
+      void handleLayoutRequest(msg as LayoutRequest, elk).then((res) => {
         for (const l of listeners) l({ data: res });
       });
     },
