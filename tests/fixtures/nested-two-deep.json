@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "title": "EU production account",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "web-client",
+      "label": "Web Client",
+      "type": "client",
+      "parent": null,
+      "note": "React SPA"
+    },
+    {
+      "id": "api-gateway",
+      "label": "API Gateway",
+      "type": "service",
+      "parent": "region-eu"
+    },
+    {
+      "id": "auth-service",
+      "label": "Auth Service",
+      "type": "service",
+      "parent": "vpc-private"
+    },
+    {
+      "id": "orders-service",
+      "label": "Orders Service",
+      "type": "service",
+      "parent": "vpc-private"
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "type": "database",
+      "parent": "vpc-private",
+      "note": "users and orders tables"
+    }
+  ],
+  "groups": [
+    {
+      "id": "region-eu",
+      "label": "eu-west-1",
+      "kind": "region",
+      "parent": null
+    },
+    {
+      "id": "vpc-private",
+      "label": "Private VPC",
+      "kind": "vpc",
+      "parent": "region-eu"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "web-client",
+      "to": "api-gateway",
+      "label": "https",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e2",
+      "from": "api-gateway",
+      "to": "auth-service",
+      "label": "verifies",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e3",
+      "from": "api-gateway",
+      "to": "orders-service",
+      "label": "routes",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e4",
+      "from": "auth-service",
+      "to": "postgres",
+      "label": "reads",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e5",
+      "from": "orders-service",
+      "to": "postgres",
+      "label": "reads",
+      "style": "solid",
+      "arrow": "forward"
+    }
+  ],
+  "collapsed": []
+}

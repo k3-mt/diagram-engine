@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "title": "Duplicate id (invalid)",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "type": "database",
+      "parent": null
+    },
+    {
+      "id": "api-gateway",
+      "label": "API Gateway",
+      "type": "service",
+      "parent": null
+    }
+  ],
+  "groups": [
+    {
+      "id": "postgres",
+      "label": "Postgres Cluster",
+      "kind": "cluster",
+      "parent": null
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "api-gateway",
+      "to": "postgres",
+      "label": "reads",
+      "style": "solid",
+      "arrow": "forward"
+    }
+  ],
+  "collapsed": []
+}

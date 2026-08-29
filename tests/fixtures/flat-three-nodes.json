@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "title": "Checkout platform",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "web-client",
+      "label": "Web Client",
+      "type": "client",
+      "parent": null,
+      "note": "React SPA"
+    },
+    {
+      "id": "api-gateway",
+      "label": "API Gateway",
+      "type": "service",
+      "parent": null
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "type": "database",
+      "parent": null,
+      "note": "users and orders tables"
+    }
+  ],
+  "groups": [],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "web-client",
+      "to": "api-gateway",
+      "label": "https",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e2",
+      "from": "api-gateway",
+      "to": "postgres",
+      "label": "reads",
+      "style": "solid",
+      "arrow": "forward"
+    }
+  ],
+  "collapsed": []
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@diagram-engine/core",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Schema, document operations, views, store, formatting. No DOM, no network, no deps beyond zod.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vitest": "^3.0.0"
+  }
+}

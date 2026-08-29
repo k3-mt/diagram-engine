@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "title": "Order events pipeline",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "web-client",
+      "label": "Web Client",
+      "type": "client",
+      "parent": null,
+      "note": "React SPA"
+    },
+    {
+      "id": "ios-app",
+      "label": "iOS App",
+      "type": "client",
+      "parent": null
+    },
+    {
+      "id": "api-gateway",
+      "label": "API Gateway",
+      "type": "service",
+      "parent": null
+    },
+    {
+      "id": "auth-service",
+      "label": "Auth Service",
+      "type": "service",
+      "parent": null
+    },
+    {
+      "id": "orders-service",
+      "label": "Orders Service",
+      "type": "service",
+      "parent": null
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "type": "database",
+      "parent": "vpc-private",
+      "note": "users and orders tables"
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "type": "queue",
+      "parent": "vpc-private",
+      "note": "order-events topic"
+    },
+    {
+      "id": "fulfilment-worker",
+      "label": "Fulfilment Worker",
+      "type": "service",
+      "parent": "vpc-private"
+    },
+    {
+      "id": "s3-archive",
+      "label": "S3 Archive",
+      "type": "storage",
+      "parent": null
+    }
+  ],
+  "groups": [
+    {
+      "id": "vpc-private",
+      "label": "Private VPC",
+      "kind": "vpc",
+      "parent": null
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "web-client",
+      "to": "api-gateway",
+      "label": "https",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e2",
+      "from": "ios-app",
+      "to": "api-gateway",
+      "label": "https",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e3",
+      "from": "api-gateway",
+      "to": "auth-service",
+      "label": "verifies",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e4",
+      "from": "api-gateway",
+      "to": "orders-service",
+      "label": "routes",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e5",
+      "from": "auth-service",
+      "to": "postgres",
+      "label": "reads",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e6",
+      "from": "orders-service",
+      "to": "postgres",
+      "label": "reads",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e7",
+      "from": "orders-service",
+      "to": "kafka",
+      "label": "publishes",
+      "style": "dashed",
+      "arrow": "forward"
+    },
+    {
+      "id": "e8",
+      "from": "kafka",
+      "to": "fulfilment-worker",
+      "label": "consumes",
+      "style": "dashed",
+      "arrow": "forward"
+    },
+    {
+      "id": "e9",
+      "from": "fulfilment-worker",
+      "to": "s3-archive",
+      "label": "writes",
+      "style": "solid",
+      "arrow": "forward"
+    },
+    {
+      "id": "e10",
+      "from": "auth-service",
+      "to": "kafka",
+      "label": "audit events",
+      "style": "dashed",
+      "arrow": "forward"
+    }
+  ],
+  "collapsed": []
+}

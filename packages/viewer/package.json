@@ -1,0 +1,26 @@
+{
+  "name": "@diagram-engine/viewer",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Browser viewer: view derive, ELK layout worker, hop geometry, SVG renderer. Built into cli/dist/public.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@diagram-engine/core": "0.0.0",
+    "elkjs": "^0.9.3"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0",
+    "vitest": "^3.0.0"
+  }
+}

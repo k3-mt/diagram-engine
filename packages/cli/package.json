@@ -1,0 +1,25 @@
+{
+  "name": "@diagram-engine/cli",
+  "private": true,
+  "version": "0.0.0",
+  "description": "diagram / diagram-mcp binaries: CLI commands, MCP stdio server, viewer server.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@diagram-engine/core": "0.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "chokidar": "^3.6.0",
+    "commander": "^12.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.4",
+    "vitest": "^3.0.0"
+  }
+}

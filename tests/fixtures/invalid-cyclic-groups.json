@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "title": "Cyclic groups (invalid)",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "type": "database",
+      "parent": "vpc-a"
+    }
+  ],
+  "groups": [
+    {
+      "id": "vpc-a",
+      "label": "VPC A",
+      "kind": "vpc",
+      "parent": "vpc-b"
+    },
+    {
+      "id": "vpc-b",
+      "label": "VPC B",
+      "kind": "vpc",
+      "parent": "vpc-a"
+    }
+  ],
+  "edges": [],
+  "collapsed": []
+}
