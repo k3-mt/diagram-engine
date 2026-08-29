@@ -22,10 +22,14 @@ services:
       GIT_COMMITTER_NAME: topology-build
       GIT_COMMITTER_EMAIL: build@localhost
       ROUNDS: ${ROUNDS:-60}
+      JOBS: ${JOBS:-2}
+    # run.sh --rounds 0 bootstraps (writes LEDGER.md) and stops; run-phases.sh
+    # then drives the ledger with JOBS builders in parallel per phase.
     command: >
       bash -lc "git config --global --add safe.directory /work &&
                 npm ci &&
-                bash scripts/run.sh --unattended --rounds $${ROUNDS}"
+                bash scripts/run.sh --unattended --rounds 0 &&
+                bash scripts/run-phases.sh --unattended -j $${JOBS} --rounds $${ROUNDS}"
 
 volumes:
   topology-node-modules:
