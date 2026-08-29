@@ -28,6 +28,16 @@ export const NODE = {
  */
 export const LABEL_FONT = '600 14px system-ui, sans-serif';
 
+/**
+ * The font EDGE labels are measured in — smaller and lighter than node
+ * labels so they read as annotations on the line, not boxes. The
+ * renderer must draw edge labels with this same font.
+ */
+export const EDGE_LABEL_FONT = '500 11px system-ui, sans-serif';
+
+/** Height of an edge label box handed to ELK (one 11px line + leading). */
+export const EDGE_LABEL_H = 14;
+
 /** Clamp v into [lo, hi]. */
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -97,22 +107,31 @@ function estimateWidth(label: string): number {
 
 const widthCache = new Map<string, number>();
 
+/** Px size parsed from a CSS font shorthand, for scaling the estimate. */
+function fontPx(font: string): number {
+  const m = /(\d+(?:\.\d+)?)px/.exec(font);
+  return m ? Number(m[1]) : 14;
+}
+
 /**
- * Width of a label in px, measured with the cached offscreen canvas
- * when available, else the deterministic estimate. Cached by string.
+ * Width of a label in px at the given font (default: the node label
+ * font), measured with the cached offscreen canvas when available,
+ * else the deterministic estimate (calibrated at 14px, scaled linearly
+ * to the font's px size). Cached by font + string.
  */
-export function measureText(label: string): number {
-  const hit = widthCache.get(label);
+export function measureText(label: string, font: string = LABEL_FONT): number {
+  const key = `${font}\u0000${label}`;
+  const hit = widthCache.get(key);
   if (hit !== undefined) return hit;
   const ctx = canvasContext();
   let w: number;
   if (ctx) {
-    ctx.font = LABEL_FONT; // reassert: other callers may share the context
+    ctx.font = font; // reassert: other callers may share the context
     w = ctx.measureText(label).width;
   } else {
-    w = estimateWidth(label);
+    w = estimateWidth(label) * (fontPx(font) / 14);
   }
-  widthCache.set(label, w);
+  widthCache.set(key, w);
   return w;
 }
 

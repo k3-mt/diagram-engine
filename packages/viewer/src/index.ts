@@ -59,6 +59,65 @@ export {
   type Span,
 } from './geometry';
 
+// --- M4 renderer (spec §8) -------------------------------------------------
+// Everything here is React + pure math. layout/elkBrowser.ts and main.tsx are
+// deliberately NOT re-exported: they are browser-only (vite `?worker` syntax /
+// DOM mount) and would break any Node consumer, vitest included.
+export { Canvas, FrameLayers, CROSSFADE_MS, type CanvasProps } from './render/Canvas.js';
+export { EdgeLabel, EdgePath, ArrowMarker, ARROW_MARKER_ID, EDGE_DASH } from './render/EdgePath.js';
+export { GroupLabel, GroupRect, GROUP_LABEL_FONT } from './render/GroupRect.js';
+export { NodeBox, NodeContent, labelWidth, truncateToWidth } from './render/NodeBox.js';
+export { ICON_SIZE, NODE_ICONS } from './render/icons.js';
+export { theme } from './render/theme.js';
+export {
+  StatusBar,
+  BAR_HEIGHT,
+  CONNECTION_COLOR,
+  CONNECTION_LABEL,
+  countsText,
+  lastUpdateText,
+  useElapsed,
+  useFlash,
+  docErrorText,
+  ERROR_COLOR,
+  FLASH_MS,
+  type DocError,
+  type StatusBarProps,
+  type StatusCounts,
+} from './render/StatusBar.js';
+export {
+  useViewport,
+  fitToContent,
+  clampScale,
+  panBy,
+  wheelZoomFactor,
+  zoomAt,
+  viewportTransform,
+  boundsEqual,
+  FIT_ANIMATION_MS,
+  FIT_PAD,
+  MAX_FIT_SCALE,
+  MAX_SCALE,
+  MIN_SCALE,
+  type Bounds,
+  type Viewport,
+} from './render/viewport.js';
+
+// --- M5 live document feed (spec §9) ---------------------------------------
+export {
+  connectViewer,
+  defaultWsUrl,
+  parseDocMessage,
+  parseServerMessage,
+  DOWN_AFTER_MS,
+  RECONNECT_BASE_MS,
+  RECONNECT_MAX_MS,
+  type ConnectionState,
+  type ServerFrame,
+  type ViewerSocket,
+  type ViewerSocketOptions,
+} from './ws.js';
+
 // --- Debug renderer frame (M2 step 9 / M3 exit) ----------------------------
 export {
   buildFrame,

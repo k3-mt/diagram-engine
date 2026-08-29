@@ -18,8 +18,8 @@
 
 import type { GraphDoc } from '@diagram-engine/core';
 import type { ElkExtendedEdge, ElkNode } from 'elkjs';
-import { sizeNode } from './measure.js';
-import { GROUP_OPTIONS, ROOT_OPTIONS } from './options.js';
+import { EDGE_LABEL_FONT, EDGE_LABEL_H, measureText, sizeNode } from './measure.js';
+import { EDGE_LABEL_OPTIONS, GROUP_OPTIONS, ROOT_OPTIONS } from './options.js';
 
 /** Id of the synthetic ELK root container. */
 export const ELK_ROOT_ID = 'root';
@@ -68,12 +68,25 @@ export function toElk(doc: GraphDoc): ElkNode {
   }
 
   // Pass 4: edges, each declared in the LCA container of its endpoints.
+  // A labelled edge declares its label to ELK (sized at the smaller
+  // EDGE_LABEL_FONT) so layout reserves space and places it inline on
+  // the edge path (EDGE_LABEL_OPTIONS); fromElk reads the position back.
   for (const e of doc.edges) {
     const edge: ElkExtendedEdge = {
       id: e.id,
       sources: [e.from],
       targets: [e.to],
     };
+    if (e.label !== undefined) {
+      edge.labels = [
+        {
+          text: e.label,
+          width: measureText(e.label, EDGE_LABEL_FONT),
+          height: EDGE_LABEL_H,
+          layoutOptions: { ...EDGE_LABEL_OPTIONS },
+        },
+      ];
+    }
     const container = lcaContainer(e.from, e.to, parentOf, containers) ?? root;
     container.edges!.push(edge);
   }

@@ -1,0 +1,29 @@
+{
+  // Build config for the `diagram` binary.
+  //
+  // Why not project references? @diagram-engine/core is consumed as TypeScript
+  // SOURCE through the workspace (its package.json "main" is src/index.ts and
+  // it emits nothing), so there is no core .js for Node to import at runtime.
+  // The simplest thing that works: the CLI imports core by relative path
+  // (../../../core/src/index.js) and tsc compiles both trees in one pass.
+  //
+  // rootDir is the packages/ directory, so the layout under dist/ mirrors it:
+  //
+  //   packages/cli/src/bin/diagram.ts   ->  packages/cli/dist/cli/src/bin/diagram.js
+  //   packages/core/src/index.ts        ->  packages/cli/dist/core/src/index.js
+  //   (viewer bundle, built separately) ->  packages/cli/dist/public/
+  //
+  // The relative core import therefore resolves identically in src/ and in
+  // dist/. `npm run build` then writes dist/bin/diagram.js — a two-line ESM
+  // shim with the shebang — so the published "bin" path stays stable no
+  // matter how the compiled tree is laid out.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "..",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src"]
+}

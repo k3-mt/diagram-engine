@@ -3,3 +3,4 @@ dist/
 .diagram/history/
 .diagram/errors.txt
 .diagram/out.svg
+.diagram/

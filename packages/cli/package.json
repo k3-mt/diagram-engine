@@ -5,9 +5,20 @@
   "description": "diagram / diagram-mcp binaries: CLI commands, MCP stdio server, viewer server.",
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "diagram": "dist/bin/diagram.js"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json && node scripts/emit-bin-shim.mjs"
   },
   "dependencies": {
     "@diagram-engine/core": "0.0.0",

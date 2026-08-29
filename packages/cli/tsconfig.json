@@ -4,5 +4,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "bin", "commands", "mcp", "serve"]
+  "include": ["src", "tests", "vitest.config.ts"]
 }

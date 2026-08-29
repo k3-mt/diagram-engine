@@ -39,3 +39,26 @@ export const GROUP_OPTIONS: LayoutOptions = {
   'elk.padding': '[top=44,left=20,bottom=20,right=20]',
   'elk.spacing.nodeNode': '36',
 };
+
+/**
+ * Per-LABEL options for edge labels (attached to each ElkLabel in
+ * toElk, not to the root — both options target labels in ELK).
+ *
+ * Choice, researched against elkjs 0.9.3 (ELK 0.9.x):
+ * - 'elk.edgeLabels.inline': 'true' — the layered algorithm treats the
+ *   label as part of the edge itself: it reserves a dummy node for the
+ *   label in a layer and routes the edge THROUGH the label's box, so
+ *   the label's center lands ON the edge path. This is exactly the
+ *   "label sits on the line" look we want with layered+orthogonal.
+ *   The alternative, plain 'elk.edgeLabels.placement': 'CENTER'
+ *   without inline, places the label BESIDE the edge (offset to one
+ *   side per layered.edgeLabels.sideSelection), which reads as
+ *   floating text that is easy to attribute to the wrong edge.
+ * - 'elk.edgeLabels.placement': 'CENTER' — keep the label at the
+ *   middle of the edge run (vs HEAD/TAIL), which is where inline
+ *   labels are expected; harmless with inline and self-documenting.
+ */
+export const EDGE_LABEL_OPTIONS: LayoutOptions = {
+  'elk.edgeLabels.inline': 'true',
+  'elk.edgeLabels.placement': 'CENTER',
+};

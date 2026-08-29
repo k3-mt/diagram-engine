@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "test": "vitest run",
+    "build": "npm run build --workspace @diagram-engine/cli && npm run build --workspace @diagram-engine/viewer",
     "typecheck": "npm run typecheck --workspaces",
     "check:no-model-sdk": "node scripts/check-no-model-sdk.mjs"
   },

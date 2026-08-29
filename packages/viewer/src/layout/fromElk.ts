@@ -43,11 +43,11 @@ export interface AbsEdgeLabel {
   height: number;
 }
 
-/** A flattened edge: absolute polyline points (+ labels when ELK placed any). */
+/** A flattened edge: absolute polyline points (+ label when the edge has one). */
 export interface AbsEdge {
   id: string;
   points: AbsPoint[];
-  labels?: AbsEdgeLabel[];
+  label?: AbsEdgeLabel;
 }
 
 /** Result of flattening an ELK layout to absolute coordinates. */
@@ -99,20 +99,28 @@ export function flatten(elkRoot: ElkNode): LaidOut {
     const o = origins.get(n.id);
     if (o !== undefined) {
       for (const e of n.edges ?? []) {
-        const labels: AbsEdgeLabel[] = (e.labels ?? []).map((l) => ({
-          text: l.text ?? '',
-          x: (l.x ?? 0) + o.x,
-          y: (l.y ?? 0) + o.y,
-          width: l.width ?? 0,
-          height: l.height ?? 0,
-        }));
+        // ELK positions edge labels relative to the SAME container as
+        // the edge's sections (the LCA that toElk declared the edge
+        // in), so the label takes the same offset as the points. A
+        // GEdge has at most one label (§3.1), hence the first entry.
+        const l = (e.labels ?? [])[0];
+        const label: AbsEdgeLabel | undefined =
+          l === undefined
+            ? undefined
+            : {
+                text: l.text ?? '',
+                x: (l.x ?? 0) + o.x,
+                y: (l.y ?? 0) + o.y,
+                width: l.width ?? 0,
+                height: l.height ?? 0,
+              };
         for (const s of e.sections ?? []) {
           const pts = [s.startPoint, ...(s.bendPoints ?? []), s.endPoint].map(
             (p) => ({ x: p.x + o.x, y: p.y + o.y }),
           );
           edges.push(
-            labels.length > 0
-              ? { id: e.id, points: pts, labels }
+            label !== undefined
+              ? { id: e.id, points: pts, label }
               : { id: e.id, points: pts },
           );
         }
