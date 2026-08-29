@@ -107,6 +107,17 @@ export function attachDocSync(server: http.Server, dir: string): DocSync {
       deliver({ type: 'error', errors: r.errors }, target);
       return;
     }
+    // Valid again: CLEAR errors.txt before repainting. The instructions
+    // `diagram init` writes tell a file-protocol agent to read this file
+    // straight after a hand edit (spec §4.3, path C), so a stale failure left
+    // on disk tells that agent its correct edit is still broken and it loops
+    // fixing an error that no longer exists.
+    try {
+      fs.rmSync(p.errorsFile, { force: true });
+    } catch {
+      // Read-only directory or a race with another writer; the repaint below
+      // is still the truth, so nothing here is worth failing for.
+    }
     deliver({ type: 'doc', doc: r.doc }, target);
   };
 

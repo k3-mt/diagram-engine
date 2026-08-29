@@ -32,6 +32,13 @@
 
 import type { CSSProperties } from 'react';
 import type { GNode } from '@diagram-engine/core';
+// Runtime import of the core SOURCE module, not the barrel (node:fs) — the
+// same route toSvg.ts and NodeBox.tsx take.
+import {
+  COLLAPSED_META_KEY,
+  collapsedGroupKind,
+  isCollapsedGroupNode,
+} from '../../../core/src/view/derive.js';
 import { theme } from './theme.js';
 
 /** Card width, px. Fixed so the flip math needs no measurement. */
@@ -48,9 +55,31 @@ const HEAD_H = 46;
 const SECTION_GAP = 8;
 const PAD = 10;
 
+/**
+ * The meta rows actually shown. COLLAPSED_META_KEY is deriveView's private
+ * marker for the stand-in it emits for a collapsed group (§7) — it is not
+ * something the author wrote, so listing it as `collapsed  vpc` beside the
+ * user's own metadata would be inventing a document field. Its value is
+ * shown in the kind line instead, where it belongs.
+ */
+export function visibleMeta(node: GNode): [string, string][] {
+  return Object.entries(node.meta ?? {}).filter(([k]) => k !== COLLAPSED_META_KEY);
+}
+
+/**
+ * The line under the label: what this box IS. A collapsed group says so in
+ * its own words ("collapsed vpc") rather than reporting the `external` type
+ * derive.ts had to borrow to stay inside the published type enum.
+ */
+export function kindText(node: GNode): string {
+  if (!isCollapsedGroupNode(node)) return node.type;
+  const kind = collapsedGroupKind(node);
+  return kind === undefined || kind === '' ? 'collapsed group' : `collapsed ${kind}`;
+}
+
 /** Estimated card height for `node`, used by the flip math. */
 export function cardHeight(node: GNode): number {
-  const metaCount = node.meta === undefined ? 0 : Object.keys(node.meta).length;
+  const metaCount = visibleMeta(node).length;
   const fieldCount = node.fields?.length ?? 0;
   let h = HEAD_H + PAD;
   if (node.note !== undefined) h += LINE_H + 2;
@@ -138,7 +167,7 @@ const sectionStyle: CSSProperties = {
 /** The panel. Renders nothing but markup — no effects, no state. */
 export function HoverCard({ node, x, y, vw, vh }: HoverCardProps): JSX.Element {
   const place = placeCard(x, y, vw, vh, cardHeight(node));
-  const meta = Object.entries(node.meta ?? {});
+  const meta = visibleMeta(node);
   const fields = node.fields ?? [];
 
   return (
@@ -169,7 +198,7 @@ export function HoverCard({ node, x, y, vw, vh }: HoverCardProps): JSX.Element {
     >
       <div style={{ font: '600 13px system-ui, sans-serif' }}>{node.label}</div>
       <div style={{ color: theme.text.secondary, marginTop: 2 }}>
-        <span style={{ color: theme.accent[node.type] }}>●</span> {node.type}
+        <span style={{ color: theme.accent[node.type] }}>●</span> {kindText(node)}
       </div>
       {node.note === undefined ? null : (
         <div data-hover-note style={{ marginTop: 6, whiteSpace: 'normal' }}>

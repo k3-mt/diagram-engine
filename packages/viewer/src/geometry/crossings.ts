@@ -4,7 +4,7 @@
 // Collinear overlaps (h-vs-h, v-vs-v) are a separate problem that the
 // `edgeEdge` layout spacing mostly prevents; ignored for the PoC per spec.
 
-import type { Seg } from './segments';
+import type { Seg } from './segments.js';
 
 /** Arc radius of a hop (px). */
 export const HOP_R = 6;

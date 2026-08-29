@@ -4,9 +4,9 @@
 // Node/vitest. Geometry is derived per frame and NEVER persisted to the
 // document (spec §1.4/§3.1).
 
-import type { Seg } from './segments';
-import { HOP_R } from './crossings';
-import { segKey, type Span } from './hops';
+import type { Seg } from './segments.js';
+import { HOP_R } from './crossings.js';
+import { segKey, type Span } from './hops.js';
 
 /**
  * One absolute SVG path command. Every command is tagged with the index of

@@ -1,8 +1,22 @@
 {
+  // Typecheck config for @diagram-engine/cli (src + tests).
+  //
+  // `jsx` and the DOM lib are here because `diagram export svg` imports the
+  // viewer's headless renderer (packages/viewer/src/export/toSvg.ts), which
+  // serialises the viewer's own React components and measures text against a
+  // canvas when one exists. Typechecking the CLI therefore typechecks that
+  // subtree, which is the point: the binding is compiler-checked rather than
+  // resolved at runtime and discovered broken by a user.
+  //
+  // Nothing in packages/cli itself may USE a DOM global. tests/integration
+  // walks the compiled import graph and would not catch that; code review is
+  // the guard. Node is the runtime here and always will be.
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx"
   },
   "include": ["src", "tests", "vitest.config.ts"]
 }

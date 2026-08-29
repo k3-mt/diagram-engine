@@ -1,7 +1,7 @@
 // render/StatusBar.tsx — the thin bottom strip (spec §8.4).
 //
 //   Checkout platform   11 nodes · 2 groups · 9 edges   [exec] [eng] [focus]
-//   ● connected                                  last update 2s ago    ⌘S
+//   ● connected                     last update 2s ago   [SVG ⌘S] [PNG 2×]
 //
 // Everything the browser window needs, given the terminal is elsewhere.
 // The connection dot matters: when the agent's MCP process dies or
@@ -9,8 +9,14 @@
 // wonder why the diagram stopped updating. Green connected, amber on
 // reconnect, red after 5s down.
 //
-// The [exec] [eng] [focus] view buttons are M7 — this component accepts an
-// optional `views` slot and renders nothing for it today.
+// The [exec] [eng] [focus] view buttons (M7) go in the optional `views` slot,
+// which main.tsx fills with <ViewButtons>. The bar itself stays dumb about
+// views: it is handed a node and gives it a place to sit, so the strip has no
+// opinion about collapse and the button logic stays in view/viewState.ts.
+// Without the slot nothing is rendered, which is what every existing caller
+// and test relies on. The `save` slot at the far right works the same way and
+// holds <SaveButtons> — the ⌘S of the §8.4 mock, finally attached to
+// something (export/save.ts).
 //
 // §9: when graph.json fails to parse or validate the server keeps the last
 // good diagram on screen and sends {type:'error'} instead of a repaint. The
@@ -143,6 +149,8 @@ export interface StatusBarProps {
   flashMs?: number;
   /** M7 view buttons ([exec] [eng] [focus]); nothing is rendered without it. */
   views?: ReactNode;
+  /** M7 save controls ([SVG ⌘S] [PNG 2×]); nothing is rendered without it. */
+  save?: ReactNode;
   /** Tick period for the elapsed label, ms (tests pass a short one). */
   tickMs?: number;
 }
@@ -175,6 +183,7 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
     connection,
     lastUpdate,
     views,
+    save,
     tickMs = 1000,
     docError = null,
     flashMs = FLASH_MS,
@@ -203,7 +212,14 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
     >
       <span style={{ color: theme.text.primary, fontWeight: 600 }}>{title}</span>
       <span>{countsText(counts)}</span>
-      {views ?? null}
+      {views === undefined || views === null ? null : (
+        <span
+          data-testid="view-slot"
+          style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+        >
+          {views}
+        </span>
+      )}
       <span style={{ flex: 1 }} />
       <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <span
@@ -228,6 +244,14 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
           style={{ color: ERROR_COLOR, fontWeight: 600 }}
         >
           {docErrorText(docError.errors)}
+        </span>
+      )}
+      {save === undefined || save === null ? null : (
+        <span
+          data-testid="save-slot"
+          style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+        >
+          {save}
         </span>
       )}
     </div>

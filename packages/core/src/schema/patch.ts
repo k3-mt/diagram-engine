@@ -102,6 +102,12 @@ export type PatchOp = z.infer<typeof PatchOpSchema>;
 /** GraphPatch (spec §3.2): { ops, summary }. */
 export const GraphPatchSchema = z.object({
   ops: z.array(PatchOpSchema),
-  summary: z.string(),
+  // The message says what to do, like every other constraint in the schema
+  // (spec §3.3). A CLI-path agent has no generated JSON Schema to read, and
+  // "expected string, received undefined" does not tell it that the key is
+  // required, let alone what belongs in it.
+  summary: z.string({
+    error: 'summary is required: one line saying what this patch changes',
+  }),
 });
 export type GraphPatch = z.infer<typeof GraphPatchSchema>;

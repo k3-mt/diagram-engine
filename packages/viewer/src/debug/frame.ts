@@ -9,7 +9,7 @@
 
 import type { GraphDoc } from '@diagram-engine/core';
 import type { LaidOut, Rect } from '../layout/fromElk.js';
-import { composeFramePaths } from '../geometry';
+import { composeFramePaths } from '../geometry/index.js';
 
 export interface DebugGroup {
   id: string;

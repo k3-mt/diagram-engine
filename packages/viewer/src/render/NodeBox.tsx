@@ -12,9 +12,13 @@
 
 import type { MouseEventHandler } from 'react';
 import type { GNode } from '@diagram-engine/core';
+// Runtime (value) import of the core SOURCE module rather than the barrel:
+// the barrel re-exports store/ (node:fs), which must not be dragged into the
+// browser bundle. toSvg.ts takes the same route for the same reason.
+import { isCollapsedGroupNode } from '../../../core/src/view/derive.js';
 import type { Rect } from '../layout/fromElk.js';
 import { ACCENT_W, LABEL_FONT, NODE, measureText } from '../layout/measure.js';
-import { NODE_ICONS, ICON_SIZE } from './icons.js';
+import { CollapsedGroupIcon, NODE_ICONS, ICON_SIZE } from './icons.js';
 import { theme } from './theme.js';
 
 /**
@@ -127,9 +131,25 @@ export function NodeBox({ node, rect, ...hover }: NodeBoxProps): JSX.Element {
   );
 }
 
+/**
+ * The glyph a node is drawn with. Normally its type's, from §8.2 — EXCEPT
+ * for the stand-in deriveView emits for a collapsed group (§7). That node
+ * carries `type: "external"` because the type enum is a published contract
+ * and a render-time concern must not widen it (derive.ts decision 1), but
+ * the external glyph is a cloud meaning "a third party you don't control".
+ * Drawing that over the reader's own collapsed VPC — in the exec view, the
+ * one moment collapse exists for — states something false, and makes the
+ * closed boundary indistinguishable from a genuine SaaS node beside it. So
+ * the collapsed marker is tested FIRST. The grey `external` accent stays: it
+ * is the neutral one, and it is the right colour for a closed box.
+ */
+export function nodeIcon(node: GNode): (props: { x?: number; y?: number }) => JSX.Element {
+  return isCollapsedGroupNode(node) ? CollapsedGroupIcon : NODE_ICONS[node.type];
+}
+
 /** Layer 6: the type icon plus the label (and optional note line). */
 export function NodeContent({ node, rect, ...hover }: NodeBoxProps): JSX.Element {
-  const Icon = NODE_ICONS[node.type];
+  const Icon = nodeIcon(node);
   const accent = theme.accent[node.type];
   const avail = labelWidth(rect);
   const label = truncateToWidth(node.label, avail, LABEL_FONT);
@@ -143,7 +163,12 @@ export function NodeContent({ node, rect, ...hover }: NodeBoxProps): JSX.Element
   const labelY = note === undefined ? midY : midY - 8;
 
   return (
-    <g data-node-content={node.id} data-layer="node-content" {...hover}>
+    <g
+      data-node-content={node.id}
+      data-layer="node-content"
+      data-collapsed-group={isCollapsedGroupNode(node) ? 'true' : undefined}
+      {...hover}
+    >
       <g style={{ color: accent }}>
         <Icon x={cx} y={cy} />
       </g>

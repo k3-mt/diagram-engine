@@ -3,7 +3,7 @@
 // and self-corrects, so these assertions are string-exact.
 
 import { describe, expect, it } from 'vitest';
-import { validate } from '../src/index.js';
+import { nearestId, validate } from '../src/index.js';
 import { doc, edge, group, node } from './helpers.js';
 
 function errorsOf(d: Parameters<typeof validate>[0]): string[] {
@@ -233,5 +233,31 @@ describe('V10 — no edge from a group to its own descendant', () => {
       edges: [edge('e1', 'postgres', 'vpc')],
     });
     expect(validate(d)).toEqual({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M6 audit fix — the suggestion bound.
+//
+// Rule 11 tells the agent to trust the id in the error instead of calling
+// diagram_get again, so a suggestion is not a harmless hint: a wrong one is a
+// wrong edge drawn confidently. The old bound (max(3, ...)) allowed three of
+// the five letters of "ghost" to differ and offered "ios".
+// ---------------------------------------------------------------------------
+
+describe('nearestId — a suggestion has to be plausible', () => {
+  it('does not offer a short, unrelated id', () => {
+    expect(nearestId('ghost', ['ios', 'web', 'api-gateway'])).toBeUndefined();
+  });
+
+  it('still offers a genuine typo', () => {
+    expect(nearestId('redsi', ['redis', 'postgres'])).toBe('redis');
+    expect(nearestId('postgress', ['postgres', 'kafka'])).toBe('postgres');
+  });
+
+  it('still offers a prefix relationship however long the tail', () => {
+    expect(nearestId('redis', ['redis-cache-primary', 'postgres'])).toBe(
+      'redis-cache-primary',
+    );
   });
 });

@@ -4,9 +4,9 @@
 // list from path.ts instead of the raw polyline. Pure function — no DOM,
 // safe under Node/vitest.
 
-import type { Seg } from './segments';
-import { segKey, type Span } from './hops';
-import type { PathCmd } from './path';
+import type { Seg } from './segments.js';
+import { segKey, type Span } from './hops.js';
+import type { PathCmd } from './path.js';
 
 /** Corner radius (px): the trim distance on each side of a bend. */
 export const CORNER_R = 8;

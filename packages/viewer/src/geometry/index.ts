@@ -4,12 +4,12 @@
 // function, exported individually below. Geometry is derived per frame and
 // NEVER persisted to the document (spec §1.4/§3.1).
 
-import { toSegments, type AbsEdge } from './segments';
-import { findCrossings, type Rect } from './crossings';
-import { buildHopSpans } from './hops';
-import { buildPathCmds, serializePath } from './path';
-import { roundCorners } from './corners';
-import type { Seg } from './segments';
+import { toSegments, type AbsEdge } from './segments.js';
+import { findCrossings, type Rect } from './crossings.js';
+import { buildHopSpans } from './hops.js';
+import { buildPathCmds, serializePath } from './path.js';
+import { roundCorners } from './corners.js';
+import type { Seg } from './segments.js';
 
 /**
  * Compose the final SVG path for one edge.
@@ -65,7 +65,7 @@ export function composeFramePaths(
 }
 
 // Stage exports — each usable standalone (and individually tested).
-export { toSegments, type AbsEdge, type Point, type Seg } from './segments';
+export { toSegments, type AbsEdge, type Point, type Seg } from './segments.js';
 export {
   findCrossings,
   pointNear,
@@ -74,7 +74,7 @@ export {
   NODE_GUARD,
   type Crossing,
   type Rect
-} from './crossings';
-export { buildHopSpans, mergeClusters, segKey, type Span } from './hops';
-export { buildPath, buildPathCmds, serializePath, type PathCmd } from './path';
-export { roundCorners, CORNER_R, MIN_ROUND_SEG, HOP_CLEARANCE } from './corners';
+} from './crossings.js';
+export { buildHopSpans, mergeClusters, segKey, type Span } from './hops.js';
+export { buildPath, buildPathCmds, serializePath, type PathCmd } from './path.js';
+export { roundCorners, CORNER_R, MIN_ROUND_SEG, HOP_CLEARANCE } from './corners.js';

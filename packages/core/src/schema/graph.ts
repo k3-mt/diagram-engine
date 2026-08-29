@@ -74,6 +74,23 @@ export const GFieldSchema = z.object({
 export type GField = z.infer<typeof GFieldSchema>;
 
 /**
+ * Meta keys that would smuggle geometry into the document. The layout engine
+ * owns every position and size (spec §1.3), and rules.md says so in prose —
+ * this is the same sentence with teeth, so an agent that ignores the prose is
+ * corrected by the schema instead of silently poisoning graph.json.
+ */
+export const GEOMETRY_META_KEYS = new Set([
+  'x', 'y', 'w', 'h', 'cx', 'cy', 'dx', 'dy',
+  'width', 'height', 'top', 'left', 'right', 'bottom',
+  'pos', 'position', 'coord', 'coords', 'coordinates',
+  'layout', 'waypoint', 'waypoints', 'points', 'path', 'rect', 'bbox', 'size',
+]);
+
+/** The one message for a geometry key, taken from rules.md's own wording. */
+export const GEOMETRY_META_MESSAGE =
+  'meta is not geometry — the layout engine decides position and size; drop this key';
+
+/**
  * Node metadata — arbitrary detail the agent attaches to ANY node (not just
  * entities); the viewer reveals it in a hover panel. Still meaning, never
  * geometry: no x/y/width/height/waypoint may be stored here.
@@ -91,10 +108,29 @@ export const GMetaSchema = z
   .refine((m) => Object.keys(m).length <= MAX_META_KEYS, {
     message: `too many meta keys: keep at most ${MAX_META_KEYS}; merge or drop entries`,
   })
+  // Rule zero, enforced rather than merely asked for (spec §1.3, §3.1: geometry
+  // is NEVER persisted). meta accepts any short lowercase key, so without this
+  // an agent could write {"x":"120","y":"40"} into a node and that geometry
+  // would survive every patch and be committed to git with graph.json.
+  .refine((m) => Object.keys(m).every((k) => !GEOMETRY_META_KEYS.has(k)), {
+    message: GEOMETRY_META_MESSAGE,
+  })
   // The refine itself is invisible to JSON Schema generation, so state the cap
   // declaratively too — that is what the MCP tool schema shows the agent.
   .meta({ maxProperties: MAX_META_KEYS });
 export type GMeta = z.infer<typeof GMetaSchema>;
+
+/**
+ * `parent` on a node or a group: the containing group id, or null for top
+ * level. The key is REQUIRED — omitting it is the most common first mistake a
+ * CLI-path agent makes, and the default zod message ("expected string,
+ * received undefined") names only `string`, which reads as an instruction to
+ * invent a group id and earns a second, different rejection. So the message
+ * says the whole truth, in the same say-what-to-do voice as IdSchema.
+ */
+export const ParentSchema = z.union([z.string(), z.null()], {
+  error: 'parent is required: the containing group id, or null for top level',
+});
 
 /** GNode (spec §3.1). */
 export const GNodeSchema = z.object({
@@ -103,8 +139,8 @@ export const GNodeSchema = z.object({
   /** 1–40 chars */
   label: z.string().min(1).max(40),
   type: NodeTypeSchema,
-  /** group id or null */
-  parent: z.string().nullable(),
+  /** group id or null — REQUIRED, and null is how you say "top level" */
+  parent: ParentSchema,
   /** optional second line, 1–60 chars */
   note: z.string().min(1).max(60).optional(),
   /** ERD columns; meaningful on type "entity", at most 40 */
@@ -126,7 +162,8 @@ export const GGroupSchema = z.object({
   /** 1–40 chars */
   label: z.string().min(1).max(40),
   kind: GroupKindSchema,
-  parent: z.string().nullable(),
+  /** enclosing group id, or null for a top-level boundary. Required. */
+  parent: ParentSchema,
 });
 export type GGroup = z.infer<typeof GGroupSchema>;
 

@@ -10,7 +10,9 @@ import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CardinalitySchema,
+  formatIssues,
   GEdgeSchema,
+  GGroupSchema,
   GNodeSchema,
   GraphDocSchema,
   MAX_FIELDS,
@@ -307,4 +309,53 @@ describe('backward compatibility', () => {
       expect(JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, name), 'utf8'))).toEqual(raw);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// M6 audit fixes — the two schema messages an agent self-corrects from.
+// ---------------------------------------------------------------------------
+
+describe('parent is required, and says so (spec §3.3: say what to do)', () => {
+  it('rejects a node with no parent key, naming null as the top-level answer', () => {
+    const r = GNodeSchema.safeParse({ id: 'api', label: 'API', type: 'service' });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    const msg = formatIssues(r.error.issues).join('\n');
+    // The old message ("expected string, received undefined") named only
+    // `string`, so the obvious self-correction was to invent a group id — which
+    // then failed a second time with "unknown parent".
+    expect(msg).toContain('parent is required');
+    expect(msg).toContain('null for top level');
+    expect(msg).not.toContain('received undefined');
+  });
+
+  it('accepts null and accepts a group id', () => {
+    expect(GNodeSchema.safeParse(node('api', { parent: null })).success).toBe(true);
+    expect(GNodeSchema.safeParse(node('api', { parent: 'vpc' })).success).toBe(true);
+  });
+
+  it('says the same thing for a group', () => {
+    const r = GGroupSchema.safeParse({ id: 'vpc', label: 'VPC', kind: 'vpc' });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    expect(formatIssues(r.error.issues).join('\n')).toContain('parent is required');
+  });
+});
+
+describe('meta may never carry geometry (spec §1.3, §3.1)', () => {
+  it('rejects every geometry-shaped key', () => {
+    for (const key of ['x', 'y', 'width', 'height', 'waypoints', 'position', 'layout']) {
+      const r = GNodeSchema.safeParse(node('api', { meta: { [key]: '120' } }));
+      expect(r.success, `meta.${key} must be rejected`).toBe(false);
+      if (r.success) continue;
+      expect(formatIssues(r.error.issues).join('\n')).toContain('meta is not geometry');
+    }
+  });
+
+  it('still accepts ordinary meta', () => {
+    const r = GNodeSchema.safeParse(
+      node('api', { meta: { owner: 'payments', region: 'us-east-1' } }),
+    );
+    expect(r.success).toBe(true);
+  });
 });

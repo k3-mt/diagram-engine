@@ -8,6 +8,14 @@
 //
 // Pure module: no DOM access except behind the explicit feature check
 // in canvasContext(), with a deterministic fallback.
+//
+// Measurement is also an INJECTABLE STRATEGY (setMeasureStrategy): the
+// browser installs nothing and keeps the canvas path byte-for-byte, while
+// a headless caller can pin measurement to the deterministic table. The
+// export path (export/toSvg.ts) leans on that to PROVE, before it lays
+// anything out, that measurement is neither zero nor constant — a
+// measurement stuck at zero does not throw, it just yields a diagram of
+// overlapping minimum-width boxes that looks like it worked.
 
 import type { GField, GNode } from '@diagram-engine/core';
 import type { Size } from './types.js';
@@ -163,22 +171,91 @@ function fontPx(font: string): number {
 }
 
 /**
+ * The deterministic, canvas-free width estimate: the per-character table
+ * above, calibrated at 14px and scaled linearly to the font's px size.
+ *
+ * Exported because headless SVG export (export/toSvg.ts) has to be able
+ * to assert that this path is live and sane. A measurement that silently
+ * answers 0 for every string still "lays out" — it just produces a pile
+ * of overlapping boxes with no error at all, which is the worst failure
+ * mode available here. Never returns 0 for a non-empty string.
+ */
+export function estimateTextWidth(
+  label: string,
+  font: string = LABEL_FONT,
+): number {
+  return estimateWidth(label) * (fontPx(font) / 14);
+}
+
+/**
+ * A pluggable text-measurement strategy: string + CSS font shorthand -> px.
+ * Install one with `setMeasureStrategy` to take measurement over entirely
+ * (a Node-side font metrics table, a deterministic snapshot fixture).
+ * Null — the default — leaves the built-in canvas/estimate pair below
+ * exactly as it was.
+ */
+export type MeasureStrategy = (label: string, font: string) => number;
+
+let strategy: MeasureStrategy | null = null;
+
+/**
+ * Install (or, with null, remove) a measurement strategy, clearing the
+ * width cache so nothing measured under the previous one survives.
+ *
+ * The BROWSER never calls this: with no strategy installed `measureText`
+ * takes the canvas branch, so on-screen sizing is BEHAVIOURALLY unchanged —
+ * not byte-identical code, and the claim should not be carried forward as
+ * though it were. Two differences exist and both are unreachable in a
+ * browser: this strategy check runs first (always null there), and the canvas
+ * branch now substitutes the estimate when a context answers 0 for a
+ * non-empty string (a real 2d context never does — see measureText's note).
+ *
+ * PROCESS-GLOBAL MUTABLE STATE. One `strategy` is shared by every caller in
+ * the process, so a test that installs one MUST remove it again — vitest runs
+ * a file's tests in one process with everything else in that project, and a
+ * leaked strategy silently re-measures the rest of the suite. The pattern is
+ * `afterEach(() => setMeasureStrategy(null))`; svgExport.test.ts does it.
+ */
+export function setMeasureStrategy(fn: MeasureStrategy | null): void {
+  strategy = fn;
+  widthCache.clear();
+}
+
+/** The strategy currently installed, or null for the built-in pair. */
+export function currentMeasureStrategy(): MeasureStrategy | null {
+  return strategy;
+}
+
+/**
  * Width of a label in px at the given font (default: the node label
- * font), measured with the cached offscreen canvas when available,
- * else the deterministic estimate (calibrated at 14px, scaled linearly
- * to the font's px size). Cached by font + string.
+ * font): the installed strategy if there is one, else the cached
+ * offscreen canvas when available, else the deterministic estimate.
+ * Cached by font + string.
+ *
+ * The zero guard on the canvas branch is deliberate. A stubbed or
+ * half-implemented 2d context (jsdom, a headless shim) answers
+ * `measureText` with width 0 instead of throwing, and zero-width labels
+ * clamp every box to NODE.minW and collapse ERD rows — a diagram that
+ * looks laid out and is wrong. Falling back to the estimate costs a real
+ * canvas nothing, because a real one never answers 0 for a non-empty
+ * string.
  */
 export function measureText(label: string, font: string = LABEL_FONT): number {
   const key = `${font}\u0000${label}`;
   const hit = widthCache.get(key);
   if (hit !== undefined) return hit;
-  const ctx = canvasContext();
   let w: number;
-  if (ctx) {
-    ctx.font = font; // reassert: other callers may share the context
-    w = ctx.measureText(label).width;
+  if (strategy !== null) {
+    w = strategy(label, font);
   } else {
-    w = estimateWidth(label) * (fontPx(font) / 14);
+    const ctx = canvasContext();
+    if (ctx) {
+      ctx.font = font; // reassert: other callers may share the context
+      w = ctx.measureText(label).width;
+      if (label !== '' && !(w > 0)) w = estimateTextWidth(label, font);
+    } else {
+      w = estimateTextWidth(label, font);
+    }
   }
   widthCache.set(key, w);
   return w;

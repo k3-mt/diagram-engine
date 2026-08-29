@@ -32,10 +32,14 @@ export {
   badgeClusterWidth,
   badgeWidth,
   clamp,
+  currentMeasureStrategy,
+  estimateTextWidth,
   fieldBadges,
   fieldRowWidth,
   measureText,
+  setMeasureStrategy,
   sizeNode,
+  type MeasureStrategy,
 } from './layout/measure.js';
 export { GROUP_OPTIONS, ROOT_OPTIONS } from './layout/options.js';
 export type { Size } from './layout/types.js';
@@ -72,7 +76,7 @@ export {
   type Point,
   type Seg,
   type Span,
-} from './geometry';
+} from './geometry/index.js';
 
 // --- M4 renderer (spec §8) -------------------------------------------------
 // Everything here is React + pure math. layout/elkBrowser.ts and main.tsx are
@@ -195,6 +199,44 @@ export {
   type ViewerSocket,
   type ViewerSocketOptions,
 } from './ws.js';
+
+// --- M7 headless SVG export (spec Part 10 Step 16) -------------------------
+// Node-side: it serialises the very components above through
+// react-dom/server, so `diagram export svg` and the screen cannot drift.
+// main.tsx deliberately does NOT import it — react-dom/server has no business
+// in the browser bundle.
+export {
+  TextMeasurementError,
+  SVG_FONT_CSS,
+  SVG_PADDING,
+  assertTextMeasurement,
+  deterministicMeasureStrategy,
+  exportSvg,
+  exportSvgDetail,
+  renderSvgString,
+  type ExportSvgOptions,
+  type SvgExport,
+  type SvgOptions,
+} from './export/toSvg.js';
+
+// --- M7 views (spec Part 7, §8.4) ------------------------------------------
+// The pure half of the view control. useViewOverride.ts (React) and
+// ViewButtons.tsx (JSX) are reachable from main.tsx and are not re-exported
+// here for the same reason Canvas's browser-only siblings are not.
+export {
+  INITIAL_VIEW_STATE,
+  activePreset,
+  canFocus,
+  collapsedKey,
+  effectiveCollapsed,
+  focusCandidates,
+  focusTarget,
+  inferredFocus,
+  nextFocusTarget,
+  selectPreset,
+  syncToDoc,
+  type ViewState,
+} from './view/viewState.js';
 
 // --- Debug renderer frame (M2 step 9 / M3 exit) ----------------------------
 export {

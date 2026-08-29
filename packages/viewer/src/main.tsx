@@ -3,7 +3,8 @@
 // Data flow, once per document:
 //
 //   diagram serve ──ws {type:'doc'}──▶ connectViewer (ws.ts)
-//        └▶ LayoutClient.request(doc)            §5.4 protocol, stale-discard
+//        └▶ deriveView(doc, collapsed)           §7 collapse-and-merge
+//        └▶ LayoutClient.request(derived)        §5.4 protocol, stale-discard
 //             └▶ handleLayoutRequest + elkWithOwnWorker()   ELK off the UI thread
 //                  └▶ LaidOut ──composeFramePaths (ONCE per frame)──▶ paths[]
 //                       └▶ <Canvas> inside the useViewport transform + <StatusBar>
@@ -18,13 +19,34 @@
 // that page is the fixture test surface and must keep working.
 //
 // Geometry is derived per frame and NEVER persisted to the document (§1.4).
+//
+// SAVING (M7, §8.4's ⌘S). [SVG ⌘S] and [PNG 2×] in the status strip serialise
+// the frame ALREADY ON SCREEN through the same emitter `diagram export svg`
+// uses (export/save.ts), so the saved file and the picture cannot differ —
+// collapse included. Read-only, like the view buttons: no write, no socket
+// traffic, nothing in .diagram/.
+//
+// VIEWS (M7). Everything downstream of the socket draws the DERIVED document,
+// never the stored one: deriveView() is applied exactly once, at the top of
+// the pipeline, so layout, hop geometry, the renderer and the hover panel all
+// see the same node and edge set and a collapsed group is simply a node like
+// any other. Which ids are collapsed comes from useViewOverride — a LOCAL
+// override seeded from doc.collapsed that the status-bar buttons change and
+// that resets whenever the agent changes doc.collapsed. Nothing in this file
+// writes to the document; see view/viewState.ts for the §1.6 argument.
 
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { GNode, GraphDoc } from '@diagram-engine/core';
+// Runtime import of the core SOURCE module rather than the '@diagram-engine/core'
+// barrel — deliberately, and permanently: the barrel re-exports store/, which
+// pulls node:fs into the browser bundle. Same route toSvg.ts and NodeBox.tsx
+// take, for the same reason.
+import { deriveView } from '../../core/src/view/derive.js';
 import { DebugCanvas } from './debug/DebugCanvas.js';
-import { composeFramePaths } from './geometry';
+import { frameToSvg, isSaveShortcut, savePng, saveSvg } from './export/save.js';
+import { composeFramePaths } from './geometry/index.js';
 import { elkWithOwnWorker } from './layout/elkBrowser.js';
 import type { LaidOut, Rect } from './layout/fromElk.js';
 import {
@@ -36,8 +58,11 @@ import {
 import { Canvas } from './render/Canvas.js';
 import { HoverCard } from './render/HoverCard.js';
 import { BAR_HEIGHT, StatusBar, type DocError } from './render/StatusBar.js';
+import { SaveButtons } from './render/SaveButtons.js';
 import { theme } from './render/theme.js';
+import { ViewButtons } from './render/ViewButtons.js';
 import { useViewport } from './render/viewport.js';
+import { useViewOverride } from './view/useViewOverride.js';
 import { connectViewer, type ConnectionState } from './ws.js';
 
 /** WorkerLike speaking the §5.4 protocol on this thread (see header note). */
@@ -256,15 +281,10 @@ export function App(): JSX.Element {
         setDoc(next);
         setLastUpdate(Date.now());
         setDocError(null); // a good doc clears the amber
-
-        if (next.nodes.length === 0 && next.groups.length === 0) {
-          // Nothing to lay out; drop the stale frame so the hint shows.
-          pendingDocRef.current = null;
-          setFrame(null);
-          return;
-        }
-        pendingDocRef.current = next;
-        client.request(next);
+        // Laying it out is NOT done here: the drawn document depends on the
+        // collapsed list as well as on the document, so one effect below owns
+        // the request for both inputs and there is no second code path when a
+        // view button (rather than a patch) changes the picture.
       },
       // NOTE: no setFrame / setDoc here — §9 forbids repainting or blanking
       // the canvas on a rejected document.
@@ -278,6 +298,33 @@ export function App(): JSX.Element {
     };
   }, []);
 
+  // The local view override (§7): seeded from doc.collapsed, changed only by
+  // the status-bar buttons, reset whenever the agent changes doc.collapsed.
+  const views = useViewOverride(doc);
+
+  // The document that is actually DRAWN (§7). Memoised on the collapsed KEY
+  // rather than the array so a re-render for an unrelated reason — a hover, a
+  // pan, the "Xs ago" tick — cannot trigger a fresh layout.
+  // (views.key deliberately stands in for views.collapsed in the deps.)
+  const derived = useMemo(
+    () => (doc === null ? null : deriveView(doc, views.collapsed)),
+    [doc, views.key],
+  );
+
+  // One place requests layout, for both causes (a new document, a new view).
+  useEffect(() => {
+    const client = clientRef.current;
+    if (client === null) return;
+    if (derived === null || (derived.nodes.length === 0 && derived.groups.length === 0)) {
+      // Nothing to lay out; drop the stale frame so the hint shows.
+      pendingDocRef.current = null;
+      setFrame(null);
+      return;
+    }
+    pendingDocRef.current = derived;
+    client.request(derived);
+  }, [derived]);
+
   const { vw, vh } = useCanvasSize();
   const bounds = useMemo(
     () =>
@@ -288,11 +335,57 @@ export function App(): JSX.Element {
   );
   const view = useViewport(bounds, vw, vh);
 
+  // Counts describe WHAT IS ON SCREEN, so they follow the derived document:
+  // saying "11 nodes" over an exec view showing three boxes would describe a
+  // picture the reader cannot see. With nothing collapsed the two are equal,
+  // which is the common case.
+  const shown = derived ?? doc;
   const counts = {
-    nodes: doc?.nodes.length ?? 0,
-    groups: doc?.groups.length ?? 0,
-    edges: doc?.edges.length ?? 0,
+    nodes: shown?.nodes.length ?? 0,
+    groups: shown?.groups.length ?? 0,
+    edges: shown?.edges.length ?? 0,
   };
+
+  // Saving (§8.4). The frame is serialised as-is — no re-layout, no second
+  // renderer — so what lands on disk is what is on screen.
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const frameRef = useRef<Frame | null>(null);
+  frameRef.current = frame;
+
+  const onSaveSvg = useCallback(() => {
+    const f = frameRef.current;
+    if (f === null) return;
+    try {
+      setSaveError(null);
+      saveSvg(frameToSvg(f.doc, f.laidOut, f.paths));
+    } catch (e) {
+      setSaveError(`could not save the SVG: ${(e as Error).message}`);
+    }
+  }, []);
+
+  const onSavePng = useCallback(() => {
+    const f = frameRef.current;
+    if (f === null) return;
+    setSaveError(null);
+    setSaveBusy(true);
+    savePng(frameToSvg(f.doc, f.laidOut, f.paths))
+      .catch((e: Error) => setSaveError(`could not save the PNG: ${e.message}`))
+      .finally(() => setSaveBusy(false));
+  }, []);
+
+  // ⌘S / Ctrl-S saves the SVG, and preventDefault stops the browser's own
+  // "save this page" dialog — which would offer the HTML shell, not the
+  // diagram. Only ever intercepted when there is a frame to save.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!isSaveShortcut(e) || frameRef.current === null) return;
+      e.preventDefault();
+      onSaveSvg();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onSaveSvg]);
 
   // Capability B. The hovered id is resolved against the CURRENT frame, so a
   // document update that removes the node simply closes the card.
@@ -382,6 +475,23 @@ export function App(): JSX.Element {
         connection={connection}
         lastUpdate={lastUpdate}
         docError={docError}
+        views={
+          <ViewButtons
+            active={views.active}
+            focusLabel={views.focusLabel}
+            focusEnabled={views.focusEnabled}
+            onSelect={views.select}
+          />
+        }
+        save={
+          <SaveButtons
+            onSaveSvg={onSaveSvg}
+            onSavePng={onSavePng}
+            enabled={frame !== null}
+            busy={saveBusy}
+            error={saveError}
+          />
+        }
       />
     </div>
   );

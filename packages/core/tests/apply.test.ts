@@ -51,7 +51,10 @@ describe('applyPatch atomicity (spec §3.4)', () => {
     );
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.errors).toContain('edge "e2" references unknown node "redis".');
+    // Spec §4.1 rejection shape: a validation-pass error is attributed back to
+    // the op that introduced the offending element, so a ten-op patch tells the
+    // agent WHICH op to edit and not merely which id is wrong.
+    expect(r.errors).toContain('op 1 (addEdge): edge "e2" references unknown node "redis".');
     expect(before).toEqual(frozen);
   });
 
@@ -228,5 +231,81 @@ describe('removeNode (rules text rule 10)', () => {
     expect(r.doc.nodes.map((n) => n.id)).toEqual(['auth']);
     expect(r.doc.edges).toEqual([]);
     expect(r.summary).toBe('-1 node, -1 edge');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M6 audit fix — the §4.1 rejection shape for validation-pass errors.
+//
+// Per-op failures (thrown by applyOp) always carried `op N (kind):`. The V1–V13
+// pass did not, so every cross-reference error — unknown endpoint, unknown
+// parent, duplicate id — reached the agent with no op index, and in a ten-op
+// patch it was told WHICH ID was wrong but not which op to edit. The spec's own
+// example is one of these errors, with the prefix.
+// ---------------------------------------------------------------------------
+
+describe('validation errors are attributed to the op that caused them (spec §4.1)', () => {
+  it('names the op index and kind for an unknown edge endpoint', () => {
+    const r = applyPatch(
+      baseDoc(),
+      patch([
+        { op: 'setTitle', title: 'Checkout' },
+        { op: 'addNode', node: node('kafka', { type: 'queue' }) },
+        { op: 'addEdge', edge: edge('e7', 'kafka', 'redis') },
+      ]),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors).toEqual([
+      'op 2 (addEdge): edge "e7" references unknown node "redis".',
+    ]);
+  });
+
+  it('names the op for an unknown parent', () => {
+    const r = applyPatch(
+      baseDoc(),
+      patch([{ op: 'updateNode', id: 'auth', changes: { parent: 'no-such-vpc' } }]),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors[0]?.startsWith('op 0 (updateNode): node "auth" has unknown parent')).toBe(
+      true,
+    );
+  });
+
+  it('leaves fallout from a REMOVAL unattributed rather than blaming the wrong op', () => {
+    // removeNode "postgres" leaves edge e1 dangling. The error names the edge,
+    // which this patch did not create — prefixing it with the removeNode would
+    // point the agent at a line that is not the one to change.
+    const r = applyPatch(baseDoc(), patch([{ op: 'removeNode', id: 'postgres' }]));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors).toEqual(['edge "e1" references unknown node "postgres".']);
+  });
+});
+
+describe('summarise reports reparenting (spec §1.3 "group added, 2 moved")', () => {
+  it('counts nodes that changed parent alongside the additions', () => {
+    const r = applyPatch(
+      baseDoc(),
+      patch([
+        { op: 'addGroup', group: group('vpc-private', { kind: 'vpc' }) },
+        { op: 'updateNode', id: 'auth', changes: { parent: 'vpc-private' } },
+        { op: 'updateNode', id: 'postgres', changes: { parent: 'vpc-private' } },
+      ]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.summary).toBe('+1 group, 2 moved');
+  });
+
+  it('does not double-count a node that was added into a group', () => {
+    const r = applyPatch(
+      doc({ groups: [group('vpc')] }),
+      patch([{ op: 'addNode', node: node('api', { parent: 'vpc' }) }]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.summary).toBe('+1 node');
   });
 });

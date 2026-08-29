@@ -19,9 +19,9 @@ import * as path from 'node:path';
 import {
   diagramPaths,
   emptyDoc,
-  resolveDiagramDir,
   writeDocAtomic,
 } from '../../../core/src/index.js';
+import { createContext } from './context.js';
 import { startHttpServer, type StaticServer } from '../serve/http.js';
 import { attachDocSync, type DocSync } from '../serve/watch.js';
 
@@ -100,10 +100,11 @@ export function openBrowser(url: string): void {
  * Returns a handle so tests (and future callers) can shut it down.
  */
 export async function runServe(opts: ServeOptions = {}): Promise<ServeHandle> {
-  const dir =
-    opts.dir !== undefined && opts.dir !== ''
-      ? path.resolve(opts.dir)
-      : resolveDiagramDir();
+  // Same resolution as every other command (createContext): an explicit
+  // --dir, then $DIAGRAM_DIR, then an existing .diagram/ at or above the
+  // working directory. Serving from a subdirectory used to create a second,
+  // empty document and render a blank page beside the real diagram.
+  const dir = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) }).dir;
   ensureDiagramDir(dir);
 
   const httpServer = await startHttpServer({

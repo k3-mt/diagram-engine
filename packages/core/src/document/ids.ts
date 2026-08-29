@@ -64,6 +64,7 @@ export function levenshtein(a: string, b: string): number {
 export function nearestId(id: string, candidates: string[]): string | undefined {
   let best: string | undefined;
   let bestScore = Infinity;
+  let bestIsPrefix = false;
   for (const c of candidates) {
     if (c === id) continue;
     // prefix relationship ("redis" vs "redis-cache") is the common miss
@@ -72,6 +73,7 @@ export function nearestId(id: string, candidates: string[]): string | undefined 
       if (score < bestScore) {
         best = c;
         bestScore = score;
+        bestIsPrefix = true;
       }
       continue;
     }
@@ -79,11 +81,21 @@ export function nearestId(id: string, candidates: string[]): string | undefined 
     if (d < bestScore) {
       best = c;
       bestScore = d;
+      bestIsPrefix = false;
     }
   }
   if (best === undefined) return undefined;
-  // sanity bound: don't suggest something wildly different
-  const limit = Math.max(3, Math.floor(Math.max(id.length, best.length) / 2));
+  // A prefix relationship is strong evidence on its own — one id is literally
+  // contained in the other — so it is accepted at any length difference.
+  if (bestIsPrefix) return best;
+  // Everything else needs a sanity bound, and the bound has to be tight for
+  // SHORT ids: rule 11 tells the agent to trust this suggestion instead of
+  // calling diagram_get again, so a wrong one is not a harmless hint, it is a
+  // wrong edge drawn confidently. The old bound (max(3, ...)) let three of the
+  // five letters of "ghost" differ and offered "ios". Scaling with the SHORTER
+  // id, capped at 3, keeps the useful cases ("redsi" -> "redis") and drops the
+  // coincidences.
+  const limit = Math.min(3, Math.max(1, Math.floor(Math.min(id.length, best.length) / 2)));
   return bestScore <= limit ? best : undefined;
 }
 

@@ -106,6 +106,25 @@ export function ExternalIcon(props: IconProps): JSX.Element {
   );
 }
 
+/**
+ * collapsed group — a dashed-cornered boundary with a solid box inside it:
+ * "a container whose insides are not shown here". NOT a NodeType glyph. It
+ * is chosen by isCollapsedGroupNode(), never by NODE_ICONS, because a
+ * collapsed VPC is drawn with `type: "external"` (derive.ts decision 1) and
+ * the external glyph is a cloud, documented as "a third party you don't
+ * control" — a confident wrong claim about the reader's own boundary. The
+ * dash echoes GroupRect's §8.2 `4 4`, so the closed boundary reads as the
+ * same object the open one does.
+ */
+export function CollapsedGroupIcon(props: IconProps): JSX.Element {
+  return (
+    <Glyph {...props}>
+      <rect x={2.2} y={3.2} width={15.6} height={13.6} rx={2} strokeDasharray="3 2.4" />
+      <rect x={6.4} y={7.4} width={7.2} height={5.2} rx={1} />
+    </Glyph>
+  );
+}
+
 /** entity — a table/grid: a header band over a two-column body (ERD mode). */
 export function EntityIcon(props: IconProps): JSX.Element {
   return (

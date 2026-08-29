@@ -136,6 +136,77 @@ function applyOp(next: GraphDoc, op: PatchOp): void {
 }
 
 /**
+ * The ids an op INTRODUCES or CHANGES — never the ones it removes.
+ *
+ * This is how a validation-pass error is attributed back to the op that
+ * caused it (see attributeErrors). "Introduced" is the right side of the
+ * line: `addEdge {id:"e7", to:"redis"}` makes e7 the op's fault, so
+ * `edge "e7" references unknown node "redis"` gets that op's prefix. A
+ * `removeNode "postgres"` that leaves an edge dangling reports the DANGLING
+ * EDGE, which belongs to no op in this patch — prefixing that error with the
+ * removeNode would point the agent at the wrong line to edit, so ops that
+ * only remove things introduce nothing and their fallout stays unattributed.
+ */
+function introducedIds(op: PatchOp): string[] {
+  switch (op.op) {
+    case 'addNode':
+      return [op.node.id, ...(op.node.parent !== null ? [op.node.parent] : [])];
+    case 'addGroup':
+      return [op.group.id, ...(op.group.parent !== null ? [op.group.parent] : [])];
+    case 'addEdge':
+      return [op.edge.id, op.edge.from, op.edge.to];
+    case 'updateNode':
+    case 'updateGroup':
+    case 'updateEdge':
+      return [op.id, ...changedIdValues(op.changes)];
+    default:
+      return [];
+  }
+}
+
+/** The id-shaped values inside an update's `changes` (parent, from, to). */
+function changedIdValues(changes: unknown): string[] {
+  const out: string[] = [];
+  const record = changes as Record<string, unknown>;
+  for (const key of ['parent', 'from', 'to']) {
+    const value = record[key];
+    if (typeof value === 'string') out.push(value);
+  }
+  return out;
+}
+
+/** Every double-quoted token in a message, in the order it appears. */
+function quotedIds(message: string): string[] {
+  return [...message.matchAll(/"([^"]*)"/g)].map((m) => m[1] ?? '');
+}
+
+/**
+ * Prefix each validation error with the op that caused it (spec §4.1):
+ *
+ *   op 2 (addEdge): edge "e7" references unknown node "redis". Did you mean ...
+ *
+ * Without this the agent is told WHICH ID is wrong but not which of its ten
+ * ops to edit, and §4.1's own rejection example — a V5 error — carries the
+ * prefix. Attribution walks the quoted ids in the message left to right and
+ * takes the op that introduced the first one; an error naming nothing this
+ * patch introduced (a pre-existing problem the patch merely exposed) is left
+ * bare rather than blamed on an innocent op.
+ */
+function attributeErrors(errors: string[], ops: readonly PatchOp[]): string[] {
+  const owner = new Map<string, number>();
+  for (const [i, op] of ops.entries()) {
+    for (const id of introducedIds(op)) if (id !== '') owner.set(id, i);
+  }
+  return errors.map((message) => {
+    for (const id of quotedIds(message)) {
+      const i = owner.get(id);
+      if (i !== undefined) return `op ${i} (${ops[i]?.op ?? '?'}): ${message}`;
+    }
+    return message;
+  });
+}
+
+/**
  * Apply a patch atomically (spec §3.4).
  *
  * Clones the document, applies every op (collecting per-op errors as
@@ -162,7 +233,7 @@ export function applyPatch(doc: GraphDoc, patch: GraphPatch): ApplyResult {
   if (errors.length) return { ok: false, errors };
 
   const v = validate(next);
-  if (!v.ok) return { ok: false, errors: v.errors };
+  if (!v.ok) return { ok: false, errors: attributeErrors(v.errors, patch.ops) };
 
   return { ok: true, doc: next, summary: summarise(doc, next), notes };
 }

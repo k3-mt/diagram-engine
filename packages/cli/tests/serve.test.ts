@@ -197,6 +197,28 @@ describe('serve/watch', () => {
     expect(fs.readFileSync(errorsFile, 'utf8')).toMatch(/not valid JSON/);
   });
 
+  it('removes errors.txt again once the document is valid (spec §4.3, path C)', async () => {
+    // The CLAUDE.md that `diagram init` writes tells a file-protocol agent to
+    // check errors.txt after a hand edit. Leaving a stale failure on disk tells
+    // that agent its CORRECTED edit is still broken, and it loops fixing an
+    // error that no longer exists.
+    const handle = await startServe();
+    const client = await connect(handle.port);
+    await client.next(0, 3000);
+    const errorsFile = diagramPaths(handle.dir).errorsFile;
+
+    let before = client.messages.length;
+    writeRaw(handle.dir, '{ this is not json');
+    await client.next(before, 3000);
+    expect(fs.existsSync(errorsFile)).toBe(true);
+
+    before = client.messages.length;
+    writeRaw(handle.dir, JSON.stringify(docWith('fixed again')));
+    const msg = (await client.next(before, 3000)) as { type: string } | undefined;
+    expect(msg?.type).toBe('doc');
+    expect(fs.existsSync(errorsFile)).toBe(false);
+  });
+
   it('writes errors.txt and sends an error frame for schema-invalid JSON too', async () => {
     const handle = await startServe();
     const client = await connect(handle.port);

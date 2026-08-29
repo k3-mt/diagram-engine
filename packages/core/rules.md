@@ -16,6 +16,14 @@ external  a third-party system the user does not control
 ## Group kinds
 vpc, region, cluster, account, generic
 
+## Patch shape
+
+A patch is {"ops":[...],"summary":"..."}; both keys are required.
+Every node and group needs "parent": a group id, or null for top level.
+
+    {"summary":"add web","ops":[{"op":"addNode","node":{"id":"web",
+    "type":"client","label":"Web app","parent":null}}]}
+
 ## Rules
 
 1. CALL diagram_get FIRST if you are not sure of the current state.
@@ -31,9 +39,13 @@ vpc, region, cluster, account, generic
    one addGroup plus two updateNode ops changing parent. Do not
    remove and re-add nodes.
 
-4. EDGE DIRECTION is the direction of the request or data flow, not
-   the response. A service that reads a database has an edge FROM the
-   service TO the database.
+4. EDGE DIRECTION POINTS AT THE DEPENDENCY: caller to callee. A
+   service that reads a database has an edge FROM the service TO the
+   database; the data flows back the other way, the arrow does not.
+   CHECK EVERY EDGE by reading it aloud as "<from> <label> <to>":
+   "orders reads postgres" is right, "s3 reads etl" is backwards. A
+   protocol label ("https", "grpc") is a noun, not a verb: there the
+   arrow still runs from whoever initiates the call.
 
 5. EDGE LABELS are 1-3 words: "reads", "publishes", "grpc", "webhook".
    Omit the label when the relationship is obvious from the types.

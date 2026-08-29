@@ -3,8 +3,8 @@
 // under Node/vitest. Geometry is derived per frame and NEVER persisted to the
 // document (spec §1.4/§3.1).
 
-import type { Seg } from './segments';
-import { HOP_R, type Crossing } from './crossings';
+import type { Seg } from './segments.js';
+import { HOP_R, type Crossing } from './crossings.js';
 
 /**
  * One hop span on a horizontal segment: the x-interval the arc covers.

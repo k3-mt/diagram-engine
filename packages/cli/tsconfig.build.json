@@ -7,10 +7,19 @@
   // The simplest thing that works: the CLI imports core by relative path
   // (../../../core/src/index.js) and tsc compiles both trees in one pass.
   //
+  // M7 adds a THIRD tree on the same terms. `diagram export svg` imports the
+  // viewer's headless renderer, so tsc follows that edge and compiles the
+  // viewer's export subtree here too — react-dom/server, elkjs and all. Two
+  // rules keep the emitted tree runnable under Node, and tests/integration
+  // enforces both by walking the import graph: every cross-package VALUE
+  // import is relative (a package-name specifier survives compilation and
+  // resolves to a .ts entry point), and every relative specifier carries .js.
+  //
   // rootDir is the packages/ directory, so the layout under dist/ mirrors it:
   //
   //   packages/cli/src/bin/diagram.ts   ->  packages/cli/dist/cli/src/bin/diagram.js
   //   packages/core/src/index.ts        ->  packages/cli/dist/core/src/index.js
+  //   packages/viewer/src/export/...    ->  packages/cli/dist/viewer/src/export/...
   //   (viewer bundle, built separately) ->  packages/cli/dist/public/
   //
   // The relative core import therefore resolves identically in src/ and in
