@@ -28,7 +28,7 @@ services:
     command: >
       bash -lc "git config --global --add safe.directory /work &&
                 npm ci &&
-                bash scripts/run.sh --unattended --rounds 0 &&
+                bash scripts/run.sh --unattended --bootstrap-only &&
                 bash scripts/run-phases.sh --unattended -j $${JOBS} --rounds $${ROUNDS}"
 
 volumes:

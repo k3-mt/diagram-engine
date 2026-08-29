@@ -11,9 +11,11 @@ set -uo pipefail
 
 ROUNDS=60
 UNATTENDED=0
+BOOTSTRAP_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --unattended) UNATTENDED=1; shift ;;
+    --bootstrap-only) BOOTSTRAP_ONLY=1; shift ;;
     --rounds) ROUNDS="$2"; shift 2 ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
@@ -55,6 +57,14 @@ if [ ! -f LEDGER.md ]; then
   echo
 else
   echo "LEDGER.md exists — resuming."
+fi
+
+# Hand off to a different driver (scripts/run-phases.sh) after bootstrapping.
+# `--rounds 0` is not a substitute: BSD seq counts down from 1 to 0 and would
+# run a round anyway.
+if [ "$BOOTSTRAP_ONLY" -eq 1 ]; then
+  echo "bootstrap complete; --bootstrap-only, so not entering the loop."
+  exit 0
 fi
 
 bash scripts/run-loop.sh "$ROUNDS"
