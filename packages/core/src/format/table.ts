@@ -2,7 +2,21 @@
 // The same table diagram_get returns: cheaper than JSON and models read it
 // more reliably. Columns are padded within each section for scanability.
 
-import type { GraphDoc } from '../schema/graph.js';
+import type { GField, GraphDoc } from '../schema/graph.js';
+
+/**
+ * One column, as compactly as it can still be read:
+ *   id:uuid PK        email:varchar? (unique)        owner_id:uuid FK
+ * Type omitted when unknown; "?" marks nullable; the note goes in parens.
+ */
+function formatField(f: GField): string {
+  let s = f.type !== undefined ? `${f.name}:${f.type}` : f.name;
+  if (f.nullable === true) s += '?';
+  if (f.pk === true) s += ' PK';
+  if (f.fk === true) s += ' FK';
+  if (f.note !== undefined) s += ` (${f.note})`;
+  return s;
+}
 
 /** Pad every column in a section to its widest cell, joined with " | ". */
 function alignRows(rows: string[][]): string[] {
@@ -34,6 +48,13 @@ function alignRows(rows: string[][]): string[] {
  *
  *   ### Edges (id | from -> to | label | style)
  *   e1 | web-client -> api-gateway  | https  | solid
+ *
+ * Three sections appear only when the document uses them, so an
+ * architecture-only diagram costs the agent exactly what it did before:
+ *
+ *   - the edges table grows a `cardinality` column when any edge carries one
+ *   - ### Entities (id | fields) — one line per entity, columns comma-joined
+ *   - ### Meta (id | key=value)  — only nodes that actually have meta
  */
 export function toTable(doc: GraphDoc): string {
   const lines: string[] = [];
@@ -52,17 +73,48 @@ export function toTable(doc: GraphDoc): string {
   );
   lines.push('');
 
-  lines.push('### Edges (id | from -> to | label | style)');
+  const anyCardinality = doc.edges.some((e) => e.cardinality !== undefined);
+  lines.push(
+    `### Edges (id | from -> to | label | style${anyCardinality ? ' | cardinality' : ''})`,
+  );
   lines.push(
     ...alignRows(
-      doc.edges.map((e) => [
-        e.id,
-        `${e.from} -> ${e.to}`,
-        e.label ?? '-',
-        e.style ?? 'solid',
-      ]),
+      doc.edges.map((e) => {
+        const row = [e.id, `${e.from} -> ${e.to}`, e.label ?? '-', e.style ?? 'solid'];
+        if (anyCardinality) row.push(e.cardinality ?? '-');
+        return row;
+      }),
     ),
   );
+
+  const entities = doc.nodes.filter((n) => n.fields !== undefined && n.fields.length > 0);
+  if (entities.length > 0) {
+    lines.push('');
+    lines.push('### Entities (id | fields)');
+    lines.push(
+      ...alignRows(
+        entities.map((n) => [n.id, (n.fields ?? []).map(formatField).join(', ')]),
+      ),
+    );
+  }
+
+  const withMeta = doc.nodes.filter(
+    (n) => n.meta !== undefined && Object.keys(n.meta).length > 0,
+  );
+  if (withMeta.length > 0) {
+    lines.push('');
+    lines.push('### Meta (id | key=value)');
+    lines.push(
+      ...alignRows(
+        withMeta.map((n) => [
+          n.id,
+          Object.entries(n.meta ?? {})
+            .map(([k, v]) => `${k}=${v}`)
+            .join(', '),
+        ]),
+      ),
+    );
+  }
 
   return lines.join('\n');
 }

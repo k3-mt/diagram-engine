@@ -5,7 +5,7 @@
 // + §6.6 corner rounding) and handed in — never recomputed per edge, and
 // never persisted (§1.4).
 
-import type { GEdge } from '@diagram-engine/core';
+import type { Cardinality, GEdge } from '@diagram-engine/core';
 import type { AbsEdgeLabel } from '../layout/fromElk.js';
 import { EDGE_LABEL_FONT } from '../layout/measure.js';
 import { theme } from './theme.js';
@@ -35,6 +35,84 @@ export function ArrowMarker(): JSX.Element {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Crow's-foot markers (ERD mode, spec Part 13 item 2).
+//
+// An ERD relationship is not a directed call, so when an edge carries a
+// cardinality the crow's-foot pair REPLACES the arrowhead entirely; edges
+// without one keep §6.7 exactly as it was.
+//
+// Orientation: both markers are drawn with the ENTITY at the +x side of
+// the local marker frame. `orient="auto-start-reverse"` makes the frame at
+// the START of the path point backwards along it, so the same geometry
+// faces outward at both ends and one definition serves both.
+
+/** ids of the two crow's-foot markers defined once in the canvas <defs>. */
+export const ONE_MARKER_ID = 'crow-one';
+export const MANY_MARKER_ID = 'crow-many';
+
+/** "exactly one": a single bar perpendicular to the line. */
+export function CrowOneMarker(): JSX.Element {
+  return (
+    <marker
+      id={ONE_MARKER_ID}
+      viewBox="0 0 10 10"
+      refX="9"
+      refY="5"
+      markerWidth="9"
+      markerHeight="9"
+      orient="auto-start-reverse"
+    >
+      <path
+        d="M 5 1 L 5 9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </marker>
+  );
+}
+
+/** "many": the three-pronged crow's foot, prongs opening onto the entity. */
+export function CrowManyMarker(): JSX.Element {
+  return (
+    <marker
+      id={MANY_MARKER_ID}
+      viewBox="0 0 10 10"
+      refX="9"
+      refY="5"
+      markerWidth="9"
+      markerHeight="9"
+      orient="auto-start-reverse"
+    >
+      <path
+        d="M 9 1 L 1 5 L 9 9 M 1 5 L 9 5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </marker>
+  );
+}
+
+/**
+ * The marker ids a cardinality puts at (start, end) — start = the `from`
+ * side, end = the `to` side:
+ *   1:1 → one  / one     1:N → one  / many
+ *   N:1 → many / one     N:M → many / many
+ */
+export function cardinalityMarkers(
+  cardinality: Cardinality,
+): { start: string; end: string } {
+  const [from, to] = cardinality.split(':');
+  const marker = (side: string | undefined): string =>
+    side === '1' ? ONE_MARKER_ID : MANY_MARKER_ID;
+  return { start: marker(from), end: marker(to) };
+}
+
 /** Dash pattern for `style: 'dashed'` edges. */
 export const EDGE_DASH = '6 4';
 
@@ -48,15 +126,28 @@ export interface EdgePathProps {
   d: string;
 }
 
-/** Layer 3: one edge path, with arrowheads per `edge.arrow` (default forward). */
+/**
+ * Layer 3: one edge path, with arrowheads per `edge.arrow` (default
+ * forward) — or, when the edge carries a cardinality, with crow's-foot
+ * markers INSTEAD of the arrowheads.
+ */
 export function EdgePath({ edge, d }: EdgePathProps): JSX.Element {
   const arrow = edge.arrow ?? 'forward';
-  const end = arrow === 'forward' || arrow === 'both';
-  const start = arrow === 'both';
+  const crow =
+    edge.cardinality === undefined
+      ? undefined
+      : cardinalityMarkers(edge.cardinality);
+  const startId = crow ? crow.start : arrow === 'both' ? ARROW_MARKER_ID : undefined;
+  const endId = crow
+    ? crow.end
+    : arrow === 'forward' || arrow === 'both'
+      ? ARROW_MARKER_ID
+      : undefined;
   return (
     <path
       data-edge={edge.id}
       data-layer="edge-path"
+      data-cardinality={edge.cardinality}
       d={d}
       fill="none"
       stroke={theme.edge.stroke}
@@ -64,10 +155,10 @@ export function EdgePath({ edge, d }: EdgePathProps): JSX.Element {
       strokeLinecap="round"
       strokeLinejoin="round"
       strokeDasharray={edge.style === 'dashed' ? EDGE_DASH : undefined}
-      markerStart={start ? `url(#${ARROW_MARKER_ID})` : undefined}
-      markerEnd={end ? `url(#${ARROW_MARKER_ID})` : undefined}
-      // The marker paints with fill="currentColor", so `color` is what
-      // gives the arrowhead the same stroke colour as the line.
+      markerStart={startId === undefined ? undefined : `url(#${startId})`}
+      markerEnd={endId === undefined ? undefined : `url(#${endId})`}
+      // The markers paint with currentColor, so `color` is what gives the
+      // arrowhead / crow's foot the same colour as the line.
       style={{ color: theme.edge.stroke }}
     />
   );

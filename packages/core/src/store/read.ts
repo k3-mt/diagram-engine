@@ -7,6 +7,7 @@
 
 import * as fs from 'node:fs';
 import { GraphDocSchema, type GraphDoc } from '../schema/graph.js';
+import { formatIssues } from '../schema/issues.js';
 
 /** Typed result of reading a document from disk. */
 export type ReadDocResult =
@@ -41,9 +42,7 @@ export function parseDoc(raw: string): ReadDocResult {
   if (!result.success) {
     return {
       ok: false,
-      errors: result.error.issues.map(
-        (issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`,
-      ),
+      errors: formatIssues(result.error.issues),
     };
   }
   return { ok: true, doc: result.data };

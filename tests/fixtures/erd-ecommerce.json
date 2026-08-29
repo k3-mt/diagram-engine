@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "title": "Storefront database",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "users",
+      "label": "users",
+      "type": "entity",
+      "parent": null,
+      "note": "one row per registered shopper",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "email", "type": "citext", "note": "unique, lowercased on write" },
+        { "name": "display_name", "type": "varchar(80)" },
+        { "name": "password_hash", "type": "text", "note": "argon2id" },
+        { "name": "email_verified_at", "type": "timestamptz", "nullable": true },
+        { "name": "created_at", "type": "timestamptz" },
+        { "name": "updated_at", "type": "timestamptz" }
+      ],
+      "meta": {
+        "owner": "identity",
+        "rows": "~2.4M",
+        "pii": "email, display_name"
+      }
+    },
+    {
+      "id": "addresses",
+      "label": "addresses",
+      "type": "entity",
+      "parent": null,
+      "note": "shipping and billing addresses",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "user_id", "type": "uuid", "fk": true },
+        { "name": "kind", "type": "address_kind", "note": "shipping | billing" },
+        { "name": "line1", "type": "varchar(120)" },
+        { "name": "line2", "type": "varchar(120)", "nullable": true },
+        { "name": "city", "type": "varchar(80)" },
+        { "name": "region", "type": "varchar(80)", "nullable": true },
+        { "name": "postal_code", "type": "varchar(16)" },
+        { "name": "country", "type": "char(2)", "note": "ISO 3166-1 alpha-2" },
+        { "name": "created_at", "type": "timestamptz" }
+      ],
+      "meta": { "owner": "identity", "pii": "full postal address" }
+    },
+    {
+      "id": "orders",
+      "label": "orders",
+      "type": "entity",
+      "parent": null,
+      "note": "one row per checkout",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "user_id", "type": "uuid", "fk": true },
+        { "name": "shipping_address_id", "type": "uuid", "fk": true, "nullable": true },
+        { "name": "status", "type": "order_status", "note": "pending|paid|shipped|refunded" },
+        { "name": "currency", "type": "char(3)" },
+        { "name": "subtotal", "type": "numeric(12,2)" },
+        { "name": "tax_total", "type": "numeric(12,2)" },
+        { "name": "grand_total", "type": "numeric(12,2)" },
+        { "name": "placed_at", "type": "timestamptz" },
+        { "name": "cancelled_at", "type": "timestamptz", "nullable": true }
+      ],
+      "meta": {
+        "owner": "orders",
+        "rows": "~9.1M",
+        "retention": "7 years (tax law)"
+      }
+    },
+    {
+      "id": "order-items",
+      "label": "order_items",
+      "type": "entity",
+      "parent": null,
+      "note": "line items; price frozen at purchase time",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "order_id", "type": "uuid", "fk": true },
+        { "name": "product_id", "type": "uuid", "fk": true },
+        { "name": "quantity", "type": "integer", "note": "check (quantity > 0)" },
+        { "name": "unit_price", "type": "numeric(12,2)", "note": "snapshot, not a live join" },
+        { "name": "discount", "type": "numeric(12,2)", "nullable": true },
+        { "name": "line_total", "type": "numeric(12,2)" }
+      ],
+      "meta": { "owner": "orders", "note": "junction table orders <-> products" }
+    },
+    {
+      "id": "products",
+      "label": "products",
+      "type": "entity",
+      "parent": null,
+      "note": "sellable catalogue items",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "sku", "type": "varchar(32)", "note": "unique" },
+        { "name": "name", "type": "varchar(160)" },
+        { "name": "description", "type": "text", "nullable": true },
+        { "name": "list_price", "type": "numeric(12,2)" },
+        { "name": "currency", "type": "char(3)" },
+        { "name": "stock_on_hand", "type": "integer" },
+        { "name": "discontinued_at", "type": "timestamptz", "nullable": true },
+        { "name": "created_at", "type": "timestamptz" }
+      ],
+      "meta": {
+        "owner": "catalogue",
+        "rows": "~180K",
+        "search": "indexed into opensearch"
+      }
+    },
+    {
+      "id": "payments",
+      "label": "payments",
+      "type": "entity",
+      "parent": null,
+      "note": "one settled payment per order",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "order_id", "type": "uuid", "fk": true, "note": "unique — 1:1 with orders" },
+        { "name": "provider", "type": "varchar(24)", "note": "stripe | adyen" },
+        { "name": "provider_ref", "type": "varchar(64)" },
+        { "name": "amount", "type": "numeric(12,2)" },
+        { "name": "currency", "type": "char(3)" },
+        { "name": "status", "type": "payment_status" },
+        { "name": "captured_at", "type": "timestamptz", "nullable": true },
+        { "name": "failure_code", "type": "varchar(32)", "nullable": true }
+      ],
+      "meta": {
+        "owner": "payments",
+        "pci": "no PAN stored; provider_ref only",
+        "retention": "7 years"
+      }
+    }
+  ],
+  "groups": [],
+  "edges": [
+    {
+      "id": "r-user-addresses",
+      "from": "users",
+      "to": "addresses",
+      "label": "has",
+      "cardinality": "1:N",
+      "style": "solid",
+      "arrow": "none"
+    },
+    {
+      "id": "r-user-orders",
+      "from": "users",
+      "to": "orders",
+      "label": "places",
+      "cardinality": "1:N",
+      "style": "solid",
+      "arrow": "none"
+    },
+    {
+      "id": "r-order-address",
+      "from": "orders",
+      "to": "addresses",
+      "label": "ships to",
+      "cardinality": "N:1",
+      "style": "dashed",
+      "arrow": "none"
+    },
+    {
+      "id": "r-order-items",
+      "from": "orders",
+      "to": "order-items",
+      "label": "contains",
+      "cardinality": "1:N",
+      "style": "solid",
+      "arrow": "none"
+    },
+    {
+      "id": "r-item-product",
+      "from": "order-items",
+      "to": "products",
+      "label": "refers to",
+      "cardinality": "N:1",
+      "style": "solid",
+      "arrow": "none"
+    },
+    {
+      "id": "r-order-payment",
+      "from": "orders",
+      "to": "payments",
+      "label": "settled by",
+      "cardinality": "1:1",
+      "style": "solid",
+      "arrow": "none"
+    },
+    {
+      "id": "r-orders-products",
+      "from": "orders",
+      "to": "products",
+      "label": "purchased",
+      "cardinality": "N:M",
+      "style": "dashed",
+      "arrow": "none"
+    }
+  ],
+  "collapsed": []
+}

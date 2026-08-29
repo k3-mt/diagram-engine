@@ -5,6 +5,7 @@
 export * from './schema/graph.js';
 export * from './schema/patch.js';
 export * from './schema/jsonSchema.js';
+export * from './schema/issues.js';
 
 // M1 Step 3: document operations and formatting.
 export * from './document/ids.js';

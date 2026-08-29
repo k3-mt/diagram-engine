@@ -115,8 +115,8 @@ describe('theme (§8.2)', () => {
     });
   });
 
-  it('has an accent for all seven node types', () => {
-    expect(NODE_TYPES).toHaveLength(7);
+  it('has an accent for all eight node types', () => {
+    expect(NODE_TYPES).toHaveLength(8);
     expect(Object.keys(theme.accent).sort()).toEqual([...NODE_TYPES].sort());
     expect(theme.accent).toEqual({
       service: '#3B6FD4',
@@ -126,6 +126,7 @@ describe('theme (§8.2)', () => {
       storage: '#6B5BA8',
       client: '#4A4845',
       external: '#8A8880',
+      entity: '#2F7A8C',
     });
   });
 });
@@ -259,7 +260,10 @@ describe('edges', () => {
   });
 
   it('defines the §6.7 arrowhead marker exactly once, in the canvas defs', () => {
-    expect(html.split('<marker').length - 1).toBe(1);
+    // Three markers now live in <defs>: §6.7's arrow plus the ERD
+    // crow's-foot pair (crow-one, crow-many) — each defined exactly once.
+    expect(html.split('<marker').length - 1).toBe(3);
+    expect(html.split('id="arrow"').length - 1).toBe(1);
     const defs = html.slice(html.indexOf('<defs>'), html.indexOf('</defs>'));
     expect(defs).toContain('<marker');
     const m = renderToStaticMarkup(createElement(ArrowMarker, {}));

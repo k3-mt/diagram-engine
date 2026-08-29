@@ -60,6 +60,11 @@ export function toElk(doc: GraphDoc): ElkNode {
   }
 
   // Pass 3: nodes, sized by sizeNode, in model order.
+  // ERD entities need nothing special here: sizeNode already returns the
+  // taller table box for an `entity` with fields, and ELK treats it as an
+  // ordinary fixed-size child. No per-node layoutOptions are set for them
+  // on purpose — a different node placement strategy for entities would
+  // make an ERD lay out unlike every other diagram in the same document.
   for (const n of doc.nodes) {
     parentOf.set(n.id, n.parent);
     const { width, height } = sizeNode(n);

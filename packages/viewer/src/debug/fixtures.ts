@@ -1,4 +1,4 @@
-// debug/fixtures.ts — the six test fixtures, loaded eagerly at build time
+// debug/fixtures.ts — the nine test fixtures, loaded eagerly at build time
 // (vite JSON imports) and pushed through schema parse + document validation.
 //
 // This is the DEBUG picker's data source (spec M2 Step 9): valid fixtures
@@ -11,6 +11,7 @@
 // which must not be pulled into the browser bundle. Type-only imports of
 // the barrel elsewhere are erased at compile time and are fine.
 import { GraphDocSchema } from '../../../core/src/schema/graph.js';
+import { formatIssues } from '../../../core/src/schema/issues.js';
 import { validate } from '../../../core/src/document/validate.js';
 import type { GraphDoc } from '@diagram-engine/core';
 
@@ -23,6 +24,11 @@ import nestedTwoDeep from '../../../../tests/fixtures/nested-two-deep.json';
 import crossBoundaryEdges from '../../../../tests/fixtures/cross-boundary-edges.json';
 import invalidCyclicGroups from '../../../../tests/fixtures/invalid-cyclic-groups.json';
 import invalidDuplicateId from '../../../../tests/fixtures/invalid-duplicate-id.json';
+// Capability A/B fixtures: an ERD, a metadata-heavy architecture, and a
+// document that mixes entity tables with ordinary service nodes.
+import erdEcommerce from '../../../../tests/fixtures/erd-ecommerce.json';
+import metaRich from '../../../../tests/fixtures/meta-rich.json';
+import mixedErdArchitecture from '../../../../tests/fixtures/mixed-erd-architecture.json';
 
 /** One picker entry: either a valid document or the errors that reject it. */
 export type FixtureEntry =
@@ -39,9 +45,7 @@ export function loadFixture(name: string, raw: unknown): FixtureEntry {
     return {
       name,
       ok: false,
-      errors: parsed.error.issues.map(
-        (i) => `${i.path.join('.') || '(root)'}: ${i.message}`,
-      ),
+      errors: formatIssues(parsed.error.issues),
     };
   }
   const result = validate(parsed.data);
@@ -49,11 +53,14 @@ export function loadFixture(name: string, raw: unknown): FixtureEntry {
   return { name, ok: true, doc: parsed.data };
 }
 
-/** All six fixtures, in a stable display order (valid ones first). */
+/** All nine fixtures, in a stable display order (valid ones first). */
 export const FIXTURES: FixtureEntry[] = [
   loadFixture('flat-three-nodes', flatThreeNodes),
   loadFixture('nested-two-deep', nestedTwoDeep),
   loadFixture('cross-boundary-edges', crossBoundaryEdges),
+  loadFixture('erd-ecommerce', erdEcommerce),
+  loadFixture('meta-rich', metaRich),
+  loadFixture('mixed-erd-architecture', mixedErdArchitecture),
   loadFixture('empty', empty),
   loadFixture('invalid-cyclic-groups', invalidCyclicGroups),
   loadFixture('invalid-duplicate-id', invalidDuplicateId),

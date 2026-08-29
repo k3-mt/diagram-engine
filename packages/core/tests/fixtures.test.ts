@@ -1,5 +1,6 @@
-// M1 Step 5 — the six fixtures (spec §10, M1 Step 5).
-// Four valid fixtures parse and pass validate(); the two invalid fixtures
+// M1 Step 5 — the fixtures (spec §10, M1 Step 5), plus the three added for
+// ERD mode and node metadata.
+// The valid fixtures parse and pass validate(); the two invalid fixtures
 // are intentionally parseable, schema-shaped JSON that only validate()
 // (Step 3 invariants) rejects — not the JSON parser, not the zod shape check.
 
@@ -12,6 +13,10 @@ const VALID_FIXTURES = [
   'flat-three-nodes.json',
   'nested-two-deep.json',
   'cross-boundary-edges.json',
+  // ERD mode + node metadata (Part 13 item 2).
+  'erd-ecommerce.json',
+  'meta-rich.json',
+  'mixed-erd-architecture.json',
 ];
 
 describe('valid fixtures', () => {

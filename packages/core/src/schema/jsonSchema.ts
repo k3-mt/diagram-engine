@@ -3,6 +3,12 @@
 // there is a single source of truth. Uses zod's native JSON Schema
 // conversion (z.toJSONSchema, available in the installed zod's v4 API).
 // No extra dependencies.
+//
+// Nothing here enumerates properties, so schema growth flows through for
+// free: the ERD additions (node type "entity", node "fields" and "meta",
+// edge "cardinality") appear in both outputs because they exist in the zod
+// source. Zod drops .refine() checks when generating, so any cap that must
+// reach the agent is also declared with .meta() in graph.ts.
 
 import { z } from 'zod/v4';
 import { GraphDocSchema } from './graph.js';

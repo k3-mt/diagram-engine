@@ -22,7 +22,21 @@ export {
   type LaidOut,
   type Rect,
 } from './layout/fromElk.js';
-export { LABEL_FONT, NODE, clamp, measureText, sizeNode } from './layout/measure.js';
+export {
+  ACCENT_W,
+  BADGE_FONT,
+  ENTITY,
+  ENTITY_FIELD_FONT,
+  LABEL_FONT,
+  NODE,
+  badgeClusterWidth,
+  badgeWidth,
+  clamp,
+  fieldBadges,
+  fieldRowWidth,
+  measureText,
+  sizeNode,
+} from './layout/measure.js';
 export { GROUP_OPTIONS, ROOT_OPTIONS } from './layout/options.js';
 export type { Size } from './layout/types.js';
 export {
@@ -35,6 +49,7 @@ export {
 
 // --- M3 geometry (spec §6) -------------------------------------------------
 export {
+  composeFramePaths,
   composePath,
   toSegments,
   findCrossings,
@@ -63,10 +78,61 @@ export {
 // Everything here is React + pure math. layout/elkBrowser.ts and main.tsx are
 // deliberately NOT re-exported: they are browser-only (vite `?worker` syntax /
 // DOM mount) and would break any Node consumer, vitest included.
-export { Canvas, FrameLayers, CROSSFADE_MS, type CanvasProps } from './render/Canvas.js';
-export { EdgeLabel, EdgePath, ArrowMarker, ARROW_MARKER_ID, EDGE_DASH } from './render/EdgePath.js';
+export {
+  Canvas,
+  FrameLayers,
+  CROSSFADE_MS,
+  HOVER_RING_PAD,
+  HOVER_RING_W,
+  type CanvasProps,
+  type HoverProps,
+} from './render/Canvas.js';
+export {
+  EdgeLabel,
+  EdgePath,
+  ArrowMarker,
+  ARROW_MARKER_ID,
+  EDGE_DASH,
+  // ERD: crow's-foot markers and the cardinality → marker mapping.
+  CrowManyMarker,
+  CrowOneMarker,
+  MANY_MARKER_ID,
+  ONE_MARKER_ID,
+  cardinalityMarkers,
+} from './render/EdgePath.js';
 export { GroupLabel, GroupRect, GROUP_LABEL_FONT } from './render/GroupRect.js';
-export { NodeBox, NodeContent, labelWidth, truncateToWidth } from './render/NodeBox.js';
+export {
+  NodeBox,
+  NodeContent,
+  NOTE_FONT,
+  accentPath,
+  labelWidth,
+  truncateToWidth,
+  type HoverHandlers,
+  type NodeBoxProps,
+} from './render/NodeBox.js';
+// ERD: an `entity` node with fields, drawn as a table (capability A).
+export {
+  EntityBox,
+  EntityContent,
+  BADGE_FILL,
+  BADGE_H,
+  isEntityTable,
+  rowCenterY,
+  visibleRowCount,
+} from './render/EntityBox.js';
+// Node metadata inspection panel (capability B). Pure markup + placement
+// math — read-only, and never a mutation path (§1.6).
+export {
+  HoverCard,
+  CARD_MARGIN,
+  CARD_OFFSET,
+  CARD_W,
+  cardHeight,
+  placeCard,
+  type CardPlacement,
+  type HoverCardProps,
+} from './render/HoverCard.js';
 export { ICON_SIZE, NODE_ICONS } from './render/icons.js';
 export { theme } from './render/theme.js';
 export {
@@ -99,7 +165,19 @@ export {
   MAX_FIT_SCALE,
   MAX_SCALE,
   MIN_SCALE,
+  // Drag panning (capability C): plain left-drag and space-drag share this
+  // pure state machine. Viewport control only — it never patches (§1.6/§7).
+  PAN_THRESHOLD_PX,
+  advanceDrag,
+  beginDrag,
+  dragDistance,
+  dragPan,
+  endDrag,
+  panCursor,
   type Bounds,
+  type DragMode,
+  type DragState,
+  type UseViewportResult,
   type Viewport,
 } from './render/viewport.js';
 

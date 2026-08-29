@@ -19,10 +19,10 @@
 //
 // Geometry is derived per frame and NEVER persisted to the document (§1.4).
 
-import { StrictMode, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { GraphDoc } from '@diagram-engine/core';
+import type { GNode, GraphDoc } from '@diagram-engine/core';
 import { DebugCanvas } from './debug/DebugCanvas.js';
 import { composeFramePaths } from './geometry';
 import { elkWithOwnWorker } from './layout/elkBrowser.js';
@@ -34,6 +34,7 @@ import {
   type WorkerLike,
 } from './layout/worker.js';
 import { Canvas } from './render/Canvas.js';
+import { HoverCard } from './render/HoverCard.js';
 import { BAR_HEIGHT, StatusBar, type DocError } from './render/StatusBar.js';
 import { theme } from './render/theme.js';
 import { useViewport } from './render/viewport.js';
@@ -106,6 +107,107 @@ const hintStyle: CSSProperties = {
   color: theme.text.secondary,
   font: '14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif',
 };
+
+/** What the hover panel needs: which node, and where the cursor is. */
+interface HoverState {
+  /** id of the node under the pointer, or null for "nothing hovered". */
+  id: string | null;
+  /** Cursor position in CONTAINER coordinates (HoverCard's contract). */
+  x: number;
+  y: number;
+}
+
+/**
+ * Hover tracking for the inspection panel (capability B). INSPECTION ONLY —
+ * nothing here patches or mutates the document (§1.6); it is the same class
+ * of control as the viewport (§7).
+ *
+ * Three details this hook exists to get right:
+ *
+ *  1. NEVER FIGHT THE PAN. While `panning` is true the hover is cleared and
+ *     new enters are ignored, so dragging the canvas past a node does not
+ *     pop a card under the moving hand. The hover returns on the next real
+ *     mouse enter after the button comes up.
+ *  2. DEBOUNCE THE LEAVE. Canvas attaches the handlers to the node-box and
+ *     node-content groups separately, so sliding the pointer from a box onto
+ *     its own text emits leave(null) immediately followed by enter(id). The
+ *     null is deferred by one animation frame and cancelled if an enter
+ *     arrives, which turns that into no visible change at all.
+ *  3. COALESCE THE MOVES. Cursor positions land in a ref and are published
+ *     to React at most once per frame, so a 40-row entity table is not
+ *     re-rendered per mousemove.
+ */
+function useHover(panning: boolean): {
+  hover: HoverState;
+  onHoverNode: (id: string | null) => void;
+  onHoverMove: (e: ReactMouseEvent<Element>) => void;
+  containerRef: (el: HTMLDivElement | null) => void;
+} {
+  const [hover, setHover] = useState<HoverState>({ id: null, x: 0, y: 0 });
+  const elRef = useRef<HTMLDivElement | null>(null);
+  const ptRef = useRef({ x: 0, y: 0 });
+  const moveRaf = useRef<number | null>(null);
+  const leaveRaf = useRef<number | null>(null);
+  const panningRef = useRef(panning);
+  panningRef.current = panning;
+
+  const cancelLeave = useCallback(() => {
+    if (leaveRaf.current === null) return;
+    cancelAnimationFrame(leaveRaf.current);
+    leaveRaf.current = null;
+  }, []);
+
+  // A drag owns the pointer: drop the card the moment a pan starts.
+  useEffect(() => {
+    if (!panning) return;
+    cancelLeave();
+    setHover((h) => (h.id === null ? h : { ...h, id: null }));
+  }, [panning, cancelLeave]);
+
+  useEffect(
+    () => () => {
+      if (moveRaf.current !== null) cancelAnimationFrame(moveRaf.current);
+      if (leaveRaf.current !== null) cancelAnimationFrame(leaveRaf.current);
+    },
+    [],
+  );
+
+  const onHoverNode = useCallback(
+    (id: string | null) => {
+      if (id === null) {
+        cancelLeave();
+        leaveRaf.current = requestAnimationFrame(() => {
+          leaveRaf.current = null;
+          setHover((h) => (h.id === null ? h : { ...h, id: null }));
+        });
+        return;
+      }
+      if (panningRef.current) return; // rule 1: the drag wins
+      cancelLeave();
+      setHover((h) => (h.id === id ? h : { ...h, id }));
+    },
+    [cancelLeave],
+  );
+
+  const onHoverMove = useCallback((e: ReactMouseEvent<Element>) => {
+    const el = elRef.current;
+    if (el === null) return;
+    const r = el.getBoundingClientRect();
+    ptRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (moveRaf.current !== null) return; // one publish per frame
+    moveRaf.current = requestAnimationFrame(() => {
+      moveRaf.current = null;
+      const { x, y } = ptRef.current;
+      setHover((h) => (h.x === x && h.y === y ? h : { ...h, x, y }));
+    });
+  }, []);
+
+  const containerRef = useCallback((el: HTMLDivElement | null) => {
+    elRef.current = el;
+  }, []);
+
+  return { hover, onHoverNode, onHoverMove, containerRef };
+}
 
 /** Friendly empty state — never a blank page (§1.2). */
 function EmptyHint({ connected }: { connected: boolean }): JSX.Element {
@@ -191,7 +293,15 @@ export function App(): JSX.Element {
     groups: doc?.groups.length ?? 0,
     edges: doc?.edges.length ?? 0,
   };
-  const cursor = view.panning ? 'grabbing' : view.spaceHeld ? 'grab' : 'default';
+
+  // Capability B. The hovered id is resolved against the CURRENT frame, so a
+  // document update that removes the node simply closes the card.
+  const hoverApi = useHover(view.panning);
+  const { hover } = hoverApi;
+  const hoveredNode: GNode | null =
+    frame === null || hover.id === null
+      ? null
+      : (frame.doc.nodes.find((n) => n.id === hover.id) ?? null);
 
   return (
     <div
@@ -203,10 +313,17 @@ export function App(): JSX.Element {
       }}
     >
       <div
-        ref={view.containerRef}
+        ref={(el: HTMLDivElement | null) => {
+          // Two consumers of the same element: useViewport attaches the
+          // non-passive wheel listener, useHover needs the rect to convert
+          // client coordinates into container coordinates.
+          view.containerRef(el);
+          hoverApi.containerRef(el);
+        }}
         onPointerDown={view.onPointerDown}
         onPointerMove={view.onPointerMove}
         onPointerUp={view.onPointerUp}
+        onPointerLeave={view.onPointerLeave}
         style={{
           position: 'absolute',
           left: 0,
@@ -214,7 +331,9 @@ export function App(): JSX.Element {
           top: 0,
           bottom: BAR_HEIGHT,
           overflow: 'hidden',
-          cursor,
+          // 'grab' at rest / 'grabbing' while held — plain left-drag pans
+          // the canvas (capability C), space-drag still does too.
+          cursor: view.cursor,
           touchAction: 'none',
         }}
       >
@@ -232,9 +351,29 @@ export function App(): JSX.Element {
                 transform (px units + a 250ms transition), which belongs in
                 `style`, not in the SVG transform attribute. */}
             <g style={view.style}>
-              <Canvas doc={frame.doc} laidOut={frame.laidOut} paths={frame.paths} />
+              <Canvas
+                doc={frame.doc}
+                laidOut={frame.laidOut}
+                paths={frame.paths}
+                hoveredId={hoveredNode?.id ?? null}
+                onHoverNode={hoverApi.onHoverNode}
+                onHoverMove={hoverApi.onHoverMove}
+              />
             </g>
           </svg>
+        )}
+        {/* Layer 7, in HTML: the inspection panel, a SIBLING of the <svg>
+            inside this positioned container (HoverCard.tsx's contract). It
+            sets pointer-events:none itself, so it can never steal the hover
+            it describes nor interrupt a pan drag. */}
+        {hoveredNode === null ? null : (
+          <HoverCard
+            node={hoveredNode}
+            x={hover.x}
+            y={hover.y}
+            vw={vw}
+            vh={vh}
+          />
         )}
       </div>
       <StatusBar

@@ -1,6 +1,7 @@
-// render/icons.tsx — seven hand-drawn 20px inline SVG glyphs, one per
-// NodeType (spec §8.2). Simple line art, stroke currentColor, no icon
-// library. Each renders as a nested <svg> so the caller positions it
+// render/icons.tsx — one hand-drawn 20px inline SVG glyph per NodeType
+// (spec §8.2; the eighth, `entity`, is the ERD addition). Simple line
+// art, stroke currentColor, no icon library. Each renders as a nested
+// <svg> so the caller positions it
 // with x/y inside the main canvas <svg>; the colour is inherited from
 // the CSS `color` of the surrounding element (currentColor).
 
@@ -105,6 +106,16 @@ export function ExternalIcon(props: IconProps): JSX.Element {
   );
 }
 
+/** entity — a table/grid: a header band over a two-column body (ERD mode). */
+export function EntityIcon(props: IconProps): JSX.Element {
+  return (
+    <Glyph {...props}>
+      <rect x={2.5} y={3.5} width={15} height={13} rx={1.5} />
+      <path d="M2.5 7.5h15M2.5 12h15M8.5 7.5v9" />
+    </Glyph>
+  );
+}
+
 /** One glyph per NodeType (spec §8.2). */
 export const NODE_ICONS: Record<NodeType, (props: IconProps) => JSX.Element> = {
   service: ServiceIcon,
@@ -114,4 +125,5 @@ export const NODE_ICONS: Record<NodeType, (props: IconProps) => JSX.Element> = {
   storage: StorageIcon,
   client: ClientIcon,
   external: ExternalIcon,
+  entity: EntityIcon,
 };

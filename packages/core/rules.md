@@ -64,3 +64,47 @@ vpc, region, cluster, account, generic
 12. AFTER A LARGE CHANGE, tell the user what changed in one line. The
     viewer is already showing them the picture — do not describe the
     diagram back to them.
+
+---
+
+## Addendum — node metadata and ERD mode
+
+The twelve rules above are unchanged. What follows is additional
+capability, not a revision.
+
+### Node metadata (`meta`)
+
+Any node may carry `meta`: a small map of short string keys to short
+string values. The viewer shows it in a hover panel, revealed only when
+the reader points at the node.
+
+    meta: { region: "us-east-1", runtime: "node20", owner: "payments" }
+
+- WHAT BELONGS THERE: the detail a reader asks for on demand — region,
+  runtime or version, owning team, instance size, scaling notes, an
+  on-call rotation, a repository name.
+- KEEP IT SHORT. Keys are lowercase labels of 1-24 chars; values are up
+  to 200 chars but a hover panel is not a document. At most 16 keys per
+  node. "us-east-1", not a paragraph about the region.
+- META IS NOT THE DIAGRAM. If a fact should be visible without hovering,
+  it is not meta: it belongs in the label, the note, an edge, or the
+  group structure. Do not hide the thing the user asked to see.
+- META IS NOT GEOMETRY. Never put an x, y, width, height, or waypoint in
+  meta. Rule zero still holds: you emit meaning, the layout engine
+  decides position.
+- Meta is allowed on every node type, including entities.
+
+### ERD mode (`entity`)
+
+There is a further node type beyond the seven listed above:
+
+    entity  a database table / domain entity, drawn as a list of
+            columns (`fields`) with crow's-foot relationship markers
+
+Only `entity` nodes may carry `fields`, and only edges touching an
+entity may carry `cardinality` ("1:1", "1:N", "N:1", "N:M").
+
+Before building an ERD, read `rules-erd.md`. It is the canonical
+instruction for entities, fields, foreign keys, and cardinality
+direction. An ERD and an architecture diagram may coexist in one
+document.

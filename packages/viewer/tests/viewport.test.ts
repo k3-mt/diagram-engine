@@ -10,13 +10,21 @@ import {
   MAX_FIT_SCALE,
   MAX_SCALE,
   MIN_SCALE,
+  PAN_THRESHOLD_PX,
+  advanceDrag,
+  beginDrag,
   clampScale,
+  dragDistance,
+  dragPan,
+  endDrag,
   fitToContent,
   panBy,
+  panCursor,
   viewportTransform,
   wheelZoomFactor,
   zoomAt,
   type Bounds,
+  type DragState,
   type Viewport,
 } from '../src/render/viewport';
 import {
@@ -168,6 +176,140 @@ describe('pan and transform', () => {
     expect(viewportTransform({ scale: 2, tx: 3, ty: 4 })).toBe(
       'translate(3px, 4px) scale(2)',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Capability C: drag panning (plain left-drag and space-drag share the machine).
+
+/** Replay a whole gesture through the pure machine: down, moves…, up. */
+function gesture(
+  vp: Viewport,
+  from: [number, number],
+  moves: Array<[number, number]>,
+  mode: 'mouse' | 'space' = 'mouse',
+): { vp: Viewport; drag: DragState | null; moved: boolean } {
+  let drag: DragState | null = beginDrag(from[0], from[1], mode);
+  let cur = vp;
+  for (const [x, y] of moves) {
+    const step = dragPan(cur, drag as DragState, x, y);
+    cur = step.vp;
+    drag = step.drag;
+  }
+  const { drag: after, moved } = endDrag(drag);
+  return { vp: cur, drag: after, moved };
+}
+
+describe('drag panning — capability C', () => {
+  const vp: Viewport = { scale: 0.75, tx: 40, ty: -12 };
+
+  it('translates the camera by exactly (B - A) in screen px, one move', () => {
+    const A: [number, number] = [100, 200];
+    const B: [number, number] = [340, 130];
+    const out = gesture(vp, A, [B]);
+    expect(out.vp.tx).toBeCloseTo(vp.tx + (B[0] - A[0]), 9);
+    expect(out.vp.ty).toBeCloseTo(vp.ty + (B[1] - A[1]), 9);
+    expect(out.vp.scale).toBe(vp.scale);
+    expect(out.moved).toBe(true);
+  });
+
+  it('moves the content by (B - A)/scale in world units — the hand 1:1', () => {
+    const A: [number, number] = [10, 10];
+    const B: [number, number] = [90, -30];
+    const out = gesture(vp, A, [B]);
+    // The world point under the pointer at A is under the pointer at B.
+    const worldAtA = toWorld(vp, A[0], A[1]);
+    const worldAtB = toWorld(out.vp, B[0], B[1]);
+    expect(worldAtB.x).toBeCloseTo(worldAtA.x, 9);
+    expect(worldAtB.y).toBeCloseTo(worldAtA.y, 9);
+    // Equivalently: a fixed world point shifted by (B-A)/scale on screen,
+    // i.e. the world offset the camera travelled is (B-A)/scale.
+    const dWorldX = (out.vp.tx - vp.tx) / vp.scale;
+    const dWorldY = (out.vp.ty - vp.ty) / vp.scale;
+    expect(dWorldX).toBeCloseTo((B[0] - A[0]) / vp.scale, 9);
+    expect(dWorldY).toBeCloseTo((B[1] - A[1]) / vp.scale, 9);
+  });
+
+  it('accumulates many small moves to exactly (B - A), no swallowed pixels', () => {
+    const A: [number, number] = [0, 0];
+    const moves: Array<[number, number]> = [];
+    for (let i = 1; i <= 20; i += 1) moves.push([i * 7, -i * 3]);
+    const B = moves[moves.length - 1] as [number, number];
+    const out = gesture(vp, A, moves);
+    expect(out.vp.tx).toBeCloseTo(vp.tx + (B[0] - A[0]), 9);
+    expect(out.vp.ty).toBeCloseTo(vp.ty + (B[1] - A[1]), 9);
+  });
+
+  it('suppresses jitter below the threshold — a click is not swallowed', () => {
+    const A: [number, number] = [500, 400];
+    const jitter = gesture(vp, A, [
+      [501, 400],
+      [500, 401],
+      [502, 401],
+      [500, 400],
+    ]);
+    expect(jitter.vp).toEqual(vp); // camera untouched
+    expect(jitter.moved).toBe(false); // reported as a click, not a pan
+    expect(PAN_THRESHOLD_PX).toBeGreaterThan(0);
+    expect(dragDistance(beginDrag(...A), 502, 401)).toBeLessThanOrEqual(
+      PAN_THRESHOLD_PX,
+    );
+  });
+
+  it('once past the threshold, applies the FULL travel from the origin', () => {
+    // First real move is 10px right: the camera moves 10, not 10 minus the
+    // threshold — dragging A→B always lands on (B - A).
+    const d0 = beginDrag(0, 0);
+    const below = advanceDrag(d0, 2, 0);
+    expect(below.dx).toBe(0);
+    expect(below.drag.active).toBe(false);
+    const above = advanceDrag(below.drag, 10, 0);
+    expect(above.dx).toBe(10);
+    expect(above.dy).toBe(0);
+    expect(above.drag.active).toBe(true);
+  });
+
+  it('walks down → move → up and returns to idle', () => {
+    let drag: DragState | null = beginDrag(20, 20, 'mouse', 7);
+    expect(drag.active).toBe(false);
+    expect(drag.mode).toBe('mouse');
+    expect(drag.pointerId).toBe(7);
+
+    const step = advanceDrag(drag, 120, 60);
+    drag = step.drag;
+    expect(drag.active).toBe(true);
+    expect(drag.lastX).toBe(120);
+    expect(drag.lastY).toBe(60);
+
+    const up = endDrag(drag);
+    expect(up.drag).toBeNull();
+    expect(up.moved).toBe(true);
+    // Idle: a further "up" is harmless and reports no movement.
+    expect(endDrag(null)).toEqual({ drag: null, moved: false });
+  });
+
+  it('space-drag behaves identically and keeps its mode label', () => {
+    const A: [number, number] = [300, 300];
+    const B: [number, number] = [250, 380];
+    const mouse = gesture(vp, A, [B], 'mouse');
+    const space = gesture(vp, A, [B], 'space');
+    expect(space.vp).toEqual(mouse.vp);
+    expect(space.moved).toBe(true);
+    expect(beginDrag(A[0], A[1], 'space').mode).toBe('space');
+    // Space-drag jitter is suppressed the same way.
+    expect(gesture(vp, A, [[301, 301]], 'space').vp).toEqual(vp);
+  });
+
+  it('never touches scale — panning is translation only', () => {
+    for (const scale of [MIN_SCALE, 0.5, 1, MAX_SCALE]) {
+      const out = gesture({ scale, tx: 0, ty: 0 }, [0, 0], [[77, -55]]);
+      expect(out.vp.scale).toBe(scale);
+    }
+  });
+
+  it('reports grab at rest and grabbing while held', () => {
+    expect(panCursor(false)).toBe('grab');
+    expect(panCursor(true)).toBe('grabbing');
   });
 });
 

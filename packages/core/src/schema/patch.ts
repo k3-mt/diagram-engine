@@ -6,7 +6,16 @@
 import { z } from 'zod/v4';
 import { DirectionSchema, GEdgeSchema, GGroupSchema, GNodeSchema } from './graph.js';
 
-// Partial<Omit<GNode,'id'>> etc., derived from the same zod source.
+// Partial<Omit<GNode,'id'>> etc., derived from the same zod source — so any
+// property added to GNode/GGroup/GEdge (e.g. "fields", "meta", "cardinality")
+// becomes updatable through updateNode/updateEdge automatically.
+//
+// REPLACE, not merge: a key present in `changes` overwrites the whole property,
+// exactly as `label` or `type` do (apply.ts uses Object.assign). So
+// `changes: { fields: [...] }` replaces the entire column list, and the agent
+// clears a property predictably by passing an empty value — `fields: []`,
+// `meta: {}`. There is no per-field or per-meta-key merge; a key absent from
+// `changes` is left untouched.
 export const GNodeChangesSchema = GNodeSchema.omit({ id: true }).partial();
 export const GGroupChangesSchema = GGroupSchema.omit({ id: true }).partial();
 export const GEdgeChangesSchema = GEdgeSchema.omit({ id: true }).partial();

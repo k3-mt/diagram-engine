@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "title": "Billing service and its tables",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "billing-api",
+      "label": "Billing API",
+      "type": "service",
+      "parent": "vpc-billing",
+      "note": "issues and settles invoices",
+      "meta": {
+        "owner": "billing",
+        "runtime": "python 3.12 / fastapi",
+        "region": "eu-west-1",
+        "scaling": "2–10 pods"
+      }
+    },
+    {
+      "id": "billing-db",
+      "label": "Billing DB",
+      "type": "database",
+      "parent": "vpc-billing",
+      "note": "Postgres 16 — holds the two tables below",
+      "meta": { "owner": "billing", "backup": "PITR 35 days" }
+    },
+    {
+      "id": "invoice-jobs",
+      "label": "invoice-jobs",
+      "type": "queue",
+      "parent": "vpc-billing",
+      "note": "nightly invoice runs",
+      "meta": { "owner": "billing", "runtime": "sqs fifo" }
+    },
+    {
+      "id": "invoices",
+      "label": "invoices",
+      "type": "entity",
+      "parent": null,
+      "note": "table in Billing DB",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "account_id", "type": "uuid", "fk": true },
+        { "name": "number", "type": "varchar(24)", "note": "human-facing, gapless per year" },
+        { "name": "status", "type": "invoice_status", "note": "draft|open|paid|void" },
+        { "name": "currency", "type": "char(3)" },
+        { "name": "total", "type": "numeric(12,2)" },
+        { "name": "issued_at", "type": "timestamptz" },
+        { "name": "due_at", "type": "timestamptz" },
+        { "name": "paid_at", "type": "timestamptz", "nullable": true }
+      ],
+      "meta": { "owner": "billing", "rows": "~14M", "retention": "7 years" }
+    },
+    {
+      "id": "invoice-lines",
+      "label": "invoice_lines",
+      "type": "entity",
+      "parent": null,
+      "note": "table in Billing DB",
+      "fields": [
+        { "name": "id", "type": "uuid", "pk": true },
+        { "name": "invoice_id", "type": "uuid", "fk": true },
+        { "name": "description", "type": "varchar(160)" },
+        { "name": "quantity", "type": "numeric(10,3)" },
+        { "name": "unit_price", "type": "numeric(12,2)" },
+        { "name": "tax_rate", "type": "numeric(5,4)", "nullable": true },
+        { "name": "line_total", "type": "numeric(12,2)" }
+      ],
+      "meta": { "owner": "billing" }
+    }
+  ],
+  "groups": [
+    { "id": "vpc-billing", "label": "Billing VPC", "kind": "vpc", "parent": null }
+  ],
+  "edges": [
+    { "id": "x1", "from": "billing-api", "to": "billing-db", "label": "reads/writes", "style": "solid", "arrow": "forward" },
+    { "id": "x2", "from": "invoice-jobs", "to": "billing-api", "label": "triggers run", "style": "solid", "arrow": "forward" },
+    { "id": "x3", "from": "billing-db", "to": "invoices", "label": "stores", "style": "dashed", "arrow": "forward" },
+    { "id": "x4", "from": "billing-db", "to": "invoice-lines", "label": "stores", "style": "dashed", "arrow": "forward" },
+    { "id": "x5", "from": "invoices", "to": "invoice-lines", "label": "has", "cardinality": "1:N", "style": "solid", "arrow": "none" }
+  ],
+  "collapsed": []
+}

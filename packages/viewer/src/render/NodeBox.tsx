@@ -10,14 +10,19 @@
 // (§5.1: truncate, never wrap; wrapping makes heights vary and the
 // layout jumpier between turns).
 
+import type { MouseEventHandler } from 'react';
 import type { GNode } from '@diagram-engine/core';
 import type { Rect } from '../layout/fromElk.js';
-import { LABEL_FONT, NODE, measureText } from '../layout/measure.js';
+import { ACCENT_W, LABEL_FONT, NODE, measureText } from '../layout/measure.js';
 import { NODE_ICONS, ICON_SIZE } from './icons.js';
 import { theme } from './theme.js';
 
-/** Width of the type-coloured left border (§8.2). */
-export const ACCENT_W = 3;
+/**
+ * Width of the type-coloured left border (§8.2). Defined in
+ * layout/measure.ts — entity row sizing depends on it — and re-exported
+ * here, where the border is actually drawn.
+ */
+export { ACCENT_W };
 
 /** The font the optional second line (note) is drawn in. */
 export const NOTE_FONT = '400 11px system-ui, sans-serif';
@@ -32,6 +37,16 @@ export function labelWidth(rect: Rect): number {
 }
 
 /**
+ * Slack, in px, on the "does it fit" test. A box sized to fit a string
+ * EXACTLY (layout/measure.ts) hands the renderer an available width that
+ * was reached by a different chain of additions and subtractions, so it
+ * can land a floating-point hair BELOW the measured text — and the text
+ * would be ellipsised inside a box built to hold it. A thousandth of a
+ * pixel is invisible and kills that whole class of off-by-a-float.
+ */
+const FIT_EPSILON = 1e-3;
+
+/**
  * Shorten `text` with a trailing ellipsis until it fits `maxWidth` at
  * `font` (§5.1). Returns the text unchanged when it already fits.
  */
@@ -41,7 +56,7 @@ export function truncateToWidth(
   font: string = LABEL_FONT,
 ): string {
   if (maxWidth <= 0) return '';
-  if (measureText(text, font) <= maxWidth) return text;
+  if (measureText(text, font) <= maxWidth + FIT_EPSILON) return text;
   const chars = [...text];
   let lo = 0;
   let hi = chars.length;
@@ -56,13 +71,27 @@ export function truncateToWidth(
   return `${chars.slice(0, lo).join('').trimEnd()}…`;
 }
 
-export interface NodeBoxProps {
+/**
+ * Hover plumbing (capability B). Optional on every node component: when
+ * the handlers are absent nothing about the emitted markup changes, so a
+ * canvas without a hover panel renders byte-for-byte as before.
+ *
+ * These are INSPECTION events only — they may never mutate the document
+ * (§1.6 forbids mouse editing; §7 permits viewport/inspection controls).
+ */
+export interface HoverHandlers {
+  onMouseEnter?: MouseEventHandler<SVGGElement>;
+  onMouseLeave?: MouseEventHandler<SVGGElement>;
+  onMouseMove?: MouseEventHandler<SVGGElement>;
+}
+
+export interface NodeBoxProps extends HoverHandlers {
   node: GNode;
   rect: Rect;
 }
 
 /** Rounded-left-edge strip: the 3px type-coloured border (§8.2). */
-function accentPath(rect: Rect, r: number): string {
+export function accentPath(rect: Rect, r: number): string {
   const { x, y, height } = rect;
   const rr = Math.min(r, height / 2);
   return [
@@ -77,10 +106,10 @@ function accentPath(rect: Rect, r: number): string {
 }
 
 /** Layer 5: the box itself — white fill, thin stroke, accent border. */
-export function NodeBox({ node, rect }: NodeBoxProps): JSX.Element {
+export function NodeBox({ node, rect, ...hover }: NodeBoxProps): JSX.Element {
   const accent = theme.accent[node.type];
   return (
-    <g data-node={node.id} data-layer="node-box">
+    <g data-node={node.id} data-layer="node-box" {...hover}>
       <rect
         x={rect.x}
         y={rect.y}
@@ -99,7 +128,7 @@ export function NodeBox({ node, rect }: NodeBoxProps): JSX.Element {
 }
 
 /** Layer 6: the type icon plus the label (and optional note line). */
-export function NodeContent({ node, rect }: NodeBoxProps): JSX.Element {
+export function NodeContent({ node, rect, ...hover }: NodeBoxProps): JSX.Element {
   const Icon = NODE_ICONS[node.type];
   const accent = theme.accent[node.type];
   const avail = labelWidth(rect);
@@ -114,7 +143,7 @@ export function NodeContent({ node, rect }: NodeBoxProps): JSX.Element {
   const labelY = note === undefined ? midY : midY - 8;
 
   return (
-    <g data-node-content={node.id} data-layer="node-content">
+    <g data-node-content={node.id} data-layer="node-content" {...hover}>
       <g style={{ color: accent }}>
         <Icon x={cx} y={cy} />
       </g>

@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "title": "Checkout platform (annotated)",
+  "direction": "DOWN",
+  "nodes": [
+    {
+      "id": "storefront",
+      "label": "Storefront",
+      "type": "client",
+      "parent": null,
+      "note": "Next.js, server-rendered",
+      "meta": {
+        "owner": "web-platform",
+        "runtime": "node 20 on vercel",
+        "region": "global edge",
+        "repo": "acme/storefront",
+        "slo": "p95 TTFB < 400ms"
+      }
+    },
+    {
+      "id": "edge-cdn",
+      "label": "Edge CDN",
+      "type": "external",
+      "parent": null,
+      "note": "static assets and cache",
+      "meta": {
+        "owner": "web-platform",
+        "vendor": "Fastly",
+        "region": "anycast",
+        "cost": "~$4.2k / month"
+      }
+    },
+    {
+      "id": "api-gateway",
+      "label": "API Gateway",
+      "type": "service",
+      "parent": "region-eu",
+      "meta": {
+        "owner": "platform",
+        "runtime": "envoy 1.29",
+        "region": "eu-west-1",
+        "scaling": "3–24 pods, cpu 70%",
+        "oncall": "#platform-oncall"
+      }
+    },
+    {
+      "id": "checkout-service",
+      "label": "Checkout Service",
+      "type": "service",
+      "parent": "vpc-private",
+      "note": "owns the order state machine",
+      "meta": {
+        "owner": "orders",
+        "runtime": "jvm 21 / spring boot 3",
+        "region": "eu-west-1",
+        "scaling": "6–40 pods, rps-based",
+        "slo": "99.95% monthly availability",
+        "repo": "acme/checkout",
+        "deploy": "argo rollouts, canary 10%"
+      }
+    },
+    {
+      "id": "pricing-service",
+      "label": "Pricing Service",
+      "type": "service",
+      "parent": "vpc-private",
+      "meta": {
+        "owner": "catalogue",
+        "runtime": "go 1.22",
+        "region": "eu-west-1",
+        "scaling": "4–12 pods, fixed HPA",
+        "cache_ttl": "60s in-process"
+      }
+    },
+    {
+      "id": "orders-db",
+      "label": "Orders DB",
+      "type": "database",
+      "parent": "vpc-private",
+      "note": "Postgres 16, primary + 2 replicas",
+      "meta": {
+        "owner": "orders",
+        "runtime": "aurora postgres 16.2",
+        "region": "eu-west-1, multi-AZ",
+        "scaling": "db.r6g.4xlarge, 2 readers",
+        "backup": "PITR 35 days",
+        "pii": "billing address, email"
+      }
+    },
+    {
+      "id": "order-events",
+      "label": "order-events",
+      "type": "queue",
+      "parent": "vpc-private",
+      "note": "12 partitions, 7 day retention",
+      "meta": {
+        "owner": "orders",
+        "runtime": "msk kafka 3.6",
+        "region": "eu-west-1",
+        "scaling": "12 partitions, rf=3",
+        "schema": "avro, registry-enforced"
+      }
+    },
+    {
+      "id": "session-cache",
+      "label": "Session Cache",
+      "type": "cache",
+      "parent": "vpc-private",
+      "meta": {
+        "owner": "identity",
+        "runtime": "redis 7.2 cluster",
+        "region": "eu-west-1",
+        "scaling": "3 shards, 1 replica each",
+        "eviction": "volatile-lru, 8GB"
+      }
+    },
+    {
+      "id": "receipts-bucket",
+      "label": "Receipts",
+      "type": "storage",
+      "parent": "region-eu",
+      "note": "PDF receipts, versioned",
+      "meta": {
+        "owner": "orders",
+        "region": "eu-west-1",
+        "retention": "7 years, glacier after 90d",
+        "encryption": "SSE-KMS, customer key"
+      }
+    },
+    {
+      "id": "stripe",
+      "label": "Stripe",
+      "type": "external",
+      "parent": null,
+      "note": "card capture and payouts",
+      "meta": {
+        "owner": "payments",
+        "vendor": "Stripe",
+        "region": "us / eu dual-processing",
+        "contact": "#payments-vendors"
+      }
+    }
+  ],
+  "groups": [
+    { "id": "region-eu", "label": "eu-west-1", "kind": "region", "parent": null },
+    { "id": "vpc-private", "label": "Private VPC", "kind": "vpc", "parent": "region-eu" }
+  ],
+  "edges": [
+    { "id": "m1", "from": "storefront", "to": "edge-cdn", "label": "assets", "style": "dashed", "arrow": "forward" },
+    { "id": "m2", "from": "storefront", "to": "api-gateway", "label": "https", "style": "solid", "arrow": "forward" },
+    { "id": "m3", "from": "api-gateway", "to": "checkout-service", "label": "routes", "style": "solid", "arrow": "forward" },
+    { "id": "m4", "from": "api-gateway", "to": "session-cache", "label": "verifies", "style": "solid", "arrow": "forward" },
+    { "id": "m5", "from": "checkout-service", "to": "pricing-service", "label": "quotes", "style": "solid", "arrow": "forward" },
+    { "id": "m6", "from": "checkout-service", "to": "orders-db", "label": "reads/writes", "style": "solid", "arrow": "forward" },
+    { "id": "m7", "from": "checkout-service", "to": "order-events", "label": "publishes", "style": "solid", "arrow": "forward" },
+    { "id": "m8", "from": "checkout-service", "to": "stripe", "label": "charges", "style": "solid", "arrow": "both" },
+    { "id": "m9", "from": "checkout-service", "to": "receipts-bucket", "label": "writes pdf", "style": "dashed", "arrow": "forward" }
+  ],
+  "collapsed": []
+}

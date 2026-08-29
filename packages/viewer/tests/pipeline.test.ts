@@ -36,6 +36,9 @@ const VALID_FIXTURES = [
   'flat-three-nodes.json',
   'nested-two-deep.json',
   'cross-boundary-edges.json',
+  'erd-ecommerce.json',
+  'meta-rich.json',
+  'mixed-erd-architecture.json',
 ] as const;
 
 /** The fixture whose edges are known to cross (the hop demo). */
