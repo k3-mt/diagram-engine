@@ -83,6 +83,40 @@ for (const file of findPackageJsons(ROOT)) {
   }
 }
 
+// Acceptance G8 (spec §1.5): no key handling anywhere in source either, not
+// merely in the manifests. This file necessarily names the strings it bans,
+// so it excludes itself.
+const BANNED_STRINGS = [
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'api.anthropic.com',
+  'api.openai.com'
+];
+const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|jsx)$/;
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'logs', 'coverage']);
+
+function walkSource(dir, fn) {
+  for (const entry of readdirSync(dir)) {
+    if (SKIP_DIRS.has(entry)) continue;
+    const full = join(dir, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) walkSource(full, fn);
+    else fn(full);
+  }
+}
+
+walkSource(ROOT, (file) => {
+  if (!SOURCE_EXT.test(file)) return;
+  if (file.includes('check-no-model-sdk')) return;
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch { return; }
+  for (const banned of BANNED_STRINGS) {
+    if (text.includes(banned)) {
+      violations.push(`${relative(ROOT, file)}: source contains "${banned}"`);
+    }
+  }
+});
+
 if (violations.length) {
   console.error('check:no-model-sdk FAILED — model SDKs are banned (spec §1.3):');
   for (const v of violations) console.error(`  ${v}`);

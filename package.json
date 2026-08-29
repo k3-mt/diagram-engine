@@ -2,7 +2,7 @@
   "name": "diagram-engine",
   "private": true,
   "version": "0.0.0",
-  "description": "Prompt-driven architecture diagramming engine — local agent architecture, no API keys",
+  "description": "Prompt-driven architecture diagramming engine \u2014 local agent architecture, no API keys",
   "workspaces": [
     "packages/*"
   ],
@@ -10,7 +10,9 @@
     "test": "vitest run",
     "build": "npm run build --workspace @diagram-engine/cli && npm run build --workspace @diagram-engine/viewer",
     "typecheck": "npm run typecheck --workspaces",
-    "check:no-model-sdk": "node scripts/check-no-model-sdk.mjs"
+    "check:no-model-sdk": "node scripts/check-no-model-sdk.mjs",
+    "check": "npm run check:no-model-sdk && npm run check:deps",
+    "check:deps": "node scripts/check-deps.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
