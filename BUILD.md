@@ -255,6 +255,38 @@ remaining work.
 > binding is a citation to a source that does not say what you claim, which is worse than
 > no citation at all.
 
+### Phase 6 — The prose benchmark
+
+Phase 3 built a rig that points an agent at a **repository** and scores what it draws. That
+measures the harder, adjacent problem. It is not the product.
+
+The product is spec §1.2: you talk, the diagram builds beside you. Codebase reading is one
+input to that, and §1.3 presents it as an advantage rather than the core case. **G1 — "a
+100-word description produces a correct diagram, no follow-up" — is the headline acceptance
+criterion and the only one nothing measures**, because both reference systems are
+repositories, not paragraphs.
+
+Dictation is strictly easier than inference: the facts are stated rather than discovered.
+So the existing scores are evidence for it, not a substitute. The failures differ.
+
+| id | task | spec | verify |
+|---|---|---|---|
+| P6-01 | Prose fixtures in `fixtures/prose/`: at least six ~100-word descriptions covering a plain system, an explicit boundary, a stated async path, a stated redundancy, an underspecified one, and one whose obvious reading is wrong | §1.5 G1 | each fixture is one file with the prose and nothing else |
+| P6-02 | **A second agent writes each gold independently from the prose alone.** Disagreement between two faithful readings means the prose is ambiguous — that is a finding about the fixture, not the model | §1.5 G1 | every gold validates; disagreements recorded |
+| P6-03 | Multi-turn correction fixtures: an initial description, then a correction ("actually those two are replicas", "the worker reads from the queue, not the other way round"). Scores whether the agent emits `updateEdge` rather than redrawing, and whether turn-1 ids survive | §1.5 G3, §18.11 | ids from turn 1 present in the turn-2 document |
+| P6-04 | `scripts/eval.sh --prose <name>`, reusing `score.mjs` — node set, edge set, direction, invention — with **one turn** enforced, since G1's claim is "no follow-up" | §1.5 G1 | `--prose` produces the same four numbers |
+| P6-05 | An **ambiguity** score: on an underspecified fixture the correct behaviour is to leave the gap or ask, never to fill it. This is G13's analogue for dictation and is the failure a user actually meets | §1.5 G1, rule 8 | an invented element on an underspecified fixture scores as invention |
+
+**Why P6-02 is worth the second agent.** In Phase 3 the reason was that a builder must not
+grade its own answer key. Here it is different and better: the prose IS the specification, so
+two independent faithful readings should agree. Where they do not, the paragraph is
+ambiguous — and an ambiguous fixture measures the reader, not the tool.
+
+**P6-05 is the one to get right.** In a repository the temptation is a plausible component
+that is not there; the planted absence catches that. In dictation the temptation is *filling
+a gap in what the user said*, and nothing currently measures whether the agent asks, omits,
+or quietly invents. That is the failure a user notices first.
+
 ---
 
 ## Part 5 — Acceptance

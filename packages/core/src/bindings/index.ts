@@ -4,3 +4,4 @@
 // and the viewer can import this directory by path.
 
 export * from './ref.js';
+export * from './identifier.js';

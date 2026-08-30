@@ -130,6 +130,21 @@ export function isUrlLike(ref: string): boolean {
 const SCOPED_PACKAGE = /^@[^/\s]+\/[^/\s]+$/;
 
 /**
+ * A kubernetes resource address: `Deployment/orders`, `StatefulSet/pg-0`.
+ *
+ * A KIND is UpperCamelCase and a name is a DNS label, so the shape is
+ * distinctive: no dot, no directory-ish spelling, and a capitalised first
+ * segment that no repo-relative manifest path starts with. Left to the plain
+ * "/" rule this reads as a path called `Deployment/orders`, and every correct
+ * kind/name citation comes back missing — the same wrong "missing" the
+ * extension allowlist and the scoped-package rule above exist to prevent, and
+ * the reason §3.8's k8s row says "kind AND metadata.name" rather than a path.
+ * A ref that names a manifest FILE (`deploy/orders.yaml`) has a lowercase
+ * first segment and an extension, so it stays a path.
+ */
+const K8S_KIND_NAME = /^[A-Z][A-Za-z0-9]*\/[a-z0-9][a-z0-9._-]*$/;
+
+/**
  * Path or identifier. Shape decides it (see PATH_LIKE_EXTENSIONS) — except
  * where the SOURCE settles what the ref can possibly name, which is two cases:
  *
@@ -141,19 +156,22 @@ const SCOPED_PACKAGE = /^@[^/\s]+\/[^/\s]+$/;
  *     an invented citation surviving the check that exists to catch it, and one
  *     the eval then excluded from precision while still counting it as effort.
  *     Under `repo` they are paths, they are resolved, and they are missing.
- *  2. `package=@acme/utils` is ONE package name, not a directory. The "/" rule
+ *  2. `package=@acme/utils` is ONE package name, not a directory, and
+ *     `k8s-manifest=Deployment/orders` is ONE resource address, not a
+ *     directory called Deployment. The "/" rule
  *     would read it as a path and report every correct scoped-package citation
  *     as missing — the wrong "missing" this file exists to avoid, the same
  *     reason `terraform=aws_ecs_service.orders` is not a file called `.orders`.
  *
- * `compose`, `terraform` and `k8s-manifest` keep the pure shape rule: a service
- * key, a resource address and a manifest resource name are all legitimate
- * identifiers, and each of the three can equally name a file
- * (`compose=docker-compose.yml`).
+ * `compose`, `terraform` and `k8s-manifest` otherwise keep the pure shape
+ * rule: a service key, a resource address and a manifest resource name are all
+ * legitimate identifiers, and each of the three can equally name a file
+ * (`compose=docker-compose.yml`, `k8s-manifest=deploy/orders.yaml`).
  */
 export function bindingRefKind(ref: string, source?: BindingSource): BindingRefKind {
   const trimmed = ref.trim();
   if (source === 'package' && SCOPED_PACKAGE.test(trimmed)) return 'identifier';
+  if (source === 'k8s-manifest' && K8S_KIND_NAME.test(trimmed)) return 'identifier';
   if (source === 'repo') return 'path';
   if (trimmed.includes('/')) return 'path';
   const dot = trimmed.lastIndexOf('.');
