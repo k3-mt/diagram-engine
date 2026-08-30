@@ -541,6 +541,38 @@ bindings — 14 elements, 22 bindings
   stale      1   e7        repo=internal/pay.go:412   file has term lines
 ```
 
+### Identifier refs must be checkable too
+
+A ref that names a thing *inside* a file — `terraform=aws_ecs_service.orders`,
+`compose=orders-api`, `package=@acme/orders` — cannot be resolved as a path. Reporting it
+`ok` would be the exact lie this feature prevents, so the first implementation reported it
+`unchecked`. Honest, but it left **about a quarter of all citations asserted rather than
+verified**, invisible behind a headline precision of 1.0.
+
+Identifier refs are checkable, and deterministically. For each source, look in the files
+that source can live in, and match a **structured pattern** — never a bare substring, which
+would report a citation `ok` because the string appears in a comment:
+
+| source | searched in | must match |
+|---|---|---|
+| `terraform` | `*.tf` | `resource "aws_ecs_service" "orders"`, and the `module`/`data`/`variable` forms |
+| `compose` | `docker-compose*.y*ml`, `compose*.y*ml` | a service key under `services:` |
+| `package` | `package.json` | the `name` field, exactly |
+| `k8s-manifest` | `*.yaml`, `*.yml` | a document whose `kind` and `metadata.name` both match |
+
+Three rules keep this honest:
+
+1. **No candidate file of the right kind → `missing`, not `unchecked`.** Citing Terraform in
+   a repository with no `.tf` file is a wrong citation, and saying so is the point.
+2. **A pattern that cannot be written precisely stays `unchecked`.** Guessing is worse than
+   admitting. The count of unchecked bindings is always reported, so the gap is visible
+   rather than absorbed into a passing number.
+3. **The search is bounded and deterministic**: same tree, same answer, every time. It reads
+   only files under `--root`, and only files of the kind the source names.
+
+`unchecked` should approach zero on a real repository. It is a residue, not a category the
+tool is comfortable with.
+
 Three properties make this worth building rather than a nicety:
 
 1. **It runs in CI.** A diagram whose citations no longer resolve is a diagram that has
