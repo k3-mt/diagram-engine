@@ -125,6 +125,26 @@ describe('bindingRefKind — shape decides, not source', () => {
     expect(bindingRefKind('orders-deployment', 'k8s-manifest')).toBe('identifier');
   });
 
+  it('reads a terraform resource name that collides with a file extension as an address', () => {
+    // `lock`, `env`, `conf`, `sql`, `go`, `md` are all on the general
+    // extension allowlist AND all ordinary Terraform resource names —
+    // `aws_dynamodb_table.lock` is the canonical state-lock table. Under the
+    // general rule each was stat'd as a relative path and reported
+    // `missing — no such path`: a correct citation failing the build with a
+    // reason its author could not act on.
+    expect(bindingRefKind('aws_dynamodb_table.lock', 'terraform')).toBe('identifier');
+    expect(bindingRefKind('aws_ssm_parameter.env', 'terraform')).toBe('identifier');
+    expect(bindingRefKind('aws_s3_bucket.conf', 'terraform')).toBe('identifier');
+    expect(bindingRefKind('module.go', 'terraform')).toBe('identifier');
+    // A terraform ref that really does name a FILE is still a path.
+    expect(bindingRefKind('main.tf', 'terraform')).toBe('path');
+    expect(bindingRefKind('terraform.tfvars', 'terraform')).toBe('path');
+    expect(bindingRefKind('infra/main.tf', 'terraform')).toBe('path');
+    // And no other source's rule moved.
+    expect(bindingRefKind('go.mod')).toBe('path');
+    expect(bindingRefKind('service.lock', 'repo')).toBe('path');
+  });
+
   it('reads a scoped package name as one identifier, not a directory', () => {
     expect(bindingRefKind('@acme/utils', 'package')).toBe('identifier');
     expect(bindingRefKind('lodash', 'package')).toBe('identifier');

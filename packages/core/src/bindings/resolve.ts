@@ -26,8 +26,10 @@ import type { GraphDoc } from '../schema/graph.js';
 import {
   candidateDescription,
   definesIdentifier,
+  identifierRefProblem,
   isCandidateFilename,
   isIdentifierSource,
+  isUnreadableCandidateFilename,
   type IdentifierSource,
 } from './identifier.js';
 import {
@@ -316,8 +318,38 @@ export interface CandidateIndex {
   /** The root the walk started at, already realpath'd. */
   root: string;
   files: Record<IdentifierSource, string[]>;
-  /** The walk stopped early: MAX_WALK_ENTRIES or MAX_CANDIDATE_FILES was hit. */
+  /**
+   * The WALK stopped early — MAX_WALK_ENTRIES. This one really is global: the
+   * tree was not fully visited, so no source's list is known to be complete.
+   */
   truncated: boolean;
+  /**
+   * Per source, that source's own file cap was reached, so ITS list is short.
+   *
+   * This used to be folded into `truncated`, and the single flag was a hole.
+   * `k8s-manifest` matches every `*.yaml` under the root, and 400 of those is
+   * an ordinary Kubernetes repository — so one full bucket both aborted the
+   * whole walk and downgraded every OTHER source's verdict, turning genuinely
+   * wrong terraform and package citations from `missing`/exit 1 into
+   * `unchecked`/exit 0, silently, for a reason having nothing to do with the
+   * citation. That is the unverified residue this feature exists to close,
+   * coming back through the door marked "bounded".
+   */
+  full: Record<IdentifierSource, boolean>;
+  /**
+   * Names of directories the walk declined to enter (SKIP_DIRECTORIES), sorted
+   * and unique. Reported, because "no *.tf file under the root" is a false
+   * statement when the only *.tf sits in `build/`, and a reader given that
+   * sentence has no way to discover that a skip list narrowed the search.
+   */
+  skipped: string[];
+  /**
+   * Per source, files of the right subject in a spelling the matchers cannot
+   * read — today only `*.tf.json`. Present-but-unreadable is rule 2
+   * (`unchecked`), not rule 1 (`missing`): a repository that is entirely
+   * Terraform in JSON syntax is not a repository with no Terraform in it.
+   */
+  unreadable: Record<IdentifierSource, number>;
   /** Directory entries examined, capped at MAX_WALK_ENTRIES. */
   entries: number;
 }
@@ -351,8 +383,17 @@ export function indexCandidateFiles(
     package: [],
     'k8s-manifest': [],
   };
-  const index: CandidateIndex = { root: realRoot, files, truncated: false, entries: 0 };
+  const index: CandidateIndex = {
+    root: realRoot,
+    files,
+    truncated: false,
+    full: { terraform: false, compose: false, package: false, 'k8s-manifest': false },
+    skipped: [],
+    unreadable: { terraform: 0, compose: 0, package: 0, 'k8s-manifest': 0 },
+    entries: 0,
+  };
   const seen = new Set<string>([realRoot]);
+  const skipped = new Set<string>();
 
   const walk = (dir: string): void => {
     if (index.truncated) return;
@@ -384,24 +425,34 @@ export function indexCandidateFiles(
         const st = statOrUndefined(real);
         if (st === undefined) continue;
         if (st.isDirectory()) {
-          if (SKIP_DIRECTORIES.has(entry.name) || seen.has(real)) continue;
+          if (SKIP_DIRECTORIES.has(entry.name)) {
+            skipped.add(entry.name);
+            continue;
+          }
+          if (seen.has(real)) continue;
           seen.add(real);
           directories.push(full);
           continue;
         }
         if (!st.isFile()) continue;
       } else if (entry.isDirectory()) {
-        if (SKIP_DIRECTORIES.has(entry.name)) continue;
+        if (SKIP_DIRECTORIES.has(entry.name)) {
+          skipped.add(entry.name);
+          continue;
+        }
         directories.push(full);
         continue;
       } else if (!entry.isFile()) {
         continue; // a FIFO, a socket, a device: nothing to read an identifier from
       }
       for (const kind of IDENTIFIER_KINDS) {
+        if (isUnreadableCandidateFilename(kind, entry.name)) index.unreadable[kind] += 1;
         if (!isCandidateFilename(kind, entry.name)) continue;
         const bucket = files[kind];
         if (bucket.length >= limits.maxFiles) {
-          index.truncated = true;
+          // ONLY this bucket is short, and the walk keeps going. A full
+          // k8s-manifest bucket must not cost the terraform search its answer.
+          index.full[kind] = true;
           continue;
         }
         bucket.push(full);
@@ -411,6 +462,7 @@ export function indexCandidateFiles(
   };
 
   walk(realRoot);
+  index.skipped = [...skipped].sort();
   return index;
 }
 
@@ -477,18 +529,52 @@ export class IdentifierSearch {
    *     second one may fail a build.
    */
   lookup(source: IdentifierSource, identifier: string): IdentifierOutcome {
+    // Before anything is opened: can this REF be turned into a pattern at all?
+    // `terraform=totally-invented-thing`, `terraform=a.b.c.d`,
+    // `terraform=each.value` are decided by the string the agent wrote, not by
+    // the tree, so they belong on the failing side. Routed to `unchecked` they
+    // sat outside precision's denominator and exited 0 — an agent could invent
+    // citations and still score precision 1.0 — and the report blamed whichever
+    // candidate file happened to sort first for a defect in no file at all.
+    const refProblem = identifierRefProblem(source, identifier);
+    if (refProblem !== undefined) {
+      return { status: 'missing', reason: `${refProblem} — nothing to search for` };
+    }
+
     const index = this.candidates();
     const kindDescription = candidateDescription(source);
     const candidates = index.files[source];
+    // Two different bounds, kept apart. `truncated` means the WALK stopped, so
+    // nothing is known to be complete; `full[source]` means only THIS source's
+    // list is short. One shared flag let a yaml-heavy repository downgrade
+    // every terraform verdict in the document.
+    const incomplete = index.truncated || index.full[source];
+    // `no *.tf file under the root` is false when the only *.tf is in `build/`.
+    // The skip list is fixed and small, but the reader cannot see it from the
+    // report, so the report says what was not searched.
+    const skipNote =
+      index.skipped.length === 0
+        ? ''
+        : ` (${listSkipped(index.skipped)} ${index.skipped.length === 1 ? 'was' : 'were'} not searched)`;
 
     if (candidates.length === 0) {
-      if (index.truncated) {
+      if (incomplete) {
         return {
           status: 'unchecked',
           reason: `the search hit its bound before finding any ${kindDescription} file`,
         };
       }
-      return { status: 'missing', reason: `no ${kindDescription} file under the root` };
+      if (index.unreadable[source] > 0) {
+        // Rule 2, not rule 1. A repository whose Terraform is all written in
+        // the JSON syntax is not a repository with no Terraform in it, and
+        // accusing a correct citation there would be the mirror of the lie
+        // this feature exists to prevent.
+        return {
+          status: 'unchecked',
+          reason: `only ${unreadableDescription(source)} under the root — that spelling is not matched`,
+        };
+      }
+      return { status: 'missing', reason: `no ${kindDescription} file under the root${skipNote}` };
     }
 
     let blocked: string | undefined;
@@ -510,19 +596,46 @@ export class IdentifierSearch {
       }
     }
 
+    const n = candidates.length;
+    const counted =
+      n === 1 ? `the 1 ${kindDescription} file` : `any of the ${n} ${kindDescription} files`;
     if (blocked !== undefined) return { status: 'unchecked', reason: blocked };
-    if (index.truncated) {
+    if (incomplete) {
       return {
         status: 'unchecked',
-        reason: `not found in ${candidates.length} ${kindDescription} files, and the search hit its bound before reading the whole tree`,
+        reason: `not found in ${counted} read, and ${
+          index.truncated
+            ? 'the search hit its bound before reading the whole tree'
+            : `the ${kindDescription} candidate list hit its ${this.limits.maxFiles}-file cap`
+        }`,
       };
     }
-    const n = candidates.length;
-    return {
-      status: 'missing',
-      reason: `not defined in ${n === 1 ? `the 1 ${kindDescription} file` : `any of the ${n} ${kindDescription} files`} under the root`,
-    };
+    if (index.unreadable[source] > 0) {
+      return {
+        status: 'unchecked',
+        reason: `not defined in ${counted} under the root, and ${unreadableDescription(source)} ${
+          index.unreadable[source] === 1 ? 'was' : 'were'
+        } not matched`,
+      };
+    }
+    return { status: 'missing', reason: `not defined in ${counted} under the root${skipNote}` };
   }
+}
+
+/** `node_modules, dist and 2 more` — the skipped directories, bounded. */
+function listSkipped(names: readonly string[]): string {
+  const MAX = 3;
+  if (names.length <= MAX) {
+    return names.length === 1
+      ? (names[0] as string)
+      : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1] as string}`;
+  }
+  return `${names.slice(0, MAX).join(', ')} and ${names.length - MAX} more`;
+}
+
+/** How the report names files of the right subject in a spelling it cannot read. */
+function unreadableDescription(source: IdentifierSource): string {
+  return source === 'terraform' ? '*.tf.json' : 'files this matcher cannot read';
 }
 
 /**

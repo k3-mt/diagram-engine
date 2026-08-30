@@ -159,8 +159,75 @@ describe('IdentifierSearch.lookup', () => {
     const root = repo();
     expect(new IdentifierSearch(root).lookup('terraform', 'aws_ecs_service.vendored')).toEqual({
       status: 'missing',
-      reason: 'not defined in the 1 *.tf file under the root',
+      reason:
+        'not defined in the 1 *.tf file under the root (.git, dist and node_modules were not searched)',
     });
+  });
+
+  it('says which directories it declined to enter, so a `missing` is not a false claim', () => {
+    // `no *.tf file under the root` is a FALSE statement when the only *.tf
+    // sits in `build/`, and the reader has no way to discover that a skip list
+    // narrowed the search. Downgrading these to `unchecked` would be worse —
+    // every repository has a node_modules or a .git, so it would delete rule 1
+    // outright — so the reason says what was not searched instead.
+    const root = temp('diagram-search-skipped-');
+    write(root, 'build/main.tf', 'resource "aws_ecs_service" "orders" {}\n');
+    expect(new IdentifierSearch(root).lookup('terraform', 'aws_ecs_service.orders')).toEqual({
+      status: 'missing',
+      reason: 'no *.tf file under the root (build was not searched)',
+    });
+    // A tree with nothing skipped says it plainly.
+    const clean = temp('diagram-search-clean-');
+    expect(new IdentifierSearch(clean).lookup('terraform', 'aws_ecs_service.orders').reason).toBe(
+      'no *.tf file under the root',
+    );
+  });
+
+  it('does not accuse a repository whose terraform is all *.tf.json (rule 2, not rule 1)', () => {
+    const root = temp('diagram-search-tfjson-');
+    write(root, 'infra/main.tf.json', '{"resource":{"aws_ecs_service":{"orders":{}}}}\n');
+    expect(new IdentifierSearch(root).lookup('terraform', 'aws_ecs_service.orders')).toEqual({
+      status: 'unchecked',
+      reason: 'only *.tf.json under the root — that spelling is not matched',
+    });
+  });
+
+  it('reports a ref that is not an address at all as missing, naming no file', () => {
+    // The gameable path: these are decided by the string the agent wrote, so
+    // routing them to `unchecked` put them outside precision's denominator and
+    // exited 0. And the old report blamed whichever candidate file sorted
+    // first for a defect that is in no file.
+    const root = repo();
+    const search = new IdentifierSearch(root);
+    for (const bad of ['totally-invented-thing', 'local.made_up.x', 'a.b.c.d', 'each.value']) {
+      const got = search.lookup('terraform', bad);
+      expect(got.status, bad).toBe('missing');
+      expect(got.reason, bad).toContain('nothing to search for');
+      expect(got.reason, bad).not.toContain('main.tf');
+    }
+  });
+
+  it('keeps one full candidate bucket from downgrading every other source', () => {
+    // A single global `truncated` flag meant 400 *.yaml files — an ordinary
+    // Kubernetes repository — both aborted the whole walk and turned genuinely
+    // wrong terraform citations from `missing`/exit 1 into `unchecked`/exit 0.
+    const root = temp('diagram-search-buckets-');
+    for (let i = 0; i < 5; i += 1) write(root, `a/m${i}.yaml`, 'kind: ConfigMap\nmetadata:\n  name: c\n');
+    write(root, 'z/main.tf', 'resource "aws_ecs_service" "orders" {}\n');
+    const limits: SearchLimits = { ...DEFAULT_SEARCH_LIMITS, maxFiles: 3 };
+    const search = new IdentifierSearch(root, limits);
+    // The walk kept going, so the terraform file after the full bucket is found.
+    expect(search.lookup('terraform', 'aws_ecs_service.orders').status).toBe('ok');
+    // A terraform citation that is genuinely wrong still fails.
+    expect(search.lookup('terraform', 'aws_ecs_service.ghost').status).toBe('missing');
+    // Only the source whose own cap was hit is weakened.
+    const index = search.candidates();
+    expect(index.truncated).toBe(false);
+    expect(index.full['k8s-manifest']).toBe(true);
+    expect(index.full.terraform).toBe(false);
+    const k8s = search.lookup('k8s-manifest', 'ConfigMap/nowhere');
+    expect(k8s.status).toBe('unchecked');
+    expect(k8s.reason).toContain('3-file cap');
   });
 
   it('reports a source with no candidate files at all as missing (rule 1)', () => {

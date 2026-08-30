@@ -18,6 +18,7 @@ import {
   candidateDescription,
   composeDefines,
   definesIdentifier,
+  identifierRefProblem,
   isCandidateFilename,
   k8sDefines,
   packageDefines,
@@ -140,15 +141,157 @@ describe('terraformDefines', () => {
     expect(terraformDefines(text, 'data.aws_ecs_service.orders').verdict).toBe('defines');
   });
 
-  it('is unchecked, with a reason, where no precise pattern exists', () => {
-    // A local is a key inside a `locals { }` block. Finding it needs block
-    // scope a line pattern does not have, and guessing is worse than admitting.
-    expect(terraformDefines('locals {\n  orders = 1\n}\n', 'local.orders')).toEqual({
+  it('does not match a resource block that has been commented OUT with /* */', () => {
+    // The realistic false `ok`, and the one the docstring used to claim was
+    // excluded: commenting a block out with `/* */` while leaving it in the
+    // file is ordinary Terraform practice, and the line-start anchor does not
+    // see it, because the commented lines still begin at column 0. Certifying
+    // a citation to infrastructure that was deliberately DISABLED is exactly
+    // the lie provenance exists to prevent.
+    expect(
+      terraformDefines('/*\nresource "aws_ecs_service" "orders" {\n}\n*/\n', 'aws_ecs_service.orders'),
+    ).toEqual({ verdict: 'absent' });
+    // Same block, still live below the comment: the strip must not eat code.
+    expect(
+      terraformDefines(
+        '/*\nresource "aws_ecs_service" "orders" {}\n*/\nresource "aws_ecs_service" "orders" {}\n',
+        'aws_ecs_service.orders',
+      ),
+    ).toEqual({ verdict: 'defines', line: 4 });
+    // A `/*` inside a string is not a comment.
+    expect(
+      terraformDefines('resource "aws_ecs_service" "orders" {\n  x = "/*"\n}\n', 'aws_ecs_service.orders'),
+    ).toEqual({ verdict: 'defines', line: 1 });
+    expect(terraformDefines('/*\nresource "aws_ecs_service" "orders" {}\n', 'aws_ecs_service.orders')).toEqual({
       verdict: 'unchecked',
-      reason: 'a local is a key inside a locals block — no precise pattern',
+      reason: 'an unterminated /* block comment — not readable as HCL',
     });
-    expect(terraformDefines(tf, 'orders').verdict).toBe('unchecked');
-    expect(terraformDefines(tf, 'a.b.c.d').verdict).toBe('unchecked');
+  });
+
+  it('does not read a heredoc body as HCL', () => {
+    // Heredoc content is string DATA: an embedded template, a doc string or a
+    // local-exec script that writes a .tf file. A resource header in one is a
+    // quoted string, not a declaration.
+    const embedded =
+      'resource "null_resource" "d" {\n  triggers = {\n    doc = <<EOT\nresource "aws_ecs_service" "orders" {}\nEOT\n  }\n}\n';
+    expect(terraformDefines(embedded, 'aws_ecs_service.orders')).toEqual({ verdict: 'absent' });
+    expect(terraformDefines(embedded, 'null_resource.d')).toEqual({ verdict: 'defines', line: 1 });
+    // The indented form terminates on an indented terminator.
+    expect(
+      terraformDefines(
+        'resource "aws_instance" "a" {\n  user_data = <<-EOT\nresource "aws_ecs_service" "orders" {\n  EOT\n}\nresource "aws_ecs_service" "orders" {}\n',
+        'aws_ecs_service.orders',
+      ),
+    ).toEqual({ verdict: 'defines', line: 6 });
+    expect(
+      terraformDefines('x = <<EOT\nresource "aws_ecs_service" "orders" {}\n', 'aws_ecs_service.orders'),
+    ).toEqual({ verdict: 'unchecked', reason: 'an unterminated <<EOT heredoc — not readable as HCL' });
+  });
+
+  it('resolves a local against its locals block, rather than shrugging', () => {
+    // This used to be `unchecked`, which made a whole address family
+    // agent-choosable and unfalsifiable: `terraform=local.anything` scored
+    // outside precision's denominator and exited 0.
+    expect(terraformDefines('locals {\n  orders = 1\n}\n', 'local.orders')).toEqual({
+      verdict: 'defines',
+      line: 2,
+    });
+    expect(terraformDefines('locals {\n  "orders" = 1\n}\n', 'local.orders').verdict).toBe('defines');
+    // A USE of a local is not a declaration, and neither is a key nested
+    // inside another local's value.
+    expect(terraformDefines('locals {\n  a = local.orders\n}\n', 'local.orders')).toEqual({
+      verdict: 'absent',
+    });
+    expect(terraformDefines('locals {\n  tags = {\n    orders = 1\n  }\n}\n', 'local.orders')).toEqual({
+      verdict: 'absent',
+    });
+    // A locals block written on one line is the honest refusal.
+    expect(terraformDefines('locals { orders = 1 }\n', 'local.orders').verdict).toBe('unchecked');
+  });
+
+  it('treats a ref that is not a terraform address as a defect in the REF, not in a file', () => {
+    // Every one of these is decided by the string the agent wrote. Reporting
+    // them `unchecked` put them outside precision's denominator and exited 0,
+    // so an agent could invent citations at will and still score 1.0.
+    for (const bad of ['orders', 'a.b.c.d', 'var.x.y', 'each.value', 'path.module', 'a..b']) {
+      expect(identifierRefProblem('terraform', bad), bad).toBeTypeOf('string');
+    }
+    // A real address has no problem to report.
+    for (const good of ['aws_ecs_service.orders', 'module.network', 'data.aws_ami.ubuntu', 'local.x']) {
+      expect(identifierRefProblem('terraform', good), good).toBeUndefined();
+    }
+    expect(identifierRefProblem('compose', 'orders-api')).toBeUndefined();
+    expect(identifierRefProblem('package', '@acme/orders')).toBeUndefined();
+    expect(identifierRefProblem('k8s-manifest', 'Deployment/orders')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// line endings and byte-order marks — the false-`missing` side
+// ---------------------------------------------------------------------------
+
+describe('normalisation', () => {
+  it('reads a CRLF file exactly as it reads the same file with LF', () => {
+    // A Windows-authored manifest that plainly declares the cited resource was
+    // reported `missing` and failed the build; the same compose file was
+    // reported `unchecked` with the untrue reason "written in flow style".
+    expect(k8sDefines('apiVersion: apps/v1\r\nkind: Deployment\r\nmetadata:\r\n  name: orders\r\n', 'Deployment/orders')).toEqual(
+      { verdict: 'defines', line: 4 },
+    );
+    expect(composeDefines('services:\r\n  orders-api:\r\n    image: x\r\n', 'orders-api')).toEqual({
+      verdict: 'defines',
+      line: 2,
+    });
+    expect(terraformDefines('resource "aws_ecs_service" "orders" {\r\n}\r\n', 'aws_ecs_service.orders')).toEqual({
+      verdict: 'defines',
+      line: 1,
+    });
+    expect(packageDefines('{\r\n  "name": "@acme/orders"\r\n}\r\n', '@acme/orders')).toEqual({
+      verdict: 'defines',
+      line: 2,
+    });
+  });
+
+  it('reads a file that starts with a byte-order mark', () => {
+    expect(k8sDefines('\ufeffkind: Deployment\nmetadata:\n  name: orders\n', 'Deployment/orders')).toEqual({
+      verdict: 'defines',
+      line: 3,
+    });
+    // A BOM is legal in a file a Windows editor wrote; JSON.parse throws on it,
+    // and the report said the file was "not valid JSON", which it is.
+    expect(packageDefines('\ufeff{"name":"@acme/orders"}\n', '@acme/orders').verdict).toBe('defines');
+    expect(composeDefines('\ufeffservices:\n  orders-api:\n    image: x\n', 'orders-api')).toEqual({
+      verdict: 'defines',
+      line: 2,
+    });
+  });
+
+  it('accepts a quoted YAML key wherever it accepts a bare one', () => {
+    // keyAtIndent took `"name":` and topLevelScalar did not, so the key test
+    // passed, the value read came back undefined, and a correct citation was
+    // reported as naming something else.
+    expect(k8sDefines('kind: Deployment\nmetadata:\n  "name": orders\n', 'Deployment/orders').verdict).toBe(
+      'defines',
+    );
+    expect(k8sDefines('"kind": Deployment\nmetadata:\n  name: orders\n', 'Deployment/orders').verdict).toBe(
+      'defines',
+    );
+  });
+
+  it('finds a service listed after a merge key, rather than bailing at it', () => {
+    // A merge key can only ADD services, so a key found literally in the block
+    // is a definition whatever the anchor contributes. Bailing made the verdict
+    // depend on line order.
+    expect(composeDefines('services:\n  <<: *base\n  orders-api:\n    image: x\n', 'orders-api')).toEqual({
+      verdict: 'defines',
+      line: 3,
+    });
+    // And when the key really is not there, the merge key is still the honest
+    // reason we cannot say it is absent.
+    expect(composeDefines('services:\n  <<: *base\n  other:\n    image: x\n', 'orders-api')).toEqual({
+      verdict: 'unchecked',
+      reason: 'the services block uses a YAML merge key — needs a YAML parser',
+    });
   });
 });
 

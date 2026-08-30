@@ -80,11 +80,25 @@
 //    which counts unchecked against the agent. Citing unverifiably lowers the
 //    number it is graded on; it does not buy a green tick for free.
 //
-// And the loophole that WOULD have made this indefensible is already shut by
-// §3.8's rule 1: citing `terraform=...` in a repository holding no `.tf` file
-// is `missing`, not `unchecked`, and fails. What is left in `unchecked` is
-// only ever "there are files of the right kind, and this one could not be read
-// precisely" — a limit of the tool, reported as one.
+// Two loopholes would have made this indefensible, and both are shut.
+//
+// The first by §3.8's rule 1: citing `terraform=...` in a repository holding no
+// `.tf` file is `missing`, not `unchecked`, and fails.
+//
+// The second was open until a review found it, and this paragraph used to claim
+// otherwise — that what is left in `unchecked` is "only ever a fact about a
+// file". It was not. Six terraform refusals were decided by the REF STRING
+// alone (a bare name, `local.*`, `each.*`, too many parts, a bad `var` arity),
+// so an agent could write `terraform=totally-invented-thing` five times, land
+// in `unchecked` — outside precision's denominator — and exit 0. Measured: one
+// real citation and five invented ones scored `precision 1, verifiedShare
+// 0.167`, green. A defect in the REF is now `missing`: it fails, and it counts.
+// `local.*` is resolved against its `locals { }` block instead of shrugged at.
+//
+// So the claim now holds, but only because it was made true: what is left in
+// `unchecked` is a fact about a FILE — flow-style YAML, a merge key, tab
+// indents, an oversized file, a `*.tf.json`, a candidate list that hit its cap
+// — never about the string the agent chose to write.
 //
 // Runtime import of core by relative path — see commands/get.ts for why.
 

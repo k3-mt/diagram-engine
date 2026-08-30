@@ -53,6 +53,28 @@ export const PATH_LIKE_EXTENSIONS: ReadonlySet<string> = new Set([
   'zsh',
 ]);
 
+/**
+ * The narrower extension list that applies under `terraform`, and why it has to
+ * be narrower.
+ *
+ * A Terraform resource NAME is a free-form identifier, and several of the most
+ * ordinary ones are on the general list: `lock` (`aws_dynamodb_table.lock`, the
+ * canonical state-lock table), `env` (`aws_ssm_parameter.env`), and `conf`,
+ * `sql`, `csv`, `md`, `go`, `mod`, `sum`, `ini`. Under the general rule each of
+ * those was read as a FILE, stat'd as a relative path, and reported
+ * `missing — no such path`: a correct citation failing the build, with a reason
+ * giving its author no clue why. That is the wrong "missing" this file exists
+ * to avoid, and the third case where the SOURCE settles what the ref can be.
+ *
+ * It is narrowed rather than dropped, because `terraform=main.tf` and
+ * `terraform=envs/prod/terraform.tfvars` are legitimate file citations. What is
+ * kept is exactly the extensions a Terraform file citation actually uses; no
+ * Terraform resource is going to be named `tf` or `tfvars`.
+ */
+export const TERRAFORM_PATH_EXTENSIONS: ReadonlySet<string> = new Set([
+  'tf', 'tfvars', 'tfstate', 'tfbackend', 'hcl', 'json', 'yaml', 'yml', 'md', 'txt',
+]);
+
 /** Extensionless filenames that are still unmistakably files. */
 export const PATH_LIKE_FILENAMES: ReadonlySet<string> = new Set([
   'Dockerfile',
@@ -177,7 +199,8 @@ export function bindingRefKind(ref: string, source?: BindingSource): BindingRefK
   const dot = trimmed.lastIndexOf('.');
   if (dot > 0) {
     const ext = trimmed.slice(dot + 1).toLowerCase();
-    if (PATH_LIKE_EXTENSIONS.has(ext)) return 'path';
+    const extensions = source === 'terraform' ? TERRAFORM_PATH_EXTENSIONS : PATH_LIKE_EXTENSIONS;
+    if (extensions.has(ext)) return 'path';
   }
   if (PATH_LIKE_FILENAMES.has(trimmed)) return 'path';
   return 'identifier';

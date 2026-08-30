@@ -280,6 +280,101 @@ describe('`diagram check --bindings`', () => {
     expect(out.stdout).toContain('neither verified nor wrong');
   });
 
+  it('an agent cannot buy a clean run by inventing citations', () => {
+    // The loophole this closes. Six of the terraform refusals were decided by
+    // the REF STRING alone — a bare name, `local.*`, `each.*`, too many parts,
+    // a bad `var` arity — and each was reported `unchecked`, which sits outside
+    // precision's denominator and exits 0. One real citation plus five invented
+    // ones scored `precision 1, verifiedShare 0.167` and a green build. A
+    // defect in the ref is now `missing`, so it fails and it counts.
+    const { dir, root } = project();
+    fs.mkdirSync(path.join(root, 'infra'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'infra', 'main.tf'),
+      'resource "aws_ecs_service" "orders" {}\n',
+    );
+    patch(dir, [
+      {
+        ...ORDERS,
+        node: {
+          ...ORDERS.node,
+          bindings: [{ source: 'terraform', ref: 'aws_ecs_service.orders' }],
+        },
+      },
+      {
+        ...BILLING,
+        node: {
+          ...BILLING.node,
+          bindings: [{ source: 'terraform', ref: 'totally-invented-thing' }],
+        },
+      },
+    ]);
+    const out = runCheck({ dir, bindings: true });
+    expect(out.code).toBe(1);
+    expect(out.stderr).toContain('  unchecked  0');
+    // The reason is about the ref, and names no file: blaming whichever
+    // candidate happened to sort first sent the reader to open a file that was
+    // perfectly fine.
+    const invented = out.stderr
+      .split('\n')
+      .find((l) => l.includes('totally-invented-thing')) as string;
+    expect(invented).toContain('missing');
+    expect(invented).toContain('not a terraform address (want TYPE.NAME) — nothing to search for');
+    expect(invented).not.toContain('main.tf');
+    // And the real citation still verifies.
+    expect(out.stderr).toContain('defined in infra/main.tf:1');
+  });
+
+  it('verifies a citation to a commented-out resource as missing, not ok', () => {
+    // The false `ok`: commenting a block out with `/* */` and leaving it in the
+    // file is ordinary Terraform practice, and the line-start anchor does not
+    // see it. The checker certified a citation to infrastructure that had been
+    // deliberately disabled, with an evidence line pointing at the comment.
+    const { dir, root } = project();
+    fs.mkdirSync(path.join(root, 'infra'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'infra', 'main.tf'),
+      '/*\nresource "aws_ecs_service" "orders" {\n}\n*/\nresource "aws_iam_role" "r" {}\n',
+    );
+    patch(dir, [
+      {
+        ...ORDERS,
+        node: {
+          ...ORDERS.node,
+          bindings: [{ source: 'terraform', ref: 'aws_ecs_service.orders' }],
+        },
+      },
+    ]);
+    const out = runCheck({ dir, bindings: true });
+    expect(out.code).toBe(1);
+    expect(out.stdout).not.toContain('defined in');
+    expect(out.stderr).toContain('not defined in the 1 *.tf file under the root');
+  });
+
+  it('does not accuse a correct citation in a CRLF manifest', () => {
+    // The mirror failure, and the worse one to ship: a Windows-authored
+    // manifest that plainly declares the cited resource was reported `missing`
+    // and failed the build.
+    const { dir, root } = project();
+    fs.mkdirSync(path.join(root, 'deploy'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'deploy', 'app.yaml'),
+      'apiVersion: apps/v1\r\nkind: Deployment\r\nmetadata:\r\n  name: orders\r\n',
+    );
+    patch(dir, [
+      {
+        ...ORDERS,
+        node: {
+          ...ORDERS.node,
+          bindings: [{ source: 'k8s-manifest', ref: 'Deployment/orders' }],
+        },
+      },
+    ]);
+    const out = runCheck({ dir, bindings: true });
+    expect(out.code).toBe(0);
+    expect(out.stdout).toContain('defined in deploy/app.yaml:4');
+  });
+
   it('fails on a symlink that leaves the tree', () => {
     const { dir } = project();
     patch(dir, [

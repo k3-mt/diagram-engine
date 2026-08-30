@@ -229,6 +229,37 @@ try {
   resolverModule = null;
 }
 
+/**
+ * The resolver sources this build must not be older than.
+ *
+ * There is exactly one resolver — the checker and this scorer both reach
+ * packages/core/src/bindings — so the two cannot DISAGREE by being different
+ * implementations. They can still disagree by being different VERSIONS: an
+ * eval run after a source edit and before `npm run build` scores citations with
+ * the previous resolver and reports the result as authoritative. Refusing is
+ * the same call the absent-module branch already makes, for the same reason.
+ */
+const RESOLVER_SOURCES = ['resolve.ts', 'identifier.ts', 'ref.ts'].map((f) =>
+  path.resolve(HERE, '..', '..', 'packages', 'core', 'src', 'bindings', f),
+);
+
+function staleResolverSource() {
+  let built;
+  try {
+    built = fs.statSync(RESOLVER_PATH).mtimeMs;
+  } catch {
+    return null;
+  }
+  for (const src of RESOLVER_SOURCES) {
+    try {
+      if (fs.statSync(src).mtimeMs > built) return src;
+    } catch {
+      // A source that is not there tells us nothing; the build is what runs.
+    }
+  }
+  return null;
+}
+
 /** Statuses that mean the citation is wrong. Mirrors resolve.ts's FAILING. */
 const BINDING_FAILURES = new Set(['missing', 'stale', 'escaped', 'malformed']);
 
@@ -309,6 +340,13 @@ export function scoreBindings(produced, root, altRoot = null) {
     throw new Error(
       `binding scoring needs the built CLI resolver at ${RESOLVER_PATH} — run 'npm run build'. ` +
         'Refusing to report a binding score that resolved nothing.',
+    );
+  }
+  const stale = staleResolverSource();
+  if (stale) {
+    throw new Error(
+      `${stale} is newer than the built resolver at ${RESOLVER_PATH} — run 'npm run build'. ` +
+        'Refusing to report a binding score produced by code that is not the code under test.',
     );
   }
 
@@ -394,15 +432,22 @@ export function scoreBindings(produced, root, altRoot = null) {
     // agent citing unfalsifiably, and precision below 1.0 is an agent
     // inventing.
     //
-    // Is the exploit reachable? Barely, and not by accident. Reaching
-    // `unchecked` on purpose means citing every node against a compose file
-    // written in flow style, a YAML with a merge key, or a file over 4 MB —
-    // all properties of the repository being diagrammed, none of them
-    // something the agent can create, and §3.8 rule 1 sends a source with no
-    // candidate file of its kind to `missing` rather than `unchecked`. So the
-    // route is "the repo happens to be unreadable", which is the honest
-    // residue, not a strategy. What stops it from being free anyway is this
-    // number: it is reported per run, meaned across the set, and flagged.
+    // Is the exploit reachable? It WAS, and this comment used to say it was
+    // not. Until a review found it, a terraform ref the agent simply made up —
+    // `totally-invented-thing`, `a.b.c.d`, `each.value` — was refused on its
+    // SHAPE and reported `unchecked`, which is outside the denominator above
+    // and exits 0. One real citation and five invented ones measured
+    // `precision 1, verifiedShare 0.167`. A defect in the ref is now `missing`
+    // and lands in `failed`, so the denominator can no longer be dodged by
+    // writing nonsense.
+    //
+    // What is left in `unchecked` is a property of the REPOSITORY, not of the
+    // citation: a compose file in flow style, a YAML with a merge key, a file
+    // over 4 MB, Terraform written in the JSON syntax, a candidate list that
+    // hit its per-source cap. None of those is something the agent creates,
+    // and §3.8 rule 1 sends a source with no candidate file of its kind to
+    // `missing`. What stops the residue from being free anyway is this number:
+    // it is reported per run, meaned across the set, and flagged.
     verifiedShare: ratio(ok, produce),
     unchecked,
     // The share of citations the checker could not answer either way.
