@@ -58,6 +58,28 @@ export interface HoverProps {
   onHoverNode?: (id: string | null) => void;
   /** Raw move events on a node group, for tracking the cursor position. */
   onHoverMove?: MouseEventHandler<SVGGElement>;
+  /**
+   * Click on a node group (§18.7 — click a node to target the blast radius).
+   * `toggle` is true when a multi-select modifier was held.
+   *
+   * This is a LENS, not an edit: it can only change which prediction this tab
+   * draws (§7, §1.6). Canvas hands the id and the modifier up and decides
+   * nothing itself — including whether the press was really a click, which
+   * only the viewport's drag state machine knows (viewport.ts PAN_THRESHOLD_PX).
+   */
+  onNodeClick?: (id: string, opts: { toggle: boolean }) => void;
+  /**
+   * Draw the hover ring? Default true.
+   *
+   * False while the blast overlay is on. There a ring is the vocabulary for
+   * "this box is a target" (accent, pad 4) or "contained" (dashed ink, pad 4),
+   * and the hover ring is a third ring one pixel inside the first, in a third
+   * hue — so moving the pointer across the diagram painted a target-looking
+   * ring on every box in turn, and a box that really was a target wore two
+   * concentric rings a pixel apart. A ring keeps one meaning; the pointer
+   * cursor carries the clickability instead.
+   */
+  hoverRing?: boolean;
   /** Extra SVG the parent wants painted in the hover layer. */
   hoverOverlay?: ReactNode;
 }
@@ -69,6 +91,28 @@ export interface CanvasProps extends HoverProps {
   paths: string[];
   /** Viewport transform from the parent (§8.3), e.g. "translate(x,y) scale(s)". */
   transform?: string;
+}
+
+/**
+ * True on macOS-family platforms, where ctrl+left-click is the system
+ * context-menu gesture and must not double as the extend-selection chord.
+ * Read once — it cannot change under a running page — and defensively, since
+ * the module is also imported by the SSR/SVG export path where there is no
+ * navigator.
+ */
+const APPLE = /* @__PURE__ */ (() => {
+  const nav: { platform?: string; userAgent?: string } | undefined =
+    typeof navigator === 'undefined' ? undefined : navigator;
+  return /Mac|iPhone|iPad|iPod/.test(nav?.platform ?? nav?.userAgent ?? '');
+})();
+
+/** The platform's extend-selection chord (see FrameLayers). */
+export function extendChord(e: {
+  shiftKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
+}): boolean {
+  return e.shiftKey || (APPLE ? e.metaKey : e.ctrlKey);
 }
 
 /** Stroke width of the hover highlight ring. */
@@ -149,6 +193,8 @@ export function FrameLayers({
   hoveredId,
   onHoverNode,
   onHoverMove,
+  onNodeClick,
+  hoverRing = true,
   hoverOverlay,
 }: Frame & HoverProps): JSX.Element {
   const groups = orderedGroups(doc, laidOut);
@@ -159,17 +205,28 @@ export function FrameLayers({
   // tracked over the box and over its text alike. Absent when the parent
   // asked for no hover, and event handlers never serialise, so the
   // emitted markup is unchanged either way.
+  // The click rides on the SAME node groups as the hover, and is added to
+  // them without touching either — a node with no click handler emits exactly
+  // the markup it did before. The extend chord is the platform's own:
+  // shift everywhere, plus ⌘ on Apple and Ctrl elsewhere. Ctrl is NOT accepted
+  // on macOS, where ctrl+left-click is the system context-menu gesture — the
+  // browser would pop a menu over the diagram on the same press that toggled a
+  // target. Alt is left alone; the window manager has claims on it.
   const hoverOf = (id: string): HoverHandlers =>
-    onHoverNode === undefined && onHoverMove === undefined
+    onHoverNode === undefined && onHoverMove === undefined && onNodeClick === undefined
       ? {}
       : {
           onMouseEnter: onHoverNode === undefined ? undefined : () => onHoverNode(id),
           onMouseLeave: onHoverNode === undefined ? undefined : () => onHoverNode(null),
           onMouseMove: onHoverMove,
+          onClick:
+            onNodeClick === undefined
+              ? undefined
+              : (e) => onNodeClick(id, { toggle: extendChord(e) }),
         };
 
   const hovered =
-    hoveredId === undefined || hoveredId === null
+    !hoverRing || hoveredId === undefined || hoveredId === null
       ? undefined
       : nodes.find(({ node }) => node.id === hoveredId);
 

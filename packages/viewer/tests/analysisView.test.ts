@@ -28,9 +28,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { GraphDoc } from '@diagram-engine/core';
 import {
+  ASSUMPTION_NO_REDUNDANCY,
   analyse,
   backlog,
   blastRadius,
+  blastRadiusMulti,
 } from '../../core/src/analysis/index.js';
 import { deriveViewDetail } from '../../core/src/view/derive.js';
 import type { LaidOut } from '../src/layout/fromElk.js';
@@ -40,6 +42,7 @@ import {
   BlastOverlay,
   EDGE_MASK_ID,
   OVERLAY_EDGE_W_MAX,
+  TARGET_HALO_PAD,
   polylineMidpoint,
   weightedEdgeWidth,
 } from '../src/render/AnalysisOverlay.js';
@@ -48,6 +51,7 @@ import {
   blastButtonText,
 } from '../src/render/OverlayButtons.js';
 import {
+  HOW_TO_TARGET,
   OverlayCaption,
   analysisCaption,
   blastCaption,
@@ -55,19 +59,32 @@ import {
   namedList,
 } from '../src/render/OverlayCaption.js';
 import { StatusBar } from '../src/render/StatusBar.js';
-import { analysisPlan, blastPlan, fanInBadge } from '../src/view/overlayPlan.js';
+import { theme } from '../src/render/theme.js';
+import {
+  MAX_EDGE_ACCENT_TARGETS,
+  analysisPlan,
+  blastPlan,
+  fanInBadge,
+} from '../src/view/overlayPlan.js';
 import {
   INITIAL_OVERLAY_STATE,
+  MAX_BLAST_TARGETS,
   blastCandidates,
+  blastSelection,
+  blastTargets,
   buildDrawnIndex,
   canBlast,
+  clearBlastTargets,
   nextBlastTarget,
+  toggleBlastTarget,
   projectEdge,
   projectId,
   projectIds,
   resolveOverlay,
+  resolveOverlayFrom,
   selectOverlay,
   type DrawnIndex,
+  type OverlayState,
 } from '../src/view/overlayState.js';
 
 // --- fixture ---------------------------------------------------------------
@@ -214,22 +231,22 @@ describe('[blast] picks a target with no mouse selection (§1.6)', () => {
     const seen: (string | null)[] = [];
     for (let i = 0; i < ids.length + 1; i += 1) {
       state = selectOverlay(state, 'blast', cands);
-      seen.push(state.target);
+      seen.push(state.targets[0] ?? null);
     }
     expect(seen).toEqual([...ids, ids[0]]); // first press enters, then advances
     const back = selectOverlay(
-      { mode: 'blast', target: ids[0] ?? null },
+      { mode: 'blast', targets: ids.slice(0, 1) },
       'blast',
       cands,
       { reverse: true },
     );
-    expect(back.target).toBe(ids[ids.length - 1]);
+    expect(back.targets).toEqual([ids[ids.length - 1]]);
   });
 
   it('recovers when a view change hides the target it was pointing at', () => {
-    const state = { mode: 'blast' as const, target: 'db' };
+    const state = { mode: 'blast' as const, targets: ['db'] };
     const resolved = resolveOverlay(doc, execIdx, state);
-    expect(resolved.target).toBe('data'); // db is not drawn; take the backlog top
+    expect(resolved.targets).toEqual(['data']); // db is not drawn; take the backlog top
     expect(resolved.targetLabel).toBe('Data');
   });
 
@@ -252,9 +269,9 @@ describe('[blast] picks a target with no mouse selection (§1.6)', () => {
 
 describe('the overlay buttons never touch the document (§1.6)', () => {
   it('toggles [analysis] and keeps the remembered blast target', () => {
-    const on = selectOverlay({ mode: 'off', target: 'db' }, 'analysis', []);
-    expect(on).toEqual({ mode: 'analysis', target: 'db' });
-    expect(selectOverlay(on, 'analysis', [])).toEqual({ mode: 'off', target: 'db' });
+    const on = selectOverlay({ mode: 'off', targets: ['db'] }, 'analysis', []);
+    expect(on).toEqual({ mode: 'analysis', targets: ['db'] });
+    expect(selectOverlay(on, 'analysis', [])).toEqual({ mode: 'off', targets: ['db'] });
   });
 
   it('keeps the two modes exclusive — no stacked heat maps (§8.2)', () => {
@@ -271,9 +288,250 @@ describe('the overlay buttons never touch the document (§1.6)', () => {
     state = selectOverlay(state, 'blast', cands);
     state = selectOverlay(state, 'analysis', cands);
     analysisPlan(doc, analyse(doc), openIdx);
-    blastPlan(blastRadius(doc, 'db'), openIdx);
+    blastPlan(blastRadiusMulti(doc, ['db']), openIdx);
     expect(JSON.stringify(doc)).toBe(before);
     expect(doc.collapsed).toEqual([]);
+  });
+});
+
+// --- 2b. click to target, modifier-click to combine (§18.7) ---------------
+//
+// The gestures are pure transitions over ONE field, so they are driven
+// directly here: no DOM, no synthetic events, exactly as the button press is.
+// The renderer's only job is to hand an id and a modifier to these functions,
+// and Canvas.tsx does nothing else.
+
+const blastMode = (targets: string[]): OverlayState => ({ mode: 'blast', targets });
+
+describe('clicking a node targets it (§18.7)', () => {
+  it('targets what was clicked, and clears it when clicked again', () => {
+    const one = toggleBlastTarget(blastMode([]), 'orders');
+    expect(one.targets).toEqual(['orders']);
+    // "Clicking again clears it" — and clearing means EMPTY, not a silent
+    // re-seed from the backlog, or the second click would look like a no-op.
+    expect(toggleBlastTarget(one, 'orders').targets).toEqual([]);
+    // A different node replaces rather than accumulates: plain click is
+    // "target this", not "add this".
+    expect(toggleBlastTarget(one, 'db').targets).toEqual(['db']);
+  });
+
+  it('targets a node the BACKLOG excludes — a click is the user asking anyway', () => {
+    // Entry points are not RANKED experiments (§18.4), but "what if the web
+    // client dies" is still a question, and the answer is a real one.
+    expect(blastCandidates(doc, openIdx).map((c) => c.id)).not.toContain('web');
+    const clicked = toggleBlastTarget(blastMode([]), 'web');
+    expect(clicked.targets).toEqual(['web']);
+    // and it survives resolution, because it is DRAWN even though it is not
+    // a candidate — the recovery rule must not eat a deliberate choice.
+    expect(resolveOverlay(doc, openIdx, clicked).targets).toEqual(['web']);
+    expect(blastRadiusMulti(doc, ['web']).atRisk).toEqual([]);
+  });
+
+  it('is a no-op outside blast mode — a click has no hidden meaning', () => {
+    for (const mode of ['off', 'analysis'] as const) {
+      const state: OverlayState = { mode, targets: [] };
+      expect(toggleBlastTarget(state, 'db')).toBe(state);
+      expect(toggleBlastTarget(state, 'db', { extend: true })).toBe(state);
+    }
+  });
+});
+
+describe('modifier-click combines targets, and the union is core\u2019s (§18.7)', () => {
+  it('toggles membership in and out, keeping selection order', () => {
+    let state = toggleBlastTarget(blastMode([]), 'db');
+    state = toggleBlastTarget(state, 'api', { extend: true });
+    state = toggleBlastTarget(state, 'orders', { extend: true });
+    expect(state.targets).toEqual(['db', 'api', 'orders']);
+    state = toggleBlastTarget(state, 'api', { extend: true });
+    expect(state.targets).toEqual(['db', 'orders']);
+  });
+
+  it('tints the UNION, not one target\u2019s answer', () => {
+    const both = blastRadiusMulti(doc, ['db', 'reporting']);
+    const plan = blastPlan(both, openIdx);
+    expect(plan.targets).toEqual(['db', 'reporting']);
+    // reporting is CONTAINED from db (the dashed edge) but is itself a
+    // target, so it is killed, not at risk, and never reported as contained.
+    expect(plan.contained).not.toContain('reporting');
+    expect(plan.atRisk).not.toContain('reporting');
+    // and the at-risk set still holds everything db alone put at risk.
+    for (const id of blastPlan(blastRadiusMulti(doc, ['db']), openIdx).atRisk) {
+      expect(plan.atRisk).toContain(id);
+    }
+  });
+
+  it('caps the set rather than turning the canvas into a heat map (§8.2)', () => {
+    const many = Array.from({ length: MAX_BLAST_TARGETS }, (_, i) => `n${i}`);
+    const full = blastMode(many);
+    // the refused click returns the SAME state — no partial drop, no silent
+    // eviction of the oldest target
+    expect(toggleBlastTarget(full, 'one-more', { extend: true })).toBe(full);
+    // removing one makes room again
+    const room = toggleBlastTarget(full, 'n0', { extend: true });
+    expect(toggleBlastTarget(room, 'one-more', { extend: true }).targets).toHaveLength(
+      MAX_BLAST_TARGETS,
+    );
+    // a PLAIN click is never refused: it replaces the whole selection
+    expect(toggleBlastTarget(full, 'one-more').targets).toEqual(['one-more']);
+  });
+
+  it('draws one ring per target and drops the halo past one (§8.2)', () => {
+    const svg = (ids: string[]): string =>
+      renderToStaticMarkup(
+        createElement(BlastOverlay, {
+          plan: blastPlan(blastRadiusMulti(doc, ids), openIdx),
+          laidOut,
+          paths,
+          nodeIds,
+        }),
+      );
+    const one = svg(['db']);
+    const three = svg(['db', 'api', 'orders']);
+    expect(one.split('data-overlay="blast-target"').length - 1).toBe(1);
+    expect(three.split('data-overlay="blast-target"').length - 1).toBe(3);
+    for (const id of ['db', 'api', 'orders']) {
+      expect(three).toContain(`data-overlay-ring="${id}"`);
+    }
+    // the bullseye halo is the single-target flourish; several targets get
+    // the ring alone, so the accent is spent once per finding.
+    expect(one.split(`ry="${theme.node.radius + TARGET_HALO_PAD}"`).length - 1).toBe(1);
+    expect(three).not.toContain(`ry="${theme.node.radius + TARGET_HALO_PAD}"`);
+    // and past MAX_EDGE_ACCENT_TARGETS the union's own channel stands down:
+    // the edge accents, which are what actually grows with n.
+    expect(one).toContain('data-overlay="at-risk-edge"');
+    expect(three).not.toContain('data-overlay="at-risk-edge"');
+  });
+
+  it('draws the components a targeted boundary kills, not just what it endangers', () => {
+    const svg = renderToStaticMarkup(
+      createElement(BlastOverlay, {
+        plan: blastPlan(blastRadiusMulti(doc, ['platform']), openIdx),
+        laidOut,
+        paths,
+        nodeIds,
+      }),
+    );
+    // api and orders live inside Platform: the experiment destroys them, so
+    // they are absent from `atRisk` — and used to be drawn like survivors.
+    expect(svg).toContain('data-overlay="killed"');
+    for (const id of ['api', 'orders']) {
+      expect(svg).toContain(`data-overlay="killed" data-overlay-node="${id}"`);
+    }
+    // and a node-only experiment kills nothing beyond its target
+    const single = renderToStaticMarkup(
+      createElement(BlastOverlay, {
+        plan: blastPlan(blastRadiusMulti(doc, ['db']), openIdx),
+        laidOut,
+        paths,
+        nodeIds,
+      }),
+    );
+    expect(single).not.toContain('data-overlay="killed"');
+  });
+});
+
+describe('clearing is one gesture, and cycling replaces a selection', () => {
+  it('clears the whole set at once, staying in the mode', () => {
+    const state = clearBlastTargets(blastMode(['db', 'api', 'orders']));
+    expect(state).toEqual({ mode: 'blast', targets: [] });
+    // and an empty selection is drawn as empty, never as the backlog top
+    expect(blastTargets(state, blastCandidates(doc, openIdx), openIdx.ids)).toEqual([]);
+    expect(clearBlastTargets(state)).toBe(state); // idempotent, no re-render
+  });
+
+  it('replaces a multi-selection with the single next backlog entry', () => {
+    const cands = blastCandidates(doc, openIdx);
+    const next = selectOverlay(blastMode(['db', 'api']), 'blast', cands, {
+      drawn: openIdx.ids,
+    });
+    // Not "advance the primary and keep the rest": the whole selection goes,
+    // visibly, and the caption immediately names one target.
+    expect(next.targets).toHaveLength(1);
+    expect(next.targets[0]).toBe(nextBlastTarget(cands, 'db'));
+  });
+
+  it('re-enters the backlog from an empty selection', () => {
+    const cands = blastCandidates(doc, openIdx);
+    const entered = selectOverlay({ mode: 'off', targets: [] }, 'blast', cands);
+    expect(entered.targets).toEqual([cands[0]?.id]);
+    // pressing while ON with nothing selected walks from the top too
+    const walked = selectOverlay(blastMode([]), 'blast', cands);
+    expect(walked.targets).toEqual([cands[0]?.id]);
+  });
+});
+
+describe('the cap is counted on the list the screen is showing', () => {
+  it('refuses a click only when the VISIBLE selection is full, and then says so', () => {
+    // The divergence this pins: the cap used to be measured on raw state
+    // while `capped` — and the rings, and the button — came from the
+    // drawn-filtered list. Eight targets remembered from another view refused
+    // every click while the caption reported one target and no cap: a click
+    // that did nothing with its reason nowhere on screen.
+    const stale = Array.from({ length: MAX_BLAST_TARGETS }, (_, i) => `gone${i}`);
+    const state: OverlayState = { mode: 'blast', targets: stale };
+    const only = blastCandidates(doc, openIdx).filter((c) => c.id === 'db');
+    const resolved = resolveOverlayFrom(only, state, { drawn: new Set(['db']) });
+    expect(resolved.targets).toEqual(['db']);
+    expect(resolved.capped).toBe(false);
+
+    // so the click must be ACCEPTED, and it must not append to the stale list
+    const next = toggleBlastTarget(state, 'db', {
+      extend: true,
+      drawn: new Set(['db']),
+    });
+    expect(next).not.toBe(state);
+    expect(next.targets).toEqual(['db']);
+  });
+
+  it('still refuses once the visible selection really is full, with capped set', () => {
+    const drawn = new Set(
+      Array.from({ length: MAX_BLAST_TARGETS }, (_, i) => `n${i}`),
+    );
+    const state: OverlayState = { mode: 'blast', targets: [...drawn] };
+    const opts = { extend: true, drawn };
+    expect(toggleBlastTarget(state, 'extra', opts)).toBe(state);
+    expect(resolveOverlayFrom([], state, { drawn }).capped).toBe(true);
+  });
+
+  it('with no index to hand, every remembered target still counts', () => {
+    // The pre-existing contract for callers that have no drawn set.
+    const state = blastMode(['db']);
+    expect(toggleBlastTarget(state, 'db').targets).toEqual([]);
+    expect(toggleBlastTarget(state, 'api', { extend: true }).targets).toEqual([
+      'db',
+      'api',
+    ]);
+  });
+});
+
+describe('selecting, toggling and clearing never write the document (§1.6)', () => {
+  it('emits no patch, no write and no socket send — only local state', () => {
+    const before = JSON.stringify(doc);
+    const cands = blastCandidates(doc, openIdx);
+
+    // every gesture in the surface, over a DEEPLY FROZEN document: a write
+    // anywhere in this chain throws rather than passing quietly.
+    let state = selectOverlay(INITIAL_OVERLAY_STATE, 'blast', cands, {
+      drawn: openIdx.ids,
+    });
+    state = toggleBlastTarget(state, 'db');
+    state = toggleBlastTarget(state, 'api', { extend: true });
+    state = toggleBlastTarget(state, 'api', { extend: true });
+    state = toggleBlastTarget(state, 'db');
+    state = toggleBlastTarget(state, 'orders', { extend: true });
+    state = clearBlastTargets(state);
+    state = selectOverlay(state, 'blast', cands, { drawn: openIdx.ids });
+
+    const answer = blastRadiusMulti(doc, ['db', 'api']);
+    blastPlan(answer, openIdx);
+    blastCaption(answer, blastPlan(answer, openIdx));
+    resolveOverlay(doc, openIdx, state);
+
+    expect(JSON.stringify(doc)).toBe(before);
+    expect(doc.collapsed).toEqual([]);
+    // and nothing in the state names a document field: it is a lens, and
+    // §18.7 says there must never be a schema field for it.
+    expect(Object.keys(state).sort()).toEqual(['mode', 'targets']);
   });
 });
 
@@ -348,11 +606,11 @@ describe('the analysis plan (§15.5)', () => {
 });
 
 describe('the blast-radius plan (§18.3, §18.7)', () => {
-  const blast = blastRadius(doc, 'db');
+  const blast = blastRadiusMulti(doc, ['db']);
   const plan = blastPlan(blast, openIdx);
 
   it('rings the target and tints everything that depends on it', () => {
-    expect(plan.target).toBe('db');
+    expect(plan.targets).toEqual(['db']);
     expect(plan.atRisk.sort()).toEqual(['api', 'mobile', 'orders', 'web']);
     expect(plan.atRiskEdges.sort()).toEqual(['e1', 'e2', 'e3', 'e4']);
   });
@@ -366,8 +624,8 @@ describe('the blast-radius plan (§18.3, §18.7)', () => {
   });
 
   it('tints a collapsed boundary that contains something at risk, and counts it', () => {
-    const collapsed = blastPlan(blastRadius(doc, 'data'), execIdx);
-    expect(collapsed.target).toBe('data');
+    const collapsed = blastPlan(blastRadiusMulti(doc, ['data']), execIdx);
+    expect(collapsed.targets).toEqual(['data']);
     expect(collapsed.atRisk.sort()).toEqual(['mobile', 'platform', 'web']);
     expect(collapsed.rolledUp).toBe(2); // api and orders, both inside Platform
     expect(collapsed.dropped).toBe(0);
@@ -380,11 +638,143 @@ describe('the blast-radius plan (§18.3, §18.7)', () => {
       nodes: [{ id: 't', label: 'Invoices', type: 'entity', parent: null }],
       edges: [],
     };
-    const b = blastRadius(erd, 't');
+    const b = blastRadiusMulti(erd, ['t']);
     const p = blastPlan(b, buildDrawnIndex(erd, deriveViewDetail(erd, [])));
     expect(b.note).not.toBe(null);
     expect(p.atRisk).toEqual([]);
     expect(p.contained).toEqual([]);
+  });
+});
+
+// --- 3b. what a combined prediction must not hide -------------------------
+
+describe('a combined prediction says what it kills and what it left out', () => {
+  it('marks the components a targeted boundary kills, so they are not drawn as survivors', () => {
+    // In the exec view every drawn box IS a boundary, so this is the normal
+    // case, not a corner. `killed` is absent from `atRisk` by construction —
+    // those components are past risk — and before this it got no mark at all.
+    const b = blastRadiusMulti(doc, ['platform', 'data']);
+    const plan = blastPlan(b, openIdx);
+    expect(plan.targets).toEqual(['platform', 'data']); // both drawn open
+    // the ringed boundaries are excluded — they already carry a ring — and
+    // what is left is the three components the experiment destroys outright.
+    expect(plan.killed.sort()).toEqual(['api', 'db', 'orders']);
+    for (const id of plan.killed) expect(plan.atRisk).not.toContain(id);
+    // and never a target: a target already carries a ring.
+    const one = blastPlan(blastRadiusMulti(doc, ['data']), execIdx);
+    expect(one.targets).toEqual(['data']);
+    expect(one.killed).toEqual([]); // db is inside it and not drawn
+  });
+
+  it('prints a kills row for a combined boundary experiment, as the single case does', () => {
+    const b = blastRadiusMulti(doc, ['platform', 'data']);
+    const caption = blastCaption(b, blastPlan(b, execIdx));
+    // 2 targets + api, orders, db killed inside them.
+    expect(b.killed.length - b.resolved.length).toBe(3);
+    expect(caption.rows.join('\n')).toContain('kills (3)');
+    expect(caption.rows.join('\n')).toContain('already gone, not merely at risk');
+  });
+
+  it('drops a target the view no longer draws — and says so, in the rows', () => {
+    // The regression this pins: with TWO targets the backlog-top recovery
+    // never fires, so a target the exec view collapsed simply vanished from
+    // the answer and the caption reported the smaller experiment as if it had
+    // been chosen. Under-reporting a union is the mirror of the over-reporting
+    // §18.11 makes us print a caveat about.
+    const state: OverlayState = { mode: 'blast', targets: ['db', 'reporting'] };
+    const cands = blastCandidates(doc, execIdx);
+    const sel = blastSelection(state, cands, execIdx.ids);
+    expect(sel.targets).toEqual(['reporting']);
+    expect(sel.hidden).toEqual(['db']);
+    expect(resolveOverlay(doc, execIdx, state).hiddenTargets).toEqual(['db']);
+
+    const b = blastRadiusMulti(doc, sel.targets);
+    const caption = blastCaption(b, blastPlan(b, execIdx, { hiddenTargets: 1 }));
+    const rows = caption.rows.join('\n');
+    expect(rows).toContain('not included (1)');
+    expect(rows).toContain('took no part in this prediction');
+    // and it is NOT re-projected onto the collapsed boundary: ringing `Data`
+    // to mean "kill postgres" would assert the wrong experiment.
+    expect(blastPlan(b, execIdx, { hiddenTargets: 1 }).targets).not.toContain('data');
+  });
+
+  it('says nothing of the sort when every target is drawn', () => {
+    const b = blastRadiusMulti(doc, ['db', 'api']);
+    const caption = blastCaption(b, blastPlan(b, openIdx));
+    expect(caption.rows.join('\n')).not.toContain('not included');
+    expect(blastPlan(b, openIdx).hiddenTargets).toBe(0);
+  });
+
+  it('drops a target from the rings when the view does not draw it', () => {
+    // blastPlan's filter, on its own: a target that is not drawn gets no ring
+    // and is NOT swapped for its collapsed ancestor.
+    const b = blastRadiusMulti(doc, ['db', 'reporting']);
+    const plan = blastPlan(b, execIdx);
+    expect(b.targets).toEqual(['db', 'reporting']);
+    expect(plan.targets).toEqual(['reporting']);
+    expect(plan.targets).not.toContain('data');
+  });
+
+  it('degrades the channel that scales with the union, not the one that does not', () => {
+    // §8.2: rings are capped at 8 and grow linearly; the at-risk edge accents
+    // grow with the union and saturate the picture at about three targets.
+    const two = blastRadiusMulti(doc, ['db', 'api']);
+    const twoPlan = blastPlan(two, openIdx);
+    expect(MAX_EDGE_ACCENT_TARGETS).toBe(2);
+    expect(twoPlan.atRiskEdges.length).toBeGreaterThan(0);
+    expect(twoPlan.atRiskEdgesSuppressed).toBe(0);
+
+    const three = blastRadiusMulti(doc, ['db', 'api', 'orders']);
+    const threePlan = blastPlan(three, openIdx);
+    expect(threePlan.targets).toHaveLength(3);
+    expect(threePlan.atRiskEdges).toEqual([]);
+    expect(threePlan.atRiskEdgesSuppressed).toBeGreaterThan(0);
+    // The tint still carries the whole set — nothing is hidden, only the
+    // second channel saying the same thing — and the caption says so.
+    expect(threePlan.atRisk.length).toBeGreaterThan(0);
+    expect(blastCaption(three, threePlan).notes.join('\n')).toContain(
+      'edge highlighting is off past 2 targets',
+    );
+  });
+});
+
+// --- 3c. an unresolved target never gets an asserted structural claim ------
+
+describe('a target that resolved to nothing gets no articulation row', () => {
+  const erd: GraphDoc = {
+    schemaVersion: 1,
+    title: 'Billing',
+    direction: 'DOWN',
+    groups: [],
+    nodes: [
+      { id: 'inv', label: 'Invoices', type: 'entity', parent: null },
+      { id: 'svc', label: 'Billing', type: 'service', parent: null },
+    ],
+    edges: [],
+    collapsed: [],
+  };
+  const erdIdx = buildDrawnIndex(erd, deriveViewDetail(erd, []));
+
+  it('does not turn "not applicable" into an asserted "no" for an entity either', () => {
+    // An entity is excluded from the runtime projection (A4), so no
+    // articulation was ever computed for it — but articulationValue sees kind
+    // 'entity' with a null articulation and falls through the group guard to
+    // the asserted negative. Unreachable before click-to-target (the backlog
+    // never offers an entity) and reachable now: toggleBlastTarget accepts any
+    // drawn id, which is exactly the point of clicking.
+    const b = blastRadiusMulti(erd, ['inv']);
+    const caption = blastCaption(b, blastPlan(b, erdIdx));
+    expect(b.per[0]?.targetKind).toBe('entity');
+    expect(b.per[0]?.note).not.toBe(null);
+    expect(caption.rows.join('\n')).not.toContain('articulation');
+    // the honest note is still there, and still core's
+    expect(caption.rows.join('\n')).toContain('not a runtime component');
+  });
+
+  it('still prints it for a target that genuinely resolved', () => {
+    const b = blastRadiusMulti(erd, ['svc']);
+    const caption = blastCaption(b, blastPlan(b, erdIdx));
+    expect(caption.rows.join('\n')).toContain('articulation  no');
   });
 });
 
@@ -399,7 +789,7 @@ describe('the caption prints core sentences verbatim', () => {
   });
 
   it('carries every assumption the prediction produced, unaltered (C2, C3)', () => {
-    const blast = blastRadius(doc, 'db');
+    const blast = blastRadiusMulti(doc, ['db']);
     const caption = blastCaption(blast, blastPlan(blast, openIdx));
     for (const a of blast.assumptions) expect(caption.notes).toContain(a);
     expect(caption.notes.join(' ')).toContain('"at risk" is not "will fail"');
@@ -416,11 +806,113 @@ describe('the caption prints core sentences verbatim', () => {
   });
 
   it('names the contained set rather than leaving it as an absence (§18.3)', () => {
-    const blast = blastRadius(doc, 'db');
+    const blast = blastRadiusMulti(doc, ['db']);
     const caption = blastCaption(blast, blastPlan(blast, openIdx));
     expect(caption.rows.join('\n')).toContain('contained (1)');
     expect(caption.rows.join('\n')).toContain('Reporting');
     expect(caption.headline).toBe('blast radius — Postgres');
+  });
+
+  it('says what is selected and that the number is a UNION (§18.7)', () => {
+    const b = blastRadiusMulti(doc, ['db', 'api']);
+    const caption = blastCaption(b, blastPlan(b, openIdx));
+    const rows = caption.rows.join('\n');
+    expect(caption.headline).toBe('blast radius — 2 targets combined');
+    expect(rows).toContain('targets (2)  Postgres, API gateway');
+    expect(rows).toContain('union');
+    // The articulation row is NOT restated for a set: core deliberately has
+    // no such field, and summing the per-target answers would be the caption
+    // asserting a structural claim nothing computed (§15.2).
+    expect(rows).not.toContain('articulation');
+  });
+
+  it('carries §18.11 verbatim: the union cannot see redundancy', () => {
+    const b = blastRadiusMulti(doc, ['db', 'api']);
+    const caption = blastCaption(b, blastPlan(b, openIdx));
+    // core's sentence, printed not composed — the same route C2 and C3 take.
+    expect(b.redundancyCaveat).toBe(ASSUMPTION_NO_REDUNDANCY);
+    expect(caption.notes.join(' ')).toContain('"at risk" is not "will fail"');
+    // It sits in the ROWS, immediately under the sentence it qualifies, and
+    // in the rows' own weight. In the flat notes block it arrived fifth, in
+    // grey, under two sentences that print on every single-target view — the
+    // confident half of the claim dark, the qualifying half grey.
+    const iUnion = caption.rows.findIndex((r) => r.includes('union'));
+    const iCaveat = caption.rows.findIndex((r) =>
+      r.includes(ASSUMPTION_NO_REDUNDANCY),
+    );
+    expect(iUnion).toBeGreaterThanOrEqual(0);
+    expect(iCaveat).toBe(iUnion + 1);
+    expect(caption.rows.join(' ')).toContain('replicas');
+    // Verbatim in exactly ONE place: never rephrased, and never twice.
+    expect(caption.notes).not.toContain(ASSUMPTION_NO_REDUNDANCY);
+    // and a SINGLE target does not get the caveat — it is a claim about the
+    // combination, and adding it everywhere would make it invisible.
+    const one = blastRadiusMulti(doc, ['db']);
+    const oneCaption = blastCaption(one, blastPlan(one, openIdx));
+    expect(oneCaption.notes).not.toContain(ASSUMPTION_NO_REDUNDANCY);
+    expect(oneCaption.rows.join(' ')).not.toContain(ASSUMPTION_NO_REDUNDANCY);
+  });
+
+  it('captions an empty selection as empty, never as "nothing is at risk"', () => {
+    const b = blastRadiusMulti(doc, []);
+    const caption = blastCaption(b, blastPlan(b, openIdx));
+    expect(caption.headline).toBe('blast radius — no target selected');
+    expect(caption.rows.join('\n')).not.toContain('at risk (0)');
+    // and the way out and back in is on the screen, not in a manual
+    expect(caption.hint).toBe(HOW_TO_TARGET);
+    expect(HOW_TO_TARGET).toContain('Esc');
+  });
+
+  it('teaches the gesture in every blast state, not only the unreachable one', () => {
+    // The bug this pins: the hint used to render ONLY for an empty selection,
+    // and entering the mode seeds the backlog top — so the one line that says
+    // a box is clickable was visible only after you had already clicked one.
+    for (const ids of [[], ['db'], ['db', 'api']]) {
+      const b = blastRadiusMulti(doc, ids);
+      expect(blastCaption(b, blastPlan(b, openIdx)).hint).toBe(HOW_TO_TARGET);
+    }
+    expect(HOW_TO_TARGET).toContain('shift-click');
+    // The wording matches what a plain click actually does at n > 1: it
+    // REPLACES the selection. "clicking again clears it" is true only of a
+    // sole target, and saying it flatly invites throwing away a set of eight.
+    expect(HOW_TO_TARGET).toContain('replaces the selection');
+    expect(HOW_TO_TARGET).toContain('sole target');
+  });
+
+  it('says why a click did nothing once the cap is reached (§8.2)', () => {
+    // A document with more killable components than the cap, so the row is
+    // asserted rather than skipped.
+    const wide: GraphDoc = {
+      ...raw,
+      groups: [],
+      nodes: [
+        { id: 'app', label: 'App', type: 'service', parent: null },
+        ...Array.from({ length: MAX_BLAST_TARGETS }, (_, i) => ({
+          id: `shard${i}`,
+          label: `Shard ${i}`,
+          type: 'database' as const,
+          parent: null,
+        })),
+      ],
+      edges: Array.from({ length: MAX_BLAST_TARGETS }, (_, i) => ({
+        id: `w${i}`,
+        from: 'app',
+        to: `shard${i}`,
+      })),
+    };
+    const idx = buildDrawnIndex(wide, deriveViewDetail(wide, []));
+    const ids = Array.from({ length: MAX_BLAST_TARGETS }, (_, i) => `shard${i}`);
+    const b = blastRadiusMulti(wide, ids);
+    const plan = blastPlan(b, idx);
+    expect(plan.targets).toHaveLength(MAX_BLAST_TARGETS);
+    expect(blastCaption(b, plan).rows.join('\n')).toContain(
+      `${MAX_BLAST_TARGETS} is the limit`,
+    );
+    // below the cap the panel stays quiet about it
+    const few = blastRadiusMulti(doc, ['db', 'api']);
+    expect(blastCaption(few, blastPlan(few, openIdx)).rows.join('\n')).not.toContain(
+      'is the limit',
+    );
   });
 
   it('stops naming past a handful and says how many are left', () => {
@@ -475,7 +967,7 @@ describe('the overlay SVG', () => {
   );
   const blastSvg = renderToStaticMarkup(
     createElement(BlastOverlay, {
-      plan: blastPlan(blastRadius(doc, 'db'), openIdx),
+      plan: blastPlan(blastRadiusMulti(doc, ['db']), openIdx),
       laidOut,
       paths,
       nodeIds,
@@ -629,7 +1121,7 @@ describe('OverlayButtons in the StatusBar analysis slot', () => {
 
 describe('OverlayCaption', () => {
   it('renders the headline, the rows and the notes', () => {
-    const blast = blastRadius(doc, 'db');
+    const blast = blastRadiusMulti(doc, ['db']);
     const html = renderToStaticMarkup(
       createElement(OverlayCaption, {
         caption: blastCaption(blast, blastPlan(blast, openIdx)),
@@ -652,9 +1144,10 @@ describe('OverlayCaption', () => {
 
 describe('a boundary experiment is captioned as one', () => {
   it('does not turn "not applicable" into an asserted "no"', () => {
-    const blast = blastRadius(doc, 'data');
-    expect(blast.targetKind).toBe('group');
-    expect(blast.articulation).toBeNull();
+    const single = blastRadius(doc, 'data');
+    expect(single.targetKind).toBe('group');
+    expect(single.articulation).toBeNull();
+    const blast = blastRadiusMulti(doc, ['data']);
     const caption = blastCaption(blast, blastPlan(blast, execIdx));
     const rows = caption.rows.join('\n');
     expect(rows).not.toContain('articulation  no');
@@ -663,17 +1156,17 @@ describe('a boundary experiment is captioned as one', () => {
   });
 
   it('still asserts "no" for a node that genuinely is not one', () => {
-    const blast = blastRadius(doc, 'orders');
+    const blast = blastRadiusMulti(doc, ['orders']);
     const caption = blastCaption(blast, blastPlan(blast, openIdx));
     expect(caption.rows.join('\n')).toContain('articulation  yes');
-    const leaf = blastRadius(doc, 'reporting');
+    const leaf = blastRadiusMulti(doc, ['reporting']);
     expect(
       blastCaption(leaf, blastPlan(leaf, openIdx)).rows.join('\n'),
     ).toContain('articulation  no — removing it does not split the diagram');
   });
 
   it('names what the experiment kills, as the CLI headline does', () => {
-    const blast = blastRadius(doc, 'data');
+    const blast = blastRadiusMulti(doc, ['data']);
     const caption = blastCaption(blast, blastPlan(blast, execIdx));
     expect(caption.headline).toBe('blast radius — Data (boundary — kills 1 component)');
   });

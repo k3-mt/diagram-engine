@@ -76,17 +76,22 @@ export function truncateToWidth(
 }
 
 /**
- * Hover plumbing (capability B). Optional on every node component: when
- * the handlers are absent nothing about the emitted markup changes, so a
- * canvas without a hover panel renders byte-for-byte as before.
+ * Pointer plumbing (capability B, and §18.7's click-to-target). Optional on
+ * every node component: when the handlers are absent nothing about the
+ * emitted markup changes, so a canvas without a hover panel or an overlay
+ * renders byte-for-byte as before.
  *
- * These are INSPECTION events only — they may never mutate the document
- * (§1.6 forbids mouse editing; §7 permits viewport/inspection controls).
+ * These are INSPECTION and LENS events only — they may never mutate the
+ * document (§1.6 forbids mouse EDITING: moving, resizing, re-parenting; §7
+ * permits viewport and inspection controls). `onClick` chooses which
+ * prediction the blast overlay draws in this one browser tab, which is a lens
+ * and not a design decision — see view/overlayState.ts.
  */
 export interface HoverHandlers {
   onMouseEnter?: MouseEventHandler<SVGGElement>;
   onMouseLeave?: MouseEventHandler<SVGGElement>;
   onMouseMove?: MouseEventHandler<SVGGElement>;
+  onClick?: MouseEventHandler<SVGGElement>;
 }
 
 export interface NodeBoxProps extends HoverHandlers {

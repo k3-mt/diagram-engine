@@ -358,6 +358,203 @@ export function blastRadius(doc: GraphDoc, id: string): BlastRadius {
   return blastRadiusOn(runtimeGraph(doc), id);
 }
 
+// ---------------------------------------------------------------------------
+// Multi-target: "can we survive losing an availability zone?" (§18.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * §18.11, in the one sentence a multi-target surface must print.
+ *
+ * Every edge in the document asserts a HARD dependency. There is no way to
+ * write "X depends on A OR B", so there is no way to say that two of the
+ * selected targets are replicas of each other and that losing one alone was
+ * survivable. The union is arithmetically right and the model underneath it
+ * cannot express the thing multi-select is usually used to investigate, which
+ * makes this the one result in Part 18 that is more confident than the
+ * document deserves. It is data on the result, not prose in a surface,
+ * because three surfaces would otherwise each decide whether to mention it.
+ */
+export const ASSUMPTION_NO_REDUNDANCY =
+  'every edge is a hard dependency: the document cannot say two targets are replicas, so a combined radius over-reports wherever redundancy exists (§18.11)';
+
+/** A target that named nothing killable, and the reason (kind mirrors BlastTargetKind). */
+export type UnresolvedTarget = {
+  id: string;
+  kind: Exclude<BlastTargetKind, 'node' | 'group'>;
+  /** the single-target note verbatim, so there is one wording, not two */
+  note: string;
+};
+
+/** The ids an experiment CAN name, listed only when a target missed (§3.3). */
+export type ValidTargets = {
+  /** runtime components, document order */
+  components: string[];
+  /** boundaries — killing one kills its components */
+  boundaries: string[];
+};
+
+/**
+ * The answer to "if ALL of these die, what is at risk?" (§18.7 multi-select).
+ *
+ * Shares every field name with BlastRadius where the meaning is unchanged, so
+ * a surface can render either. `articulation` is deliberately ABSENT: an
+ * articulation point is a property of one vertex (§15.2), a set of vertices is
+ * not one, and a field here would invite a surface to sum or OR the
+ * per-target answers into a structural claim nothing computed. The per-target
+ * results carry theirs.
+ */
+export type MultiBlastResult = {
+  /** the ids asked about, verbatim, de-duplicated, in the order given */
+  targets: string[];
+  /** labels aligned 1:1 with `targets`, so a caption needs no second lookup */
+  targetLabels: string[];
+  /** the subset of `targets` that named a node or a group */
+  resolved: string[];
+  /** targets that named an entity node or nothing at all — never silently dropped */
+  unresolved: UnresolvedTarget[];
+  /** the ids that WOULD work; null when every target resolved */
+  validTargets: ValidTargets | null;
+  /**
+   * One BlastRadius per target, in `targets` order — the single-target answer
+   * verbatim, including each target's own articulation finding.
+   */
+  per: BlastRadius[];
+  /** every vertex the experiment takes out directly: per target, target first */
+  killed: string[];
+  /**
+   * The UNION of the per-target at-risk sets, minus the targets themselves
+   * (§18.7). `depth` and `via` are measured from the NEAREST killed vertex,
+   * not from any one target.
+   */
+  atRisk: AtRiskNode[];
+  /**
+   * The union of the contained sets MINUS anything at risk through another
+   * target. A node contained from one target and reachable from another is at
+   * risk; reporting it as contained would be a false safety claim.
+   */
+  contained: ContainedNode[];
+  /** `atRisk` ids alone, same order — the viewer's tint set, no recomputation */
+  atRiskIds: string[];
+  /** `contained` ids alone, same order — the viewer's boundary set */
+  containedIds: string[];
+  coverage: Coverage;
+  excluded: Exclusions;
+  /** blind spots, C2, C3, and — for two or more resolved targets — §18.11 */
+  assumptions: string[];
+  /** ASSUMPTION_NO_REDUNDANCY when it applies, else null; also last in `assumptions` */
+  redundancyCaveat: string | null;
+  /** set when the selection was empty or lost a target; null when all is well */
+  note: string | null;
+};
+
+/** The roster a surface prints after a miss. Cheap, and only built on a miss. */
+function validTargetsOf(g: RuntimeGraph): ValidTargets {
+  return { components: [...g.nodeIds], boundaries: g.doc.groups.map((gr) => gr.id) };
+}
+
+/**
+ * Multi-target blast radius over an already-built projection.
+ *
+ * The union is not computed by merging N results — it is computed by handing
+ * the UNION OF THE KILLED SETS to the same propagate() a single target uses.
+ * That is the whole reason a one-id call returns exactly the one-id answer:
+ * there is one traversal, not a second one that can drift from it. It also
+ * gets the case a naive merge gets wrong for free — containment is computed
+ * after the combined at-risk set is closed, so a node contained from target A
+ * but reachable from target B lands in `atRisk`, never in `contained`.
+ */
+export function blastRadiusMultiOn(
+  g: RuntimeGraph,
+  ids: readonly string[],
+  articulationIndex?: Map<string, ArticulationPoint>,
+): MultiBlastResult {
+  const targets = [...new Set(ids)];
+  // ONE articulation sweep for the whole selection, not one per target. That
+  // parameter exists precisely because rebuilding the sweep per candidate and
+  // throwing it away cost ~2s at the 200-element cap; mapping blastRadiusOn
+  // over N targets without it re-pays that N times, and the viewer re-pays it
+  // on every shift-click. Built lazily, so a selection of boundaries only —
+  // whose answer never consults the index — still pays nothing.
+  const index =
+    articulationIndex ??
+    (targets.some((id) => g.nodeById.has(id)) ? articulationIndexOf(g) : undefined);
+  const per = targets.map((id) => blastRadiusOn(g, id, index));
+
+  const resolved: string[] = [];
+  const unresolved: UnresolvedTarget[] = [];
+  for (const r of per) {
+    if (r.targetKind === 'node' || r.targetKind === 'group') resolved.push(r.target);
+    else unresolved.push({ id: r.target, kind: r.targetKind, note: r.note ?? '' });
+  }
+
+  // Per target, target first, then its descendants — the same shape as the
+  // single-target `killed`, concatenated. A target that is a descendant of an
+  // earlier group target is already in the set and is not repeated.
+  const killed = [...new Set(per.flatMap((r) => r.killed))];
+  const { atRisk, contained } = propagate(g, killed);
+
+  const redundancyCaveat = resolved.length > 1 ? ASSUMPTION_NO_REDUNDANCY : null;
+
+  return {
+    targets,
+    targetLabels: per.map((r) => r.label),
+    resolved,
+    unresolved,
+    validTargets: unresolved.length > 0 ? validTargetsOf(g) : null,
+    per,
+    killed,
+    atRisk,
+    contained,
+    atRiskIds: atRisk.map((a) => a.id),
+    containedIds: contained.map((c) => c.id),
+    coverage: g.coverage,
+    excluded: g.excluded,
+    assumptions: [
+      ...blastAssumptions(g.coverage, g.excluded),
+      ...(redundancyCaveat !== null ? [redundancyCaveat] : []),
+    ],
+    redundancyCaveat,
+    note: multiNote(targets, unresolved),
+  };
+}
+
+/**
+ * What went wrong with the SELECTION, in the §3.3 voice: what happened, then
+ * what to do. The ids that would have worked travel as `validTargets` rather
+ * than inside this string, because only the surface knows how many of a
+ * three-hundred-node roster it can afford to print.
+ *
+ * An empty selection gets a note and not an error, and certainly not the whole
+ * document: "nothing selected" and "nothing is at risk" must never render the
+ * same, which is exactly why the empty case is a stated note.
+ */
+function multiNote(targets: string[], unresolved: UnresolvedTarget[]): string | null {
+  if (targets.length === 0) {
+    return 'no targets selected — nothing to predict; name at least one runtime component or boundary';
+  }
+  if (unresolved.length === 0) return null;
+  const named = unresolved.map((u) => `"${u.id}" (${u.note})`).join('; ');
+  const all = unresolved.length === targets.length;
+  const lead = all
+    ? `no target could be killed: ${named}`
+    : `${unresolved.length} of ${targets.length} targets could not be killed and took no part in this prediction: ${named}`;
+  return `${lead} — replace each with a runtime component or boundary id, or drop it from the selection`;
+}
+
+/**
+ * If ALL of `ids` die together, what is at risk? (§18.7 multi-select)
+ *
+ * The at-risk set is the UNION of the individual sets, because a node is at
+ * risk if ANY synchronous dependency dies. Pure, total and read-only (C1, A1)
+ * exactly as blastRadius is: an empty list, an unknown id and an entity target
+ * all come back as a stated result, never a throw.
+ *
+ * Read §18.11, which travels on the result as `redundancyCaveat`.
+ */
+export function blastRadiusMulti(doc: GraphDoc, ids: readonly string[]): MultiBlastResult {
+  return blastRadiusMultiOn(runtimeGraph(doc), ids);
+}
+
 /** One candidate experiment (§18.4). */
 export type BacklogEntry = {
   id: string;

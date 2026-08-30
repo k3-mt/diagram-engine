@@ -216,6 +216,34 @@ export function endDrag(d: DragState | null): { drag: null; moved: boolean } {
 }
 
 /**
+ * Fold a press-ending event into "was the press that just ended a click?".
+ *
+ * `onPointerLeave` is the same handler as `onPointerUp`, so this runs twice
+ * for one gesture — and `endDrag(null)` reports moved:false, so a naive
+ * second call rewrites "that was a pan" into "that was a click". With a mouse
+ * the release happens inside the container and the order hides it; on touch
+ * the pointer ceases to exist at pointerup, so the UA fires pointerleave
+ * immediately after it and BEFORE the compatibility click — turning a pan
+ * that ended over a box into a target selection. Only a press that was
+ * actually in flight may write the answer.
+ */
+export function endPress(
+  drag: DragState | null,
+  panned: boolean,
+): { drag: null; panned: boolean } {
+  const { moved } = endDrag(drag);
+  return { drag: null, panned: drag === null ? panned : moved };
+}
+
+/**
+ * Does this move take pointer capture? Only the one that turns the press into
+ * a pan (see the hook's onPointerMove for why not at pointerdown).
+ */
+export function takesCapture(captured: boolean, drag: DragState): boolean {
+  return !captured && drag.active;
+}
+
+/**
  * Cursor for the canvas. The canvas is always grabbable now that plain
  * left-drag pans, so 'grab' is the resting cursor and 'grabbing' shows while a
  * press is held (from pointerdown, not only past the threshold — the hand has
@@ -247,6 +275,16 @@ export interface UseViewportResult {
   cursor: 'grab' | 'grabbing';
   /** CSS `transform` value for the camera element. */
   transform: string;
+  /**
+   * Did the LAST press become a pan? (spec §8.3; PAN_THRESHOLD_PX above.)
+   *
+   * A click handler on a node must ask this before acting: a drag that starts
+   * and ends over the same box still fires a `click`, and a pan is not a
+   * selection. The state machine already draws that line — `endDrag` returns
+   * `moved` — so nothing here invents a second threshold. Cleared on the next
+   * pointerdown, so it only ever describes the press that just ended.
+   */
+  didPan: () => boolean;
   /** Style for the camera element: transform + 250ms transition when fitting. */
   style: CSSProperties;
   /** Attach to the viewport container: adds a non-passive native wheel listener. */
@@ -280,6 +318,12 @@ export function useViewport(
 
   const spaceRef = useRef(false);
   const dragRef = useRef<DragState | null>(null);
+  // Whether the press that just ended was a pan (see `didPan`). A ref, not
+  // state: a click handler reads it during the same event turn, and a render
+  // for it would be a render nobody can see.
+  const pannedRef = useRef(false);
+  // Whether this press has taken pointer capture yet (see onPointerMove).
+  const capturedRef = useRef(false);
   const wheelCleanupRef = useRef<(() => void) | null>(null);
 
   const bx = bounds?.x;
@@ -350,6 +394,7 @@ export function useViewport(
     // Middle/right buttons are left to the browser.
     const space = spaceRef.current;
     if (!space && e.button !== 0) return;
+    pannedRef.current = false;
     dragRef.current = beginDrag(
       e.clientX,
       e.clientY,
@@ -359,8 +404,12 @@ export function useViewport(
     setPanning(true);
     // FIT-vs-DRAG rule 1: kill the 250ms transition the instant the user grabs.
     setAnimated(false);
-    const t = e.currentTarget as Element & { setPointerCapture?: (id: number) => void };
-    if (typeof t.setPointerCapture === 'function') t.setPointerCapture(e.pointerId);
+    // NO POINTER CAPTURE HERE — see onPointerMove. Capturing on every press
+    // would retarget this press's compatibility mouse events to the container,
+    // and Chrome derives a `click`'s target from those: the node group's
+    // onClick would never fire and §18.7's click-to-target would be dead in
+    // the one browser the viewer runs in.
+    capturedRef.current = false;
   }, []);
 
   const onPointerMove = useCallback((e: ReactPointerEvent<Element>) => {
@@ -369,16 +418,37 @@ export function useViewport(
     const { drag, dx, dy } = advanceDrag(from, e.clientX, e.clientY);
     dragRef.current = drag;
     if (dx === 0 && dy === 0) return; // still under the click threshold
+    // Past PAN_THRESHOLD_PX this press is a pan and can no longer be a click,
+    // so capture is now free to take — and it is needed, to keep receiving
+    // moves when the hand leaves the container mid-drag. Taking it here rather
+    // than at pointerdown is what keeps a plain click reaching the node.
+    if (takesCapture(capturedRef.current, drag)) {
+      capturedRef.current = true;
+      const t = e.currentTarget as Element & { setPointerCapture?: (id: number) => void };
+      if (typeof t.setPointerCapture === 'function') t.setPointerCapture(e.pointerId);
+    }
     setAnimated(false);
     setVp((prev) => panBy(prev, dx, dy));
   }, []);
 
   const onPointerUp = useCallback(() => {
     // moved === false means this press was a click: nothing panned, so the
-    // click is left for hover/selection handlers downstream.
-    dragRef.current = endDrag(dragRef.current).drag;
+    // click is left for hover/selection handlers downstream. `moved` is kept
+    // in a ref rather than dropped, so the click handler that fires next can
+    // ask (didPan) instead of guessing.
+    //
+    // Only a press that was actually in progress may write that answer. This
+    // handler is also onPointerLeave, and endDrag(null) reports moved:false —
+    // so a second call would report "that was a click" about a gesture that
+    // panned. On touch the UA fires pointerleave straight after pointerup and
+    // before the compatibility click, which is exactly when it would matter.
+    const { drag, panned } = endPress(dragRef.current, pannedRef.current);
+    dragRef.current = drag;
+    pannedRef.current = panned;
     setPanning(false);
   }, []);
+
+  const didPan = useCallback(() => pannedRef.current, []);
 
   const transform = viewportTransform(vp);
   const style: CSSProperties = {
@@ -394,6 +464,7 @@ export function useViewport(
     panning,
     cursor: panCursor(panning),
     transform,
+    didPan,
     style,
     containerRef,
     onPointerDown,

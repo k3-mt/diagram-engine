@@ -431,10 +431,55 @@ export function App(): JSX.Element {
         : analysisPlan(frame.source, overlay.analysis, drawnIndex),
     [frame, overlay.analysis, drawnIndex],
   );
+  // `hiddenTargets` travels with the plan so the caption can say that a
+  // selected target took no part in the prediction. It is NOT re-projected
+  // onto its collapsed ancestor: that would ring the wrong box and assert the
+  // wrong experiment (overlayPlan decision 4). Saying it is the fix.
+  const hiddenTargetCount = overlay.hiddenTargets.length;
   const blastView = useMemo(
-    () => (overlay.blast === null ? null : blastPlan(overlay.blast, drawnIndex)),
-    [overlay.blast, drawnIndex],
+    () =>
+      overlay.blast === null
+        ? null
+        : blastPlan(overlay.blast, drawnIndex, { hiddenTargets: hiddenTargetCount }),
+    [overlay.blast, drawnIndex, hiddenTargetCount],
   );
+
+  // §18.7's click-to-target. Three guards, in order, and none of them is a
+  // new rule:
+  //   * the mode. A click means nothing in the plain picture; toggleTarget is
+  //     a no-op outside `blast` and says so in overlayState.ts.
+  //   * the pan. A drag that starts and ends over the same box still fires a
+  //     click; useViewport already distinguishes the two (PAN_THRESHOLD_PX),
+  //     so the answer is asked for, not re-derived.
+  //   * nothing else. It sets React state in this tab: no patch, no write,
+  //     no socket send. The socket stays receive-only.
+  const onNodeClick = useCallback(
+    (id: string, opts: { toggle: boolean }) => {
+      if (view.didPan()) return;
+      overlay.toggleTarget(id, { extend: opts.toggle });
+    },
+    [view, overlay],
+  );
+
+  // Escape clears the whole selection — one gesture out, whether one target
+  // is chosen or eight (§18.7). It is deliberately not bound to a background
+  // click: the background is the pan surface, and a clear you can trigger by
+  // releasing a drag a pixel short of the threshold is a clear you cannot
+  // trust. The caption names the key wherever the selection is empty.
+  const clearTargets = overlay.clearTargets;
+  const blastOn = overlay.mode === 'blast';
+  useEffect(() => {
+    if (typeof window === 'undefined' || !blastOn) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      clearTargets();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // Bound only while the overlay is on: with it off there is no selection
+    // on screen, so an Escape means something to some other part of the page
+    // and must not silently wipe the target waiting to be returned to.
+  }, [blastOn, clearTargets]);
 
   const overlaySvg =
     frame === null
@@ -533,8 +578,14 @@ export function App(): JSX.Element {
           bottom: BAR_HEIGHT,
           overflow: 'hidden',
           // 'grab' at rest / 'grabbing' while held — plain left-drag pans
-          // the canvas (capability C), space-drag still does too.
-          cursor: view.cursor,
+          // the canvas (capability C), space-drag still does too. Over a box
+          // with the blast overlay on it becomes 'pointer': that click selects
+          // a target (§18.7), and the affordance has to exist where the click
+          // does. Never while actually panning, where the hand wins.
+          cursor:
+            view.cursor === 'grab' && overlay.mode === 'blast' && hoveredNode !== null
+              ? 'pointer'
+              : view.cursor,
           touchAction: 'none',
         }}
       >
@@ -559,6 +610,12 @@ export function App(): JSX.Element {
                 hoveredId={hoveredNode?.id ?? null}
                 onHoverNode={hoverApi.onHoverNode}
                 onHoverMove={hoverApi.onHoverMove}
+                // §18.7: click a node to target it, modifier-click to
+                // combine. A lens over one tab, never an edit (§1.6).
+                onNodeClick={overlay.mode === 'blast' ? onNodeClick : undefined}
+                // A ring means "target" or "contained" while the blast
+                // overlay is on, so the hover ring stands down — see Canvas.
+                hoverRing={overlay.mode !== 'blast'}
                 // Layer 7 (§8.1), above everything and never hit-tested —
                 // the slot Canvas already exposes, so nothing about layers
                 // 1-6 changes and the overlay-off picture is untouched.

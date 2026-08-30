@@ -53,21 +53,28 @@
 //     pictorial form.
 //
 // -------------------------------------------------------------------------
-// 3. PICKING A BLAST TARGET WITH NO MOUSE SELECTION (§1.6)
+// 3. PICKING BLAST TARGETS — TWO GESTURES, ONE SET (§18.7)
 // -------------------------------------------------------------------------
-// §1.6 forbids mouse editing and this viewer has no click-to-select; hover is
-// inspection only. [focus] solved the same problem by cycling with a button
-// press, and [blast] reuses that pattern rather than inventing a second one —
-// press to enter, press again to advance, Shift to go back, and the button
-// prints the node it is on so the control always says what it will show.
+// §18.7 names two ways to choose, because they answer different questions:
 //
-// It differs from [focus] in ONE deliberate way: the cycle runs in EXPERIMENT
-// BACKLOG ORDER (§18.4 — at-risk count, then articulation point, then sync
-// fan-in), not document order. Document order would be arbitrary; the backlog
-// is the ranking Part 18 exists to produce, so the first press lands on the
-// highest-impact experiment and repeated presses walk down the list. That
-// turns the button into the backlog itself, and no ranking has to be
-// duplicated in the viewer.
+//   * CLICK A NODE — "what happens if THIS dies", the question you have while
+//     looking at the diagram. A plain click REPLACES the selection, so on a
+//     sole target clicking again clears it (§18.7's own wording) and on a set
+//     it narrows to the one clicked. That is the standard selection idiom, and
+//     the caption's hint says both halves rather than only the first — "click
+//     again clears it" on its own reads as safe on a set of eight, where the
+//     same gesture discards seven.
+//   * CYCLE THE BUTTON — "what should I break first", walking the ranked
+//     experiment backlog (§18.4), Shift for the previous. This is the only
+//     mechanism when nothing is worth clicking yet, and the button prints the
+//     node it is on so the control always says what it will show.
+//
+// The cycle runs in EXPERIMENT BACKLOG ORDER (§18.4 — at-risk count, then
+// articulation point, then sync fan-in), not document order. Document order
+// would be arbitrary; the backlog is the ranking Part 18 exists to produce, so
+// the first press lands on the highest-impact experiment and repeated presses
+// walk down the list. That turns the button into the backlog itself, and no
+// ranking has to be duplicated in the viewer.
 //
 // Candidates are restricted to targets that are THEMSELVES drawn. A hidden
 // node projects onto its collapsed boundary, and ringing a whole VPC to mean
@@ -76,6 +83,65 @@
 // true})` supplies exactly those as group experiments (§18.3 detail 2) — so
 // the exec view offers region and VPC outages and the eng view offers nodes,
 // with no special case anywhere.
+//
+// CLICKING IS NOT EDITING. §1.6 forbids mouse EDITING — moving, resizing or
+// re-parenting a box. §7 permits viewport controls, and a selection that only
+// decides which prediction is drawn in one browser tab is a lens: there is no
+// schema field for "which overlay am I looking at" and there must never be one
+// (§18.7's closing paragraph). Nothing here patches, writes or sends.
+//
+// -------------------------------------------------------------------------
+// 4. THE TARGET IS A SET, AND THE SET IS THE ONLY SOURCE OF TRUTH
+// -------------------------------------------------------------------------
+// §18.7's multi-select — "can we survive losing an availability zone" — makes
+// the target plural, so `targets` is an ORDERED LIST and there is no second
+// field beside it holding "the" target. A `target: string | null` next to a
+// `targets: string[]` is exactly how a surface ends up ringing one node and
+// captioning another. Every consumer reads the list; the button label and the
+// cycle read `targets[0]` as the primary, derived on the spot.
+//
+// The distinctions the list has to carry:
+//
+//   * EMPTY MEANS EMPTY. An empty list is "nothing is selected", drawn as no
+//     ring and captioned as such — never silently re-seeded with the backlog
+//     top, or clicking a node a second time to clear it would appear to do
+//     nothing. Entering the mode from the button seeds the top eagerly instead,
+//     so the first press still lands on the highest-impact experiment.
+//   * A TARGET THAT IS NO LONGER DRAWN IS DROPPED, not stranded: a view change
+//     or an agent's delete leaves the button working. If that empties a
+//     non-empty selection the backlog top is taken, which is the pre-existing
+//     recovery behaviour and is the one case where the fallback is right —
+//     the user did not clear anything, the picture moved under them.
+//     DROPPING ONE IS SAID OUT LOUD. Removing a target changes WHICH
+//     EXPERIMENT IS RUNNING, which is a bigger claim than the projection's
+//     `rolledUp`: that one says a finding is drawn on a different box, this
+//     one says a component the user selected took no part in the answer. So
+//     the removed ids come back as `hidden` beside the kept ones and the
+//     caption prints a row. Under-reporting a union silently is the mirror
+//     image of the over-reporting §18.11 makes us print a caveat about.
+//   * THE VISIBLE SET IS THE ONE THAT COUNTS. Every transition that takes a
+//     drawn index prunes the remembered list before acting on it, so the cap,
+//     the refusal and the rings are all measured on the same list. Measuring
+//     the cap on the raw state while drawing the filtered one is how a click
+//     gets refused for a reason that is nowhere on screen.
+//   * A CLICKED TARGET NEED NOT BE IN THE BACKLOG. The backlog excludes entry
+//     points (§18.4 — killing the browser client is not an experiment worth
+//     RANKING), but a direct click is the user asking anyway, and answering
+//     "the web client has nothing at risk behind it" is a real answer. So the
+//     validity test for a remembered target is "is it drawn", with the
+//     candidate list as the fallback when the caller has no index to hand.
+//
+// CYCLING WITH SEVERAL SELECTED REPLACES THE WHOLE SELECTION with the single
+// next backlog entry, and the caption immediately says so by naming one
+// target. The alternative — advancing only the primary and keeping the rest —
+// would silently mix a chosen set with a walked ranking, and the union drawn
+// on screen would answer a question nobody asked. Replacing is visible and
+// reversible; dropping part of a selection is neither.
+//
+// THE CAP (§8.2). Rings assert identity, and ten of them plus a union tint is
+// the carnival §8.2 forbids. Extending past MAX_BLAST_TARGETS is refused, and
+// the caption prints `targets (n/8)` whenever the cap is reached so a click
+// that did nothing has its reason already on screen rather than in a log.
 
 import type { GraphDoc } from '@diagram-engine/core';
 // Runtime imports of the core SOURCE modules rather than the barrel: the
@@ -94,18 +160,32 @@ export const OVERLAY_BUTTONS = ['analysis', 'blast'] as const;
 export type OverlayButtonName = (typeof OVERLAY_BUTTONS)[number];
 
 /**
- * The whole overlay state. `target` is remembered across a trip through
+ * How many targets can be combined at once (see header note 4).
+ *
+ * Eight is the point at which counting rings stops being free. A real
+ * question — an AZ, a replica pair, a shard set — is a handful of components;
+ * past that the union stops being a prediction anyone can check and the
+ * picture stops being a picture.
+ */
+export const MAX_BLAST_TARGETS = 8;
+
+/**
+ * The whole overlay state. `targets` is remembered across a trip through
  * `off`, so toggling the overlay off to read the diagram and back on returns
  * you to the same experiment rather than to the top of the backlog.
  */
 export interface OverlayState {
   mode: OverlayMode;
-  /** The node or group [blast] points at, or null to take the backlog's first. */
-  target: string | null;
+  /**
+   * The nodes and groups [blast] points at, in selection order — the ONLY
+   * record of what is targeted (header note 4). Empty means nothing is
+   * selected, which is a state the caption says out loud.
+   */
+  targets: readonly string[];
 }
 
 /** First paint: no overlay. The diagram is the diagram until asked otherwise. */
-export const INITIAL_OVERLAY_STATE: OverlayState = { mode: 'off', target: null };
+export const INITIAL_OVERLAY_STATE: OverlayState = { mode: 'off', targets: [] };
 
 // ---------------------------------------------------------------------------
 // The projection (see header note 2)
@@ -256,19 +336,74 @@ export function canBlast(candidates: readonly BacklogEntry[]): boolean {
   return candidates.length > 0;
 }
 
+/** Nothing is drawn — the default when a caller has no index to hand. */
+const NO_DRAWN: ReadonlySet<string> = new Set();
+
 /**
- * The target [blast] is pointed at right now: the remembered choice while it
- * is still a candidate, else the top of the backlog. A node the agent deleted,
- * or one a view change has hidden, must not strand the button.
+ * Can `id` still be targeted? Drawn under its own name, or — when the caller
+ * has no index — at least still in the backlog (header note 4, third bullet).
  */
-export function blastTarget(
+function targetable(
+  id: string,
+  candidates: readonly BacklogEntry[],
+  drawn: ReadonlySet<string>,
+): boolean {
+  return drawn.has(id) || candidates.some((c) => c.id === id);
+}
+
+/**
+ * The targets [blast] is pointed at right now: the remembered selection minus
+ * anything the picture no longer draws.
+ *
+ * An EMPTY selection stays empty — that is the user having cleared it. A
+ * selection every one of whose members has gone falls back to the top of the
+ * backlog, because there the picture moved rather than the user choosing, and
+ * a stranded button is worse than a re-seeded one (header note 4).
+ */
+export function blastTargets(
   state: OverlayState,
   candidates: readonly BacklogEntry[],
-): string | null {
-  if (state.target !== null && candidates.some((c) => c.id === state.target)) {
-    return state.target;
+  drawn: ReadonlySet<string> = NO_DRAWN,
+): string[] {
+  return blastSelection(state, candidates, drawn).targets;
+}
+
+/** The same answer, plus the targets that had to be dropped to reach it. */
+export interface BlastSelection {
+  /** what the overlay is actually predicting for */
+  targets: string[];
+  /**
+   * Selected ids the picture no longer draws, so they took NO PART in the
+   * prediction. Never silently swallowed: the caption prints them, because a
+   * dropped target changes the experiment (header note 4).
+   */
+  hidden: string[];
+}
+
+/** `blastTargets`, keeping what it removed. See BlastSelection. */
+export function blastSelection(
+  state: OverlayState,
+  candidates: readonly BacklogEntry[],
+  drawn: ReadonlySet<string> = NO_DRAWN,
+): BlastSelection {
+  if (state.targets.length === 0) return { targets: [], hidden: [] };
+  const kept: string[] = [];
+  const hidden: string[] = [];
+  for (const id of state.targets) {
+    (targetable(id, candidates, drawn) ? kept : hidden).push(id);
   }
-  return candidates[0]?.id ?? null;
+  if (kept.length > 0) return { targets: kept, hidden };
+  const top = candidates[0]?.id;
+  return { targets: top === undefined ? [] : [top], hidden };
+}
+
+/** The one the button names and the cycle advances from: the first selected. */
+export function primaryBlastTarget(
+  state: OverlayState,
+  candidates: readonly BacklogEntry[],
+  drawn: ReadonlySet<string> = NO_DRAWN,
+): string | null {
+  return blastTargets(state, candidates, drawn)[0] ?? null;
 }
 
 /** The next candidate after `current` (`dir: -1` walks back). Wraps. */
@@ -301,33 +436,117 @@ export function selectOverlay(
   state: OverlayState,
   name: OverlayButtonName,
   candidates: readonly BacklogEntry[],
-  opts: { reverse?: boolean } = {},
+  opts: { reverse?: boolean; drawn?: ReadonlySet<string> } = {},
 ): OverlayState {
   if (name === 'analysis') {
     return state.mode === 'analysis'
-      ? { mode: 'off', target: state.target }
-      : { mode: 'analysis', target: state.target };
+      ? { mode: 'off', targets: state.targets }
+      : { mode: 'analysis', targets: state.targets };
   }
 
   if (!canBlast(candidates)) return state; // the button is disabled; be safe anyway
+  const drawn = opts.drawn ?? NO_DRAWN;
   if (state.mode !== 'blast') {
-    return { mode: 'blast', target: blastTarget(state, candidates) };
+    // Entering seeds the backlog top when nothing is selected, so the first
+    // press still lands on the highest-impact experiment (header note 4).
+    const kept = blastTargets(state, candidates, drawn);
+    const seed = candidates[0]?.id;
+    return {
+      mode: 'blast',
+      targets: kept.length > 0 ? kept : seed === undefined ? [] : [seed],
+    };
   }
+  // Already on: advance. With several selected this REPLACES the selection
+  // with the single next entry — visible and reversible, where advancing the
+  // primary and keeping the rest would silently mix a chosen set with a
+  // walked ranking (header note 4).
   const next = nextBlastTarget(
     candidates,
-    blastTarget(state, candidates),
+    primaryBlastTarget(state, candidates, drawn),
     opts.reverse === true ? -1 : 1,
   );
-  return { mode: 'blast', target: next };
+  return { mode: 'blast', targets: next === null ? [] : [next] };
+}
+
+/**
+ * Click a node: make it the only target, or clear it when it already is
+ * (§18.7 — "Clicking again clears it").
+ *
+ * With `extend`, TOGGLE its membership of the set instead: the modifier-click
+ * that builds the "can we survive losing an AZ" question. Adding past
+ * MAX_BLAST_TARGETS is refused — the state comes back unchanged and the
+ * caption is already saying the cap is reached (header note 4).
+ *
+ * IT ACTS ON THE VISIBLE MEMBERSHIP. Given the drawn index it first prunes
+ * the targets the picture no longer draws, so the cap it enforces and the
+ * `capped` the caption prints are computed from ONE list. Without that, eight
+ * targets remembered from another view refuse every click while the caption,
+ * looking at the filtered list, reports one target and no cap: a click that
+ * does nothing with its reason nowhere on screen. With no index to hand,
+ * every remembered target counts — the same fallback `targetable` takes.
+ *
+ * Outside `blast` mode this is a no-op. There is nothing for a click to mean
+ * in the plain picture or under the analysis overlay, and inventing a hidden
+ * selection that only appears when a mode is switched on would be a second
+ * kind of state to reason about.
+ */
+export function toggleBlastTarget(
+  state: OverlayState,
+  id: string,
+  opts: {
+    extend?: boolean;
+    candidates?: readonly BacklogEntry[];
+    drawn?: ReadonlySet<string>;
+  } = {},
+): OverlayState {
+  if (state.mode !== 'blast') return state;
+  const base =
+    opts.candidates === undefined && opts.drawn === undefined
+      ? [...state.targets]
+      : state.targets.filter((t) =>
+          targetable(t, opts.candidates ?? [], opts.drawn ?? NO_DRAWN),
+        );
+  const has = base.includes(id);
+  if (opts.extend !== true) {
+    // Plain click: replace, or clear when it is already the sole target.
+    if (has && base.length === 1) return { ...state, targets: [] };
+    return { ...state, targets: [id] };
+  }
+  if (has) return { ...state, targets: base.filter((t) => t !== id) };
+  if (base.length >= MAX_BLAST_TARGETS) return state; // capped
+  return { ...state, targets: [...base, id] };
+}
+
+/**
+ * Clear the whole selection, staying in the mode.
+ *
+ * One gesture, not a hunt (Escape in the viewer): with eight targets ringed,
+ * un-clicking them one at a time is not a way out. The mode stays on and the
+ * caption says nothing is selected, so the next click is still a target.
+ */
+export function clearBlastTargets(state: OverlayState): OverlayState {
+  return state.targets.length === 0 ? state : { ...state, targets: [] };
 }
 
 /** Everything the buttons need for one render, derived from state + document. */
 export interface ResolvedOverlay {
   mode: OverlayMode;
-  /** the id [blast] is pointed at, or null when there is nothing to point at */
-  target: string | null;
-  /** its label, for the button text */
+  /**
+   * The ids [blast] is pointed at, empty when nothing is. The single record
+   * of what is targeted — the button label below is derived from it, never
+   * held alongside it (header note 4).
+   */
+  targets: string[];
+  /**
+   * Selected ids this view does not draw, which therefore took no part in the
+   * prediction (header note 4). The caption says so; nothing here re-projects
+   * them onto a collapsed ancestor, which would assert the wrong experiment.
+   */
+  hiddenTargets: string[];
+  /** the button's text: one target's label, or `n targets`, or null for none */
   targetLabel: string | null;
+  /** true when the selection is at MAX_BLAST_TARGETS and refusing to grow */
+  capped: boolean;
   /** false when [blast] must render disabled */
   blastEnabled: boolean;
   /** the backlog, most impactful first — the order the button cycles in */
@@ -345,15 +564,35 @@ export interface ResolvedOverlay {
 export function resolveOverlayFrom(
   candidates: BacklogEntry[],
   state: OverlayState,
+  opts: { drawn?: ReadonlySet<string>; labelOf?: (id: string) => string | null } = {},
 ): ResolvedOverlay {
-  const target = blastTarget(state, candidates);
+  const { targets, hidden } = blastSelection(state, candidates, opts.drawn ?? NO_DRAWN);
+  const one = targets.length === 1 ? (targets[0] as string) : null;
+  const label =
+    one === null
+      ? null
+      : (opts.labelOf?.(one) ?? candidates.find((c) => c.id === one)?.label ?? one);
   return {
     mode: state.mode,
-    target,
-    targetLabel: candidates.find((c) => c.id === target)?.label ?? null,
+    targets,
+    hiddenTargets: hidden,
+    // Several targets: a count, not a list. The strip is 28px tall and the
+    // caption is where the names belong.
+    targetLabel: targets.length > 1 ? `${targets.length} targets` : label,
+    capped: targets.length >= MAX_BLAST_TARGETS,
     blastEnabled: canBlast(candidates),
     candidates,
   };
+}
+
+/** Labels for anything targetable in a document — nodes and boundaries alike. */
+export function labelIndex(doc: GraphDoc | null): (id: string) => string | null {
+  if (doc === null) return () => null;
+  const map = new Map<string, string>([
+    ...doc.groups.map((g) => [g.id, g.label] as const),
+    ...doc.nodes.map((n) => [n.id, n.label] as const),
+  ]);
+  return (id) => map.get(id) ?? null;
 }
 
 /** resolveOverlayFrom, computing the backlog itself. Used by the tests. */
@@ -362,5 +601,8 @@ export function resolveOverlay(
   idx: DrawnIndex,
   state: OverlayState,
 ): ResolvedOverlay {
-  return resolveOverlayFrom(blastCandidates(doc, idx), state);
+  return resolveOverlayFrom(blastCandidates(doc, idx), state, {
+    drawn: idx.ids,
+    labelOf: labelIndex(doc),
+  });
 }

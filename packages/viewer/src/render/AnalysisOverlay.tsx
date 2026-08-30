@@ -67,6 +67,17 @@ export const TARGET_HALO_PAD = 8;
 export const AT_RISK_TINT = 0.1;
 
 /**
+ * Alpha of the KILLED tint: components inside a targeted boundary, which the
+ * experiment takes out directly rather than endangering.
+ *
+ * The at-risk tint at double strength, deliberately the same hue and the same
+ * channel — a second colour would be a third vocabulary in a picture §8.2
+ * already keeps to two. Still a tint: 0.2 leaves the label readable, and
+ * "killed" is a stronger claim than "at risk", not a different kind of claim.
+ */
+export const KILLED_TINT = 0.2;
+
+/**
  * Font of the `fan-in 9 (7 sync)` badge.
  *
  * Named OVERLAY_BADGE_FONT, not BADGE_FONT: layout/measure.ts already owns
@@ -374,7 +385,6 @@ export function BlastOverlay({
   nodeIds,
 }: BlastOverlayProps): JSX.Element {
   const edges = edgeIndex(laidOut, paths);
-  const targetRect = plan.target === null ? undefined : laidOut.nodes.get(plan.target);
   return (
     <g data-overlay-mode="blast">
       <defs>
@@ -400,6 +410,29 @@ export function BlastOverlay({
           );
         })}
       </g>
+      {/* KILLED — inside a targeted boundary, so already gone rather than at
+          risk. Same tint at double strength: no new channel (§8.2), and the
+          stronger mark is the stronger claim. Without it a component the
+          experiment destroys was drawn exactly like a survivor, which in the
+          exec view — where every box is a boundary — was the normal case. */}
+      {plan.killed.map((id) => {
+        const rect = laidOut.nodes.get(id);
+        return rect === undefined ? null : (
+          <rect
+            key={id}
+            data-overlay="killed"
+            data-overlay-node={id}
+            x={rect.x}
+            y={rect.y}
+            width={rect.width}
+            height={rect.height}
+            rx={theme.node.radius}
+            ry={theme.node.radius}
+            fill={ANALYSIS_ACCENT}
+            opacity={KILLED_TINT}
+          />
+        );
+      })}
       {/* at risk — a TINT, never a fill: the box must stay readable (§8.2) */}
       {plan.atRisk.map((id) => {
         const rect = laidOut.nodes.get(id);
@@ -455,28 +488,39 @@ export function BlastOverlay({
           />
         );
       })}
-      {/* the target: a bullseye, so which experiment this is is never in doubt */}
-      {targetRect === undefined || plan.target === null ? null : (
-        <g>
-          <Ring
-            id={plan.target}
-            testId="blast-target"
-            rect={targetRect}
-            pad={RING_PAD}
-            stroke={ANALYSIS_ACCENT}
-            width={2.5}
-            opacity={1}
-          />
-          <Ring
-            id={plan.target}
-            rect={targetRect}
-            pad={TARGET_HALO_PAD}
-            stroke={ANALYSIS_ACCENT}
-            width={1}
-            opacity={0.35}
-          />
-        </g>
-      )}
+      {/* The targets. ONE is a bullseye — ring plus halo — so which experiment
+          this is is never in doubt. SEVERAL get the ring alone: eight halos
+          plus a union tint is the heat map §8.2 forbids, and the halo is the
+          decoration of the two, while the ring is the one that says "this box
+          is a target". Graceful degradation, in the only channel that had any
+          slack. The caption names them; the picture keeps one accent. */}
+      {plan.targets.map((id) => {
+        const rect = laidOut.nodes.get(id);
+        if (rect === undefined) return null;
+        return (
+          <g key={id}>
+            <Ring
+              id={id}
+              testId="blast-target"
+              rect={rect}
+              pad={RING_PAD}
+              stroke={ANALYSIS_ACCENT}
+              width={2.5}
+              opacity={1}
+            />
+            {plan.targets.length > 1 ? null : (
+              <Ring
+                id={id}
+                rect={rect}
+                pad={TARGET_HALO_PAD}
+                stroke={ANALYSIS_ACCENT}
+                width={1}
+                opacity={0.35}
+              />
+            )}
+          </g>
+        );
+      })}
     </g>
   );
 }

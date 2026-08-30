@@ -44,16 +44,33 @@
 //    already the filtered, ranked list from core (`isChokepoint`). Inventing a
 //    second threshold here is how the CLI and the viewer start ringing
 //    different boxes.
+//
+// 6. WHAT THE EXPERIMENT KILLS IS DRAWN, NOT ONLY WHAT IT ENDANGERS. A group
+//    target kills its contents outright, and those components are absent from
+//    `atRisk` precisely because they are past risk. Leaving them unmarked drew
+//    dead boxes exactly like survivors — on the exec view, where every drawn
+//    box is a boundary, that is the normal case. They get the at-risk tint at
+//    double strength: no new channel, and the stronger mark is the stronger
+//    claim.
+//
+// 7. THE CHANNEL THAT SCALES IS THE ONE THAT DEGRADES. §8.2 forbids the heat
+//    map, and with a union the thing that grows is the at-risk set, not the
+//    rings: past MAX_EDGE_ACCENT_TARGETS targets, half the edges on a small
+//    document end up recoloured and the picture stops distinguishing anything.
+//    So the at-risk EDGE accents are dropped past that point — the box tint
+//    already carries the same set, the caption still prints the full count and
+//    the names, and it says the strokes were dropped. Rings are capped at
+//    MAX_BLAST_TARGETS and never were the problem.
+//
 
 import type { GraphDoc } from '@diagram-engine/core';
 import type {
   Analysis,
-  BlastRadius,
+  MultiBlastResult,
 } from '../../../core/src/analysis/index.js';
 import {
   projectEdge,
   projectEdges,
-  projectId,
   projectIds,
   type DrawnIndex,
 } from './overlayState.js';
@@ -97,6 +114,16 @@ export interface AnalysisPlan {
   /** chokepoints the current view has collapsed out of sight (decision 3, A5) */
   hiddenChokepoints: number;
 }
+
+/**
+ * How many targets the at-risk EDGE accents survive (decision 7).
+ *
+ * Two, measured rather than guessed: on a 13-node reference document one
+ * target recolours 6 of 16 edges and two recolour 8. A third adds no
+ * information — the union has already saturated — and takes the picture past
+ * the point where a highlighted edge means anything.
+ */
+export const MAX_EDGE_ACCENT_TARGETS = 2;
 
 /** `fan-in 9 (7 sync)`, or `fan-in 3` when none of it is synchronous. */
 export function fanInBadge(total: number, sync: number): string {
@@ -171,12 +198,32 @@ export function analysisPlan(
 
 /** Everything the blast-radius overlay draws, as ids (decision 4). */
 export interface BlastPlan {
-  /** the drawn box to ring, or null when the target is not on screen */
-  target: string | null;
+  /**
+   * The drawn boxes to ring — one per selected target, in selection order,
+   * minus any the current view does not draw. Plural because §18.7's
+   * multi-select is plural; a single target is the one-element case and not a
+   * separate path.
+   */
+  targets: string[];
+  /**
+   * Drawn boxes the experiment takes out DIRECTLY and that are not themselves
+   * targets — the components inside a killed boundary (§18.3 detail 2). They
+   * are not `atRisk`, because they are not at risk, they are gone; drawing
+   * them like survivors is the understatement decision 6 exists to stop.
+   */
+  killed: string[];
   /** drawn boxes to tint: something inside each depends on the target */
   atRisk: string[];
-  /** the drawn edges the cascade travels along */
+  /** the drawn edges the cascade travels along, empty once decision 7 fires */
   atRiskEdges: string[];
+  /** at-risk edges suppressed by decision 7, so the caption can say so */
+  atRiskEdgesSuppressed: number;
+  /**
+   * Selected targets this view does not draw and which therefore took no part
+   * in the prediction. A count, because the caption prints a count; the ids
+   * are the overlay's, not the plan's.
+   */
+  hiddenTargets: number;
   /** drawn boxes the design's dashed edges keep out of it (§18.3, C2) */
   contained: string[];
   /** the dashed drawn edges where propagation stops — the boundary itself */
@@ -187,8 +234,23 @@ export interface BlastPlan {
   dropped: number;
 }
 
-/** Project §18.3's prediction onto the picture. */
-export function blastPlan(blast: BlastRadius, idx: DrawnIndex): BlastPlan {
+/**
+ * Project §18.3's prediction onto the picture.
+ *
+ * Takes core's MULTI result always, never a single `BlastRadius`: core
+ * guarantees a one-id call returns exactly the one-id answer, so one path
+ * here means the single and combined pictures cannot drift apart. A target
+ * the current view does not draw is dropped from the rings rather than
+ * projected onto its collapsed ancestor — decision 4's distinction, applied
+ * to the ring: ringing the `Data` box to mean "kill postgres" would assert
+ * the wrong experiment, while TINTING it merely says something inside is at
+ * risk, which is true.
+ */
+export function blastPlan(
+  blast: MultiBlastResult,
+  idx: DrawnIndex,
+  opts: { hiddenTargets?: number } = {},
+): BlastPlan {
   const atRisk = projectIds(
     idx,
     blast.atRisk.map((r) => r.id),
@@ -197,13 +259,26 @@ export function blastPlan(blast: BlastRadius, idx: DrawnIndex): BlastPlan {
     idx,
     blast.contained.map((c) => c.id),
   );
+  const targets = blast.targets.filter((id) => idx.ids.has(id));
+  // Decision 6. `killed` holds every target plus everything inside a killed
+  // boundary; the targets already have rings, so this is the remainder, drawn
+  // under its own name only — a dead component inside a collapsed box is
+  // already covered by that box being a target.
+  const targetSet = new Set(blast.targets);
+  const killed = blast.killed.filter((id) => !targetSet.has(id) && idx.ids.has(id));
+  // Decision 7: the edge accents are the channel that grows with the union.
+  const atRiskEdges = projectEdges(
+    idx,
+    blast.atRisk.map((r) => r.via),
+  );
+  const suppressEdges = targets.length > MAX_EDGE_ACCENT_TARGETS;
   return {
-    target: projectId(idx, blast.target),
+    targets,
+    killed,
     atRisk: atRisk.drawn,
-    atRiskEdges: projectEdges(
-      idx,
-      blast.atRisk.map((r) => r.via),
-    ),
+    atRiskEdges: suppressEdges ? [] : atRiskEdges,
+    atRiskEdgesSuppressed: suppressEdges ? atRiskEdges.length : 0,
+    hiddenTargets: opts.hiddenTargets ?? 0,
     contained: contained.drawn,
     containedEdges: projectEdges(
       idx,

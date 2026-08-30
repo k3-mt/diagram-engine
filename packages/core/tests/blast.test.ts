@@ -15,9 +15,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASSUMPTION_AT_RISK,
+  ASSUMPTION_NO_REDUNDANCY,
   ASSUMPTION_SYNC_ONLY,
   backlog,
   blastRadius,
+  blastRadiusMulti,
   runtimeGraph,
 } from '../src/analysis/index.js';
 import { GraphDocSchema, type GraphDoc } from '../src/schema/graph.js';
@@ -431,6 +433,34 @@ describe('one articulation sweep, not one per candidate', () => {
     // the quadratic sweep cannot come back unnoticed.
     expect(Date.now() - started).toBeLessThan(500);
   });
+
+  it('shares that one sweep across a whole multi-target selection (§18.7)', () => {
+    // The same regression, one level up: blastRadiusMultiOn maps
+    // blastRadiusOn over the targets, and without an index each call rebuilt
+    // the whole O(n·(n+e)) sweep and threw it away. The viewer re-pays it on
+    // every shift-click, so eight targets cost eight sweeps for an answer
+    // that does not even expose an articulation field.
+    const n = 200;
+    const nodes = Array.from({ length: n }, (_, i) => node(`n${i}`));
+    const edges = Array.from({ length: n - 1 }, (_, i) =>
+      edge(`e${i}`, `n${i}`, `n${i + 1}`),
+    );
+    const d = doc({ nodes, edges });
+    const targets = Array.from({ length: 8 }, (_, i) => `n${i * 10 + 5}`);
+
+    const t0 = Date.now();
+    blastRadiusMulti(d, [targets[0] as string]);
+    const one = Date.now() - t0;
+    const t1 = Date.now();
+    const many = blastRadiusMulti(d, targets);
+    const eight = Date.now() - t1;
+
+    expect(many.per).toHaveLength(8);
+    // Same order of magnitude as one target, not eight times it. The slack is
+    // generous — this is a clock — but a per-target sweep is ~8x and cannot
+    // hide inside it.
+    expect(eight).toBeLessThan(Math.max(one * 3, 40));
+  });
 });
 
 describe('a component inside a depended-on boundary is not an entry point', () => {
@@ -442,5 +472,265 @@ describe('a component inside a depended-on boundary is not an entry point', () =
     });
     expect(runtimeGraph(d).entryPoints).toEqual(['client']);
     expect(backlog(d).map((r) => [r.id, r.atRisk])).toEqual([['api', 1]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §18.7 multi-select — "can we survive losing an availability zone?"
+//
+// The at-risk set for several targets is the UNION of their individual sets.
+// Two things make that harder than it sounds, and each gets a test:
+//
+//   * a target that is itself at risk from another target is a TARGET, once.
+//   * a node contained from one target but reachable from another is AT RISK.
+//     A naive union of the contained sets calls it safe, which is the design's
+//     own safety claim applied to a path the design does not break.
+//
+// Plus §18.11: the union is arithmetically right over a model that cannot
+// express redundancy, so the caveat travels on the result as data.
+// ---------------------------------------------------------------------------
+
+describe('multi-target blast radius is the union (§18.7)', () => {
+  it('answers one id with exactly the single-target answer', () => {
+    // One definition of the answer, not two that drift: the multi path runs
+    // the same traversal over the same killed set.
+    const d = fixture('cross-boundary-edges.json');
+    const one = blastRadius(d, 'postgres');
+    const multi = blastRadiusMulti(d, ['postgres']);
+    expect(multi.per).toEqual([one]);
+    expect(multi.killed).toEqual(one.killed);
+    expect(multi.atRisk).toEqual(one.atRisk);
+    expect(multi.contained).toEqual(one.contained);
+    expect(multi.assumptions).toEqual(one.assumptions);
+    expect(multi.coverage).toEqual(one.coverage);
+    expect(multi.excluded).toEqual(one.excluded);
+    expect(multi.note).toBeNull();
+  });
+
+  it('unions two independent targets rather than answering only the last', () => {
+    const d = doc({
+      nodes: [node('a'), node('b'), node('x'), node('y')],
+      edges: [edge('e1', 'a', 'x'), edge('e2', 'b', 'y')],
+    });
+    expect(ids(blastRadius(d, 'x').atRisk)).toEqual(['a']);
+    expect(ids(blastRadius(d, 'y').atRisk)).toEqual(['b']);
+    const r = blastRadiusMulti(d, ['x', 'y']);
+    expect(r.killed).toEqual(['x', 'y']);
+    expect(ids(r.atRisk)).toEqual(['a', 'b']);
+    expect(r.atRiskIds).toEqual(['a', 'b']);
+  });
+
+  it('measures depth from the nearest killed target, not from the first', () => {
+    // c -> b -> a. Killing a alone puts b at 1 and c at 2; adding b as a
+    // target makes c a direct dependent of something dead.
+    const d = doc({
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [edge('e1', 'b', 'a'), edge('e2', 'c', 'b')],
+    });
+    expect(blastRadius(d, 'a').atRisk.map((x) => [x.id, x.depth])).toEqual([
+      ['b', 1],
+      ['c', 2],
+    ]);
+    const r = blastRadiusMulti(d, ['a', 'b']);
+    expect(r.atRisk.map((x) => [x.id, x.depth, x.via])).toEqual([['c', 1, 'e2']]);
+  });
+
+  it('reports a target that is at risk from another target once, as a target', () => {
+    const d = doc({
+      nodes: [node('p'), node('q'), node('r')],
+      edges: [edge('e1', 'q', 'p'), edge('e2', 'r', 'q')],
+    });
+    expect(ids(blastRadius(d, 'p').atRisk)).toEqual(['q', 'r']);
+    const r = blastRadiusMulti(d, ['p', 'q']);
+    expect(r.targets).toEqual(['p', 'q']);
+    expect(r.killed).toEqual(['p', 'q']);
+    expect(ids(r.atRisk)).toEqual(['r']);
+    expect(r.atRiskIds).not.toContain('q');
+  });
+
+  it('de-duplicates a repeated target instead of killing it twice', () => {
+    const d = doc({
+      nodes: [node('a'), node('x')],
+      edges: [edge('e1', 'a', 'x')],
+    });
+    const r = blastRadiusMulti(d, ['x', 'x']);
+    expect(r.targets).toEqual(['x']);
+    expect(r.killed).toEqual(['x']);
+    expect(ids(r.atRisk)).toEqual(['a']);
+  });
+
+  it('composes a group experiment with the union — descendants and all', () => {
+    const d = doc({
+      nodes: [
+        node('web'),
+        node('api', { parent: 'vpc' }),
+        node('db', { parent: 'vpc' }),
+        node('jobs'),
+        node('cache'),
+      ],
+      groups: [group('vpc', { kind: 'vpc' })],
+      edges: [
+        edge('e1', 'web', 'api'),
+        edge('e2', 'api', 'db'),
+        edge('e3', 'jobs', 'cache'),
+      ],
+    });
+    const r = blastRadiusMulti(d, ['vpc', 'cache']);
+    expect(r.per.map((p) => p.targetKind)).toEqual(['group', 'node']);
+    // Target first, then its descendants, then the next target (detail 2).
+    expect(r.killed).toEqual(['vpc', 'api', 'db', 'cache']);
+    // api and db are dead, not at risk; web and jobs are the union.
+    expect(ids(r.atRisk)).toEqual(['web', 'jobs']);
+  });
+});
+
+describe('multi-target containment is a union MINUS whatever is at risk', () => {
+  // a is behind a DASHED edge from x and a SOLID edge to y. Killing x alone
+  // contains a; killing both must call it at risk. Merging the two contained
+  // lists without subtracting the at-risk set claims the queue protects a
+  // node that is also making a synchronous call — a false safety claim.
+  const d = () =>
+    doc({
+      nodes: [node('a'), node('b'), node('c'), node('x'), node('y')],
+      edges: [
+        edge('e1', 'a', 'x', { style: 'dashed' }),
+        edge('e2', 'a', 'y'),
+        edge('e3', 'b', 'x', { style: 'dashed' }),
+        edge('e4', 'c', 'a'),
+      ],
+    });
+
+  it('shows the single-target answers a naive union would merge', () => {
+    expect(ids(blastRadius(d(), 'x').contained)).toEqual(['a', 'b']);
+    expect(ids(blastRadius(d(), 'x').atRisk)).toEqual([]);
+    expect(ids(blastRadius(d(), 'y').atRisk)).toEqual(['a', 'c']);
+  });
+
+  it('moves the doubly-reachable node out of contained and into at risk', () => {
+    const r = blastRadiusMulti(d(), ['x', 'y']);
+    expect(ids(r.atRisk)).toEqual(['a', 'c']);
+    expect(r.containedIds).toEqual(['b']);
+    expect(r.containedIds).not.toContain('a');
+    expect(r.contained[0]).toEqual({
+      id: 'b',
+      label: 'b',
+      edge: 'e3',
+      from: 'x',
+      edgeLabel: null,
+    });
+  });
+
+  it('keeps a genuinely contained node contained when both targets are async', () => {
+    const only = doc({
+      nodes: [node('a'), node('x'), node('y')],
+      edges: [
+        edge('e1', 'a', 'x', { style: 'dashed' }),
+        edge('e2', 'a', 'y', { style: 'dashed' }),
+      ],
+    });
+    const r = blastRadiusMulti(only, ['x', 'y']);
+    expect(r.atRisk).toEqual([]);
+    expect(r.containedIds).toEqual(['a']);
+  });
+});
+
+describe('§18.11: a multi-target result says what it cannot know', () => {
+  const d = () =>
+    doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica')],
+      edges: [edge('e1', 'app', 'pg-primary'), edge('e2', 'app', 'pg-replica')],
+    });
+
+  it('carries the redundancy caveat as data once two targets are selected', () => {
+    // The two targets are replicas of each other. The document has no way to
+    // say so, so the prediction is confident and slightly wrong, and the
+    // result says which.
+    const r = blastRadiusMulti(d(), ['pg-primary', 'pg-replica']);
+    expect(ids(r.atRisk)).toEqual(['app']);
+    expect(r.redundancyCaveat).toBe(ASSUMPTION_NO_REDUNDANCY);
+    expect(r.assumptions.at(-1)).toBe(ASSUMPTION_NO_REDUNDANCY);
+    expect(r.assumptions).toContain(ASSUMPTION_AT_RISK);
+    expect(r.assumptions).toContain(ASSUMPTION_SYNC_ONLY);
+  });
+
+  it('does not add it to a one-target result, which is the single-target answer', () => {
+    const r = blastRadiusMulti(d(), ['pg-primary']);
+    expect(r.redundancyCaveat).toBeNull();
+    expect(r.assumptions).toEqual(blastRadius(d(), 'pg-primary').assumptions);
+  });
+
+  it('still never says "will fail", in any field', () => {
+    const r = blastRadiusMulti(d(), ['pg-primary', 'pg-replica']);
+    const hits = JSON.stringify(r).match(/will fail/g) ?? [];
+    // Once per per-target result plus once on the combined assumptions block:
+    // every occurrence is the sentence that disowns the phrase (C3).
+    expect(hits).toHaveLength(r.per.length + 1);
+    expect(JSON.stringify({ atRisk: r.atRisk, contained: r.contained })).not.toContain('fail');
+  });
+
+  it('does not invent an alt field — §18.11 is specified, not built', () => {
+    expect(JSON.stringify(blastRadiusMulti(d(), ['pg-primary']))).not.toContain('"alt"');
+  });
+});
+
+describe('multi-target refusals are stated, never a confident zero', () => {
+  it('answers an empty selection with an empty result and says so', () => {
+    const d = fixture('cross-boundary-edges.json');
+    const r = blastRadiusMulti(d, []);
+    expect(r.targets).toEqual([]);
+    expect(r.killed).toEqual([]);
+    expect(r.atRisk).toEqual([]);
+    expect(r.contained).toEqual([]);
+    expect(r.per).toEqual([]);
+    expect(r.note).toBe(
+      'no targets selected — nothing to predict; name at least one runtime component or boundary',
+    );
+    // Empty is still an analysis: the blind spots and C2/C3 travel with it.
+    expect(r.assumptions).toContain(ASSUMPTION_AT_RISK);
+    expect(r.redundancyCaveat).toBeNull();
+  });
+
+  it('keeps an unknown id visible, with what to do and the ids that work', () => {
+    const d = doc({
+      nodes: [node('a'), node('api', { parent: 'vpc' })],
+      groups: [group('vpc')],
+      edges: [edge('e1', 'a', 'api')],
+    });
+    const r = blastRadiusMulti(d, ['api', 'ghost']);
+    expect(r.resolved).toEqual(['api']);
+    expect(r.unresolved).toEqual([
+      { id: 'ghost', kind: 'unknown', note: 'no node or group with id "ghost"' },
+    ]);
+    expect(r.note).toContain('1 of 2 targets could not be killed');
+    expect(r.note).toContain('no node or group with id "ghost"');
+    expect(r.note).toContain('drop it from the selection');
+    expect(r.validTargets).toEqual({ components: ['a', 'api'], boundaries: ['vpc'] });
+    // The targets that DID resolve are still predicted for.
+    expect(ids(r.atRisk)).toEqual(['a']);
+  });
+
+  it('names an entity target with the same wording the single-target path uses', () => {
+    const d = fixture('mixed-erd-architecture.json');
+    const r = blastRadiusMulti(d, ['invoices']);
+    expect(r.resolved).toEqual([]);
+    expect(r.unresolved[0]?.kind).toBe('entity');
+    expect(r.unresolved[0]?.note).toBe(blastRadius(d, 'invoices').note);
+    expect(r.note).toContain('no target could be killed');
+    expect(r.atRisk).toEqual([]);
+  });
+
+  it('omits the roster when every target resolved', () => {
+    expect(blastRadiusMulti(fixture('cross-boundary-edges.json'), ['postgres']).validTargets)
+      .toBeNull();
+  });
+});
+
+describe('C1/A1 hold for the multi path too', () => {
+  it('predicts over a deeply frozen document without writing anything', () => {
+    const d = deepFreeze(fixture('cross-boundary-edges.json'));
+    const before = JSON.stringify(d);
+    const r = blastRadiusMulti(d, ['postgres', 'kafka']);
+    expect(r.atRisk.length).toBeGreaterThan(0);
+    expect(JSON.stringify(d)).toBe(before);
   });
 });

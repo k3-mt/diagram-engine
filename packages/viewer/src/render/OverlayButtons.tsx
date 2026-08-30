@@ -38,7 +38,12 @@ export const TARGET_LABEL_MAX = 16;
 export interface OverlayButtonsProps {
   /** Which overlay is on. `off` leaves both buttons unpressed. */
   mode: OverlayMode;
-  /** Label of the node or group [blast] points at, or null when there is none. */
+  /**
+   * What [blast] points at: one target's label, or `3 targets` when several
+   * are combined (§18.7), or null when nothing is selected. A count rather
+   * than a list, because the strip is 28px tall and the caption is where the
+   * names belong — see view/overlayState.ts.
+   */
   targetLabel?: string | null;
   /** False renders [blast] disabled (nothing on screen to experiment on). */
   blastEnabled?: boolean;
@@ -85,7 +90,7 @@ const TITLES: Record<OverlayButtonName, string> = {
   analysis:
     'Analysis view: edges weighted by fan-in, chokepoints ringed, the longest synchronous chain highlighted. Computed over the FULL document, not the collapsed view.',
   blast:
-    'Predicted blast radius: ring one component, tint what depends on it, mark where dashed edges contain the cascade. Press again for the next experiment in the backlog (Shift for the previous). "At risk" is not "will fail".',
+    'Predicted blast radius: ring the target, tint what depends on it, mark where dashed edges contain the cascade. Click a component on the canvas to target it, shift-click to combine several and see the union, Esc to clear. Press this button for the next experiment in the ranked backlog (Shift for the previous) — which replaces a multi-selection with that single target. "At risk" is not "will fail".',
 };
 
 export function OverlayButtons(props: OverlayButtonsProps): JSX.Element {

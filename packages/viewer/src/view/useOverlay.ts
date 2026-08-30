@@ -38,16 +38,19 @@ import type { GraphDoc } from '@diagram-engine/core';
 // store/ and with it node:fs). Same route the rest of the viewer takes.
 import {
   analyse,
-  blastRadius,
+  blastRadiusMulti,
   type Analysis,
   type BacklogEntry,
-  type BlastRadius,
+  type MultiBlastResult,
 } from '../../../core/src/analysis/index.js';
 import {
   INITIAL_OVERLAY_STATE,
   blastCandidates,
+  clearBlastTargets,
+  labelIndex,
   resolveOverlayFrom,
   selectOverlay,
+  toggleBlastTarget,
   type DrawnIndex,
   type OverlayButtonName,
   type OverlayState,
@@ -58,10 +61,23 @@ import {
 export interface Overlay extends ResolvedOverlay {
   /** §15's answer over the FULL document (A2), or null unless the mode is on. */
   analysis: Analysis | null;
-  /** §18.3's prediction for the current target, or null unless the mode is on. */
-  blast: BlastRadius | null;
+  /**
+   * §18.3's prediction for the current target SET (§18.7), or null unless the
+   * mode is on. Always the multi shape, even for one target: core guarantees a
+   * one-id call returns exactly the one-id answer, so there is no second code
+   * path for the single case to drift from.
+   */
+  blast: MultiBlastResult | null;
   /** Press a button. Local only — never writes to the document (§1.6). */
   select: (name: OverlayButtonName, opts?: { reverse?: boolean }) => void;
+  /**
+   * Click a node (§18.7): target it, or clear it when it is already the only
+   * one. `extend` toggles it in and out of a multi-selection instead. A read
+   * and a lens, exactly like `select` — no patch, no write, no socket send.
+   */
+  toggleTarget: (id: string, opts?: { extend?: boolean }) => void;
+  /** Clear the whole selection, staying in the mode (Escape in the viewer). */
+  clearTargets: () => void;
 }
 
 export function useOverlay(doc: GraphDoc | null, idx: DrawnIndex): Overlay {
@@ -74,8 +90,14 @@ export function useOverlay(doc: GraphDoc | null, idx: DrawnIndex): Overlay {
     [armed, doc, idx],
   );
 
-  const resolved = resolveOverlayFrom(candidates, state);
-  const { mode, target } = resolved;
+  const resolved = resolveOverlayFrom(candidates, state, {
+    drawn: idx.ids,
+    labelOf: labelIndex(doc),
+  });
+  const { mode, targets } = resolved;
+  // A stable memo key for a list: the identity of `targets` changes every
+  // render, its contents do not.
+  const targetKey = targets.join('\u0000');
 
   // Rule 2. Both take the FULL document — never `derived` (A2): running the
   // analysis on the collapsed picture is exactly how `exec` would hide the
@@ -85,11 +107,9 @@ export function useOverlay(doc: GraphDoc | null, idx: DrawnIndex): Overlay {
     [doc, mode],
   );
   const blast = useMemo(
-    () =>
-      doc === null || mode !== 'blast' || target === null
-        ? null
-        : blastRadius(doc, target),
-    [doc, mode, target],
+    () => (doc === null || mode !== 'blast' ? null : blastRadiusMulti(doc, targets)),
+    // `targetKey` stands in for `targets`: same information, stable identity.
+    [doc, mode, targetKey],
   );
 
   // The press handler must see the backlog for the document it is pressed on,
@@ -111,10 +131,34 @@ export function useOverlay(doc: GraphDoc | null, idx: DrawnIndex): Overlay {
         ? candidatesRef.current
         : blastCandidates(docRef.current, idxRef.current);
       if (!armedRef.current) setArmed(true);
-      setState((s) => selectOverlay(s, name, list, opts ?? {}));
+      setState((s) =>
+        selectOverlay(s, name, list, { ...opts, drawn: idxRef.current.ids }),
+      );
     },
     [],
   );
+
+  // Clicking needs no backlog — the id came off a box that is on screen — so
+  // neither of these arms the expensive computation. Both are pure state
+  // transitions over the set in overlayState.ts (§18.7): a lens, never a write.
+  // The drawn index goes in so the cap is enforced on the same list the
+  // caption reports (`capped`) and the overlay rings. Without it a selection
+  // remembered from another view refuses clicks while the screen says nothing.
+  const toggleTarget = useCallback(
+    (id: string, opts?: { extend?: boolean }) => {
+      setState((s) =>
+        toggleBlastTarget(s, id, {
+          ...opts,
+          candidates: candidatesRef.current,
+          drawn: idxRef.current.ids,
+        }),
+      );
+    },
+    [],
+  );
+  const clearTargets = useCallback(() => {
+    setState(clearBlastTargets);
+  }, []);
 
   return {
     ...resolved,
@@ -128,5 +172,7 @@ export function useOverlay(doc: GraphDoc | null, idx: DrawnIndex): Overlay {
     analysis,
     blast,
     select,
+    toggleTarget,
+    clearTargets,
   };
 }

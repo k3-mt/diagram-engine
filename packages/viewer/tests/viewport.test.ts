@@ -17,9 +17,11 @@ import {
   dragDistance,
   dragPan,
   endDrag,
+  endPress,
   fitToContent,
   panBy,
   panCursor,
+  takesCapture,
   viewportTransform,
   wheelZoomFactor,
   zoomAt,
@@ -286,6 +288,58 @@ describe('drag panning — capability C', () => {
     expect(up.moved).toBe(true);
     // Idle: a further "up" is harmless and reports no movement.
     expect(endDrag(null)).toEqual({ drag: null, moved: false });
+  });
+
+  it('a pan that ends over a node is not a click (§18.7 target selection)', () => {
+    // The blast overlay's click-to-target hangs off the node groups, and a
+    // drag that starts and ends over the same box still fires a `click`. The
+    // guard is `moved` — carried by the hook as didPan() — and NOT a second
+    // threshold invented at the call site. Both ends of the line, asserted
+    // here so a future change to PAN_THRESHOLD_PX moves selection with it.
+    const A: [number, number] = [200, 200];
+    const panned = gesture(vp, A, [[400, 260]]);
+    expect(panned.moved).toBe(true); // didPan() -> the click is dropped
+
+    const tapped = gesture(vp, A, [[201, 200]]);
+    expect(tapped.moved).toBe(false); // didPan() -> the click targets
+    expect(tapped.vp).toEqual(vp); // and the camera never moved either
+  });
+
+  it('a second end event does not rewrite a pan into a click', () => {
+    // onPointerLeave IS onPointerUp, and endDrag(null) reports moved:false —
+    // so folding a second call in naively turns "that was a pan" into "that
+    // was a click". On touch the pointer ceases to exist at pointerup, so the
+    // UA fires pointerleave straight after it and BEFORE the compatibility
+    // click: the pan that ended over a box would have targeted it.
+    const drag = gesture(vp, [200, 200], [[400, 260]]).drag;
+    expect(drag).toBe(null); // the gesture already ended
+    const first = endPress(beginDrag(200, 200, 'mouse', 1), false);
+    expect(first.panned).toBe(false); // never moved: a click
+    const panned = endPress(
+      advanceDrag(beginDrag(200, 200, 'mouse', 1), 400, 260).drag,
+      false,
+    );
+    expect(panned.panned).toBe(true);
+    // the second call has no press in flight and must leave the answer alone
+    expect(endPress(null, true)).toEqual({ drag: null, panned: true });
+    expect(endPress(null, false)).toEqual({ drag: null, panned: false });
+  });
+
+  it('takes pointer capture only once the press has become a pan', () => {
+    // Capturing on EVERY pointerdown retargets the press's compatibility mouse
+    // events to the container, and Chrome derives a click's target from those
+    // — so the node group's onClick never fires and §18.7's click-to-target is
+    // dead in the browser, invisibly to jsdom. Capture is only needed once
+    // panning has started, which is also exactly when the click no longer is.
+    const press = beginDrag(200, 200, 'mouse', 1);
+    expect(takesCapture(false, press)).toBe(false); // a candidate click
+    const under = advanceDrag(press, 202, 200).drag; // still under threshold
+    expect(under.active).toBe(false);
+    expect(takesCapture(false, under)).toBe(false);
+    const panning = advanceDrag(press, 400, 260).drag;
+    expect(panning.active).toBe(true);
+    expect(takesCapture(false, panning)).toBe(true);
+    expect(takesCapture(true, panning)).toBe(false); // taken once, not per move
   });
 
   it('space-drag behaves identically and keeps its mode label', () => {

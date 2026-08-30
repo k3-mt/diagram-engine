@@ -29,9 +29,11 @@ import type { CSSProperties } from 'react';
 import { articulationValue } from '../../../core/src/analysis/index.js';
 import type {
   Analysis,
-  BlastRadius,
+  MultiBlastResult,
 } from '../../../core/src/analysis/index.js';
 import type { AnalysisPlan, BlastPlan } from '../view/overlayPlan.js';
+import { MAX_EDGE_ACCENT_TARGETS } from '../view/overlayPlan.js';
+import { MAX_BLAST_TARGETS } from '../view/overlayState.js';
 import { ANALYSIS_ACCENT } from './AnalysisOverlay.js';
 import { theme } from './theme.js';
 
@@ -45,6 +47,18 @@ export interface Caption {
    * C3); anything this module appends is a blind spot of the VIEW.
    */
   notes: string[];
+  /**
+   * The gestures, in their own dimmed line under everything else.
+   *
+   * Separate from `rows` and from `notes` on purpose. It is not a finding and
+   * not an honesty sentence — mixing it into either would dilute a block whose
+   * whole value is that every line in it is a claim about the document. It
+   * renders whenever the mode is on, because the one place it USED to render —
+   * an empty selection — is a state entering the mode never produces, so the
+   * line that teaches the gesture was only visible to someone who already
+   * knew it.
+   */
+  hint?: string | null;
 }
 
 /** How many names a row lists before it stops and gives a count instead. */
@@ -57,6 +71,22 @@ export function namedList(labels: readonly string[], max = MAX_NAMED): string {
   const rest = labels.length - max;
   return rest > 0 ? `${shown} (+${rest} more)` : shown;
 }
+
+/**
+ * The gestures, spelled out WHENEVER THE BLAST MODE IS ON — as `Caption.hint`,
+ * a dimmed line of its own under the notes.
+ *
+ * It used to print only where the selection was empty, which sounded right and
+ * was not: entering the mode seeds the backlog top, so an empty selection is a
+ * state you can only reach by clicking a sole target twice or pressing Escape
+ * — the two gestures this line exists to teach. Nothing else on the canvas
+ * says a box is clickable except the pointer cursor the mode turns on.
+ *
+ * Escape is named because a way OUT of a selection that is only discoverable
+ * by accident is not a way out (§18.7).
+ */
+export const HOW_TO_TARGET =
+  'click a component to target it — a plain click replaces the selection, and clicking a sole target again clears it · shift-click to add one and see the combined radius · Esc to clear · [blast] walks the ranked backlog';
 
 /** The one sentence that says what the CURRENT VIEW is hiding, or null. */
 export function collapsedBlindSpot(
@@ -98,10 +128,93 @@ export function analysisCaption(a: Analysis, plan: AnalysisPlan): Caption {
   return { headline: `analysis — ${a.title}`, rows, notes };
 }
 
-/** §18.7's block, condensed to a panel. C3's wording is core's, not ours. */
-export function blastCaption(b: BlastRadius, plan: BlastPlan): Caption {
+/**
+ * §18.7's block, condensed to a panel. C3's wording is core's, not ours.
+ *
+ * -------------------------------------------------------------------------
+ * WHAT A COMBINED PREDICTION HAS TO SAY THAT A SINGLE ONE DOES NOT
+ * -------------------------------------------------------------------------
+ * Three extra duties, and only three — this is a caption, not an essay (§8.2).
+ *
+ *  1. WHAT IS SELECTED, and that the number is a UNION. A reader who sees
+ *     "at risk (11)" over three ringed boxes has no way to tell whether that
+ *     is a joint prediction or the worst of three; one row says which.
+ *  2. §18.11, VERBATIM, WHENEVER TWO OR MORE TARGETS RESOLVED. This is the
+ *     honest caption the spec demands: toggle off two replicas, see a large
+ *     at-risk set, and the model gives no signal that losing the first one
+ *     alone was survivable. The sentence is core's `ASSUMPTION_NO_REDUNDANCY`,
+ *     which core sets exactly when the combination exists, so it arrives here
+ *     the same way C2 and C3 do — printed, never composed. It is the caveat
+ *     about the COMBINATION, not about any one target, which is why a single
+ *     target does not get it.
+ *
+ *     It is lifted OUT of the flat notes block and printed directly under the
+ *     row it qualifies, in the rows' own weight. Left in `assumptions` it
+ *     arrived fifth, in grey, after two sentences the reader has already seen
+ *     on every single-target view and learned to skip — while the sentence
+ *     asserting the union sat above it in dark text. That contrast is inverted
+ *     relative to reliability.
+ *  3. WHAT THE EXPERIMENT KILLS OUTRIGHT. The single-target caption already
+ *     refuses to let a boundary experiment be summarised by its at-risk count
+ *     alone; a combined one has exactly the same problem and more of it, since
+ *     in the exec view every drawn box is a boundary. So `kills (n)` is a row
+ *     for the combined case too, and the plan marks those boxes.
+ *
+ * The articulation row is NOT printed for a combined prediction. An
+ * articulation point is a property of one vertex (§15.2) and core
+ * deliberately omits the field from a multi result; summing or OR-ing the
+ * per-target answers into one line would be the caption inventing a
+ * structural claim nothing computed — the same failure the boundary case
+ * below already guards against.
+ */
+export function blastCaption(b: MultiBlastResult, plan: BlastPlan): Caption {
   const rows: string[] = [];
   if (b.note !== null) rows.push(b.note);
+
+  // Nothing selected. "no target" and "nothing is at risk" must never render
+  // the same, so this is its own caption rather than a set of zeroes — core
+  // makes the same distinction with its own note, printed above.
+  if (b.targets.length === 0) {
+    return {
+      headline: 'blast radius — no target selected',
+      rows,
+      notes: [],
+      hint: HOW_TO_TARGET,
+    };
+  }
+
+  const multi = b.targets.length > 1;
+  if (multi) {
+    // The cap is read off the SAME list the count beside it comes from.
+    // Counting `b.targets` while limiting on `plan.targets` is how a caption
+    // ends up saying "targets (3)" and "8 is the limit" about two lists.
+    const cap =
+      b.targets.length >= MAX_BLAST_TARGETS
+        ? ` — ${MAX_BLAST_TARGETS} is the limit; deselect one to add another`
+        : '';
+    rows.push(`targets (${b.targets.length})  ${namedList(b.targetLabels)}${cap}`);
+    rows.push(
+      'combined  the union of each target\u2019s at-risk set — a node is at risk if ANY of them dies',
+    );
+    // Duty 2: the caveat goes next to the claim it qualifies, in the rows'
+    // own weight — not fifth in a grey footnote under two sentences the
+    // reader has already learned to skip. Core's wording, unaltered, and
+    // removed from `notes` below so it prints exactly once.
+    if (b.redundancyCaveat !== null) rows.push(`but  ${b.redundancyCaveat}`);
+  }
+
+  // Duty 3: what the experiment takes out DIRECTLY, beyond the targets
+  // themselves — the components inside a killed boundary. They are absent
+  // from `atRisk` because they are past risk, so an at-risk count alone
+  // understates the experiment. The single-target headline has said this
+  // since Phase 5; the combined one returned before reaching it.
+  const killsAll = b.killed.length - b.resolved.length;
+  if (multi && killsAll > 0) {
+    rows.push(
+      `kills (${killsAll})  inside the selected boundaries — already gone, not merely at risk`,
+    );
+  }
+
   rows.push(
     `at risk (${b.atRisk.length})  ${namedList(b.atRisk.map((r) => r.label))}`,
   );
@@ -117,9 +230,43 @@ export function blastCaption(b: BlastRadius, plan: BlastPlan): Caption {
   // box IS a collapsed group, so that would be the caption on nearly every
   // blast target: a structural conclusion nothing derived, on the surface
   // §18.7 warns is the most persuasive one.
-  rows.push(`articulation  ${articulationValue(b)}`);
+  //
+  // The SAME trap on the other unresolved kind, and this one only became
+  // reachable with click-to-target: an entity node is excluded from the
+  // runtime projection (A4), so nothing ever computed an articulation for it,
+  // yet `articulationValue` sees kind 'entity' with a null articulation and
+  // falls through the group guard to the asserted "no". The backlog cycle
+  // could never land on an entity; a click can. So the row is printed only
+  // for a target that actually RESOLVED — `note === null` is core's own
+  // record of that — and the honest note above it stands alone.
+  const single = b.per.length === 1 ? b.per[0] : undefined;
+  if (single !== undefined && single.note === null) {
+    rows.push(`articulation  ${articulationValue(single)}`);
+  }
 
-  const notes = [...b.assumptions];
+  // A selected target the view stopped drawing changed WHICH EXPERIMENT ran,
+  // which is a bigger claim than `rolledUp`'s "drawn on another box" — so it
+  // is a row, in the rows' weight, not a footnote. It is not re-projected
+  // onto its collapsed ancestor: ringing `Data` to mean "kill postgres" would
+  // assert the wrong experiment (overlayPlan decision 4). The fix is to say
+  // it, not to draw it.
+  if (plan.hiddenTargets > 0) {
+    const n = plan.hiddenTargets;
+    rows.push(
+      `not included (${n})  ${n} selected target${n === 1 ? '' : 's'} sit${n === 1 ? 's' : ''} inside a collapsed boundary and took no part in this prediction — open the view (eng) to include ${n === 1 ? 'it' : 'them'}`,
+    );
+  }
+
+  const notes = b.assumptions.filter(
+    // Printed as a row above, beside the claim it qualifies. Verbatim in
+    // exactly one place, never twice and never nowhere.
+    (note) => note !== b.redundancyCaveat,
+  );
+  if (plan.atRiskEdgesSuppressed > 0) {
+    notes.push(
+      `edge highlighting is off past ${MAX_EDGE_ACCENT_TARGETS} targets — ${plan.atRiskEdgesSuppressed} at-risk edge${plan.atRiskEdgesSuppressed === 1 ? '' : 's'} ${plan.atRiskEdgesSuppressed === 1 ? 'is' : 'are'} not drawn; the tinted boxes are still the whole at-risk set`,
+    );
+  }
   const rolled = collapsedBlindSpot(plan.rolledUp, 'at-risk component');
   if (rolled !== null) {
     notes.push(
@@ -134,12 +281,25 @@ export function blastCaption(b: BlastRadius, plan: BlastPlan): Caption {
   // A boundary experiment kills its contents outright — they are not `atRisk`
   // because they are already dead — so a headline showing only the at-risk
   // count understates the experiment. The CLI names them; so does this.
-  const kills = b.killed.length - 1;
+  if (single === undefined) {
+    return {
+      headline: `blast radius — ${b.targets.length} targets combined`,
+      rows,
+      notes,
+      hint: HOW_TO_TARGET,
+    };
+  }
+  const kills = single.killed.length - 1;
   const boundary =
-    b.targetKind === 'group' && kills > 0
+    single.targetKind === 'group' && kills > 0
       ? ` (boundary — kills ${kills} component${kills === 1 ? '' : 's'})`
       : '';
-  return { headline: `blast radius — ${b.label}${boundary}`, rows, notes };
+  return {
+    headline: `blast radius — ${single.label}${boundary}`,
+    rows,
+    notes,
+    hint: HOW_TO_TARGET,
+  };
 }
 
 const panelStyle: CSSProperties = {
@@ -186,6 +346,16 @@ export function OverlayCaption({ caption }: OverlayCaptionProps): JSX.Element {
           {caption.notes.map((note) => (
             <div key={note}>{note}</div>
           ))}
+        </div>
+      )}
+      {caption.hint === undefined || caption.hint === null ? null : (
+        // Dimmer than the notes and last: it is how to drive the panel, not
+        // anything the panel is claiming about the document.
+        <div
+          data-testid="overlay-caption-hint"
+          style={{ marginTop: 4, opacity: 0.7, fontStyle: 'italic' }}
+        >
+          {caption.hint}
         </div>
       )}
     </div>
