@@ -1271,6 +1271,44 @@ server.listen(port, () => open(`http://localhost:${port}`));
 - **`--no-open`** for when the developer already has the tab.
 - Bind `127.0.0.1` only. Never `0.0.0.0`.
 
+## 9.1 Auto-serve — drawing implies showing
+
+**Not built.** The gap this closes: a first session says *"draw our architecture"*, the agent
+patches the document correctly, and **nothing appears**, because `diagram serve` was never
+started. The agent then says "run `diagram serve` to see it" — after the fact. The tool
+worked and the user saw a blank terminal.
+
+So a patch that creates content starts the viewer if it is not already running.
+
+### Rules
+
+| # | Rule |
+|---|---|
+| S1 | Auto-serve fires on a **successful patch that changed the document**, never on a read (`get`, `analyse`, `check`) and never on a rejected patch. |
+| S2 | **Idempotent.** If a viewer is already serving this document, reuse it — never start a second. A pidfile at `.diagram/serve.json` records pid, port and document path; a stale entry (pid gone, or port answering something else) is replaced, not trusted. |
+| S3 | **Detached.** The spawned viewer outlives the MCP process, exactly as §2.1 requires: the agent session ends, the diagram stays on screen. |
+| S4 | **Non-blocking.** Patch latency is unchanged — spawn and return. G6's 400ms budget is not spent waiting for a server to bind. |
+| S5 | **Opt-out, and it must be honoured everywhere it matters.** `DIAGRAM_NO_AUTOSERVE=1` and `--no-serve` both suppress it. **The eval harness sets the env var**: it runs twenty sandboxed patches per system, and twenty servers with twenty browser tabs is not a benchmark, it is a fork bomb with a UI. |
+| S6 | **Opens the browser at most once per viewer.** A second patch repaints the existing tab; it does not raise a new one. Nothing is more irritating than a tool that steals focus on every edit. |
+
+### What it does not change
+
+§2.1's two-process topology stands. The viewer is still a separate, longer-lived process
+that owns no document state, and the file on disk is still the only interface between them.
+Auto-serve changes *who starts it*, not *what it is* — and because the child is detached, the
+lifetimes stay exactly as §2.1 describes.
+
+### The judgement call
+
+A tool that opens a browser window unasked is intrusive, and the instinct to make this
+opt-**in** is a reasonable one. It is wrong here for one reason: the failure it prevents is
+silent. An opt-in flag helps the people who already know the viewer exists — which is
+precisely the group that did not need helping. The first-time user, who is the one harmed,
+does not know there is a flag to pass.
+
+S5 and S6 are what make that defensible: it is one window, once, and any context that should
+not have it can say so.
+
 ---
 
 # Part 10 — Build Plan
