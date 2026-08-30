@@ -217,7 +217,15 @@ refuse_clobber "$OUT"
 
 # --- confinement --------------------------------------------------------------
 # The guarantee, enforced by the OS rather than asserted in a comment.
-SANDBOX_PROFILE="$(mktemp "${TMPDIR:-/tmp}/diagram-eval-sandbox.XXXXXX.sb")"
+# BSD mktemp only substitutes Xs at the END of the template: with a ".sb"
+# suffix it takes "XXXXXX.sb" literally, and then FAILS with "File exists" on
+# every later run once that literal file is on disk — which is what any killed
+# run leaves behind. An empty SANDBOX_PROFILE then becomes `sandbox-exec -f ""`,
+# the agent never starts, and the run scores as an empty document. Create the
+# temp file with the Xs last, then rename.
+SANDBOX_PROFILE="$(mktemp "${TMPDIR:-/tmp}/diagram-eval-sandbox.XXXXXX")" || {
+  echo "eval.sh: could not create a sandbox profile file" >&2; exit 1; }
+mv "$SANDBOX_PROFILE" "$SANDBOX_PROFILE.sb" && SANDBOX_PROFILE="$SANDBOX_PROFILE.sb"
 CONFINED=0
 if [ "$UNCONFINED" -eq 1 ]; then
   echo "!! --unconfined: the agent can read this repository, including"
@@ -340,6 +348,12 @@ one_run() {
             CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
             CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_PID CLAUDE_EFFORT AI_AGENT
       if [ "$CONFINED" -eq 1 ]; then
+        # An empty or missing profile here would become `sandbox-exec -f ""`,
+        # which fails to exec and scores as "the agent drew nothing". Refuse.
+        if [ -z "$SANDBOX_PROFILE" ] || [ ! -s "$SANDBOX_PROFILE" ]; then
+          echo "  sandbox profile missing or empty — refusing to run unconfined" >&2
+          exit 70
+        fi
         set -- sandbox-exec -f "$SANDBOX_PROFILE"
       else
         set --
