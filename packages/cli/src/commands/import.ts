@@ -33,9 +33,13 @@
 // nothing extra (§1.4's deny-list lives inside the schema and the invariants),
 // so an incoming file carrying x/y is rejected rather than quietly persisted.
 //
-// No MCP tool. Spec §4.1 fixes the agent surface at seven tools and an agent
-// that can call diagram_patch has no need to replace a document wholesale;
-// import is a HUMAN/pipeline operation, which is what the CLI is for (§4.2).
+// No MCP tool, and this is the one command in the table that has none. Spec
+// §4.1 fixes the agent surface deliberately narrow — seven tools there, nine
+// once Parts 15 and 18 add diagram_analyse and diagram_blast_radius, and the
+// count is not the point: every one of them is a read or a scoped edit. An
+// agent that can call diagram_patch has no need to replace a document
+// wholesale; import is a HUMAN/pipeline operation, which is what the CLI is
+// for (§4.2).
 //
 // Runtime import of core by relative path: see the note in commands/patch.ts.
 

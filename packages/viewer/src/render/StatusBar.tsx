@@ -16,7 +16,9 @@
 // Without the slot nothing is rendered, which is what every existing caller
 // and test relies on. The `save` slot at the far right works the same way and
 // holds <SaveButtons> — the ⌘S of the §8.4 mock, finally attached to
-// something (export/save.ts).
+// something (export/save.ts). The `analysis` slot beside `views` is M9's
+// [analysis] [blast: X] overlays (§15.5, §18.7), and follows the same rule:
+// the bar is handed a node and gives it a place to sit.
 //
 // §9: when graph.json fails to parse or validate the server keeps the last
 // good diagram on screen and sends {type:'error'} instead of a repaint. The
@@ -149,6 +151,14 @@ export interface StatusBarProps {
   flashMs?: number;
   /** M7 view buttons ([exec] [eng] [focus]); nothing is rendered without it. */
   views?: ReactNode;
+  /**
+   * M9 analysis overlays ([analysis] [blast: X], §15.5/§18.7); nothing is
+   * rendered without it. A slot of its own rather than more children in
+   * `views`: the view presets change WHICH ELEMENTS are drawn, the overlays
+   * change WHAT IS SAID ABOUT THEM, and they are separate `role="group"`s so
+   * a screen reader announces two controls rather than one of five buttons.
+   */
+  analysis?: ReactNode;
   /** M7 save controls ([SVG ⌘S] [PNG 2×]); nothing is rendered without it. */
   save?: ReactNode;
   /** Tick period for the elapsed label, ms (tests pass a short one). */
@@ -183,6 +193,7 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
     connection,
     lastUpdate,
     views,
+    analysis,
     save,
     tickMs = 1000,
     docError = null,
@@ -218,6 +229,14 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
           style={{ display: 'flex', alignItems: 'center', gap: 4 }}
         >
           {views}
+        </span>
+      )}
+      {analysis === undefined || analysis === null ? null : (
+        <span
+          data-testid="analysis-slot"
+          style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+        >
+          {analysis}
         </span>
       )}
       <span style={{ flex: 1 }} />

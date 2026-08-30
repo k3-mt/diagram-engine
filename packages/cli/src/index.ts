@@ -26,6 +26,9 @@ export * from './commands/view.js';
 export * from './commands/export.js';
 export * from './commands/import.js';
 export * from './commands/check.js';
+// Part 15 / Part 18 — the reasoning pair, in the order `--help` lists them.
+export * from './commands/analyse.js';
+export * from './commands/blastRadius.js';
 export * from './commands/rules.js';
 export * from './commands/reset.js';
 

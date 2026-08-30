@@ -54,7 +54,7 @@ export function logStderr(message: string): void {
  * things a first turn needs and nothing else: read before you write, the rules
  * travel with diagram_patch, and how to tell a rejection from a success.
  *
- * That last line is here rather than repeated in all seven tool descriptions
+ * That last line is here rather than repeated in every tool description
  * because it is one fact about the whole surface, and the description of every
  * tool is paid for on every turn. See the isError note in the call handler for
  * why the flag itself is not the signal.

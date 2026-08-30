@@ -34,6 +34,33 @@
 // override seeded from doc.collapsed that the status-bar buttons change and
 // that resets whenever the agent changes doc.collapsed. Nothing in this file
 // writes to the document; see view/viewState.ts for the §1.6 argument.
+//
+// ANALYSIS OVERLAYS (M9, §15.5 and §18.7). Two more status-bar buttons put a
+// lens over the picture: [analysis] rings chokepoints and highlights the
+// longest synchronous chain, [blast: X] rings one component and tints what
+// depends on it. Same class of control as the view buttons — local, read-only,
+// no patch, no socket traffic (§7, §1.6) — and the same split: the rules are
+// pure functions in view/overlayState.ts and view/overlayPlan.ts, this file is
+// wiring.
+//
+// TWO THINGS THIS FILE OWNS ABOUT THEM.
+//
+//  1. THE ANALYSIS RUNS ON THE FULL DOCUMENT (A2), the canvas draws the
+//     DERIVED one, and `frame` now carries BOTH plus deriveView's merge
+//     bookkeeping. That is why deriveViewDetail replaced deriveView here.
+//     Everything the overlay says is projected from the full-document answer
+//     onto the ids actually on screen, and what the projection loses is
+//     counted and printed in the caption rather than silently dropped.
+//
+//  2. THE OVERLAY IS COMPUTED AGAINST THE PAINTED FRAME, not the newest
+//     document. Layout is asynchronous, so during the gap the newest document
+//     describes a picture that is not on screen yet; ringing boxes from it
+//     would put a ring on the wrong box for a frame. Taking `frame.source`
+//     and `frame.detail` as the overlay's inputs makes the lens and the
+//     picture the same age by construction.
+//
+// The overlay is deliberately NOT part of the saved SVG (export/save.ts): the
+// file is the diagram, and a lens someone toggled on in one tab is not.
 
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
@@ -43,7 +70,7 @@ import type { GNode, GraphDoc } from '@diagram-engine/core';
 // barrel — deliberately, and permanently: the barrel re-exports store/, which
 // pulls node:fs into the browser bundle. Same route toSvg.ts and NodeBox.tsx
 // take, for the same reason.
-import { deriveView } from '../../core/src/view/derive.js';
+import { deriveViewDetail, type DerivedView } from '../../core/src/view/derive.js';
 import { DebugCanvas } from './debug/DebugCanvas.js';
 import { frameToSvg, isSaveShortcut, savePng, saveSvg } from './export/save.js';
 import { composeFramePaths } from './geometry/index.js';
@@ -55,13 +82,24 @@ import {
   type LayoutRequest,
   type WorkerLike,
 } from './layout/worker.js';
+import { overlayFor } from './render/AnalysisOverlay.js';
 import { Canvas } from './render/Canvas.js';
 import { HoverCard } from './render/HoverCard.js';
+import { OverlayButtons } from './render/OverlayButtons.js';
+import {
+  OverlayCaption,
+  analysisCaption,
+  blastCaption,
+  type Caption,
+} from './render/OverlayCaption.js';
 import { BAR_HEIGHT, StatusBar, type DocError } from './render/StatusBar.js';
 import { SaveButtons } from './render/SaveButtons.js';
 import { theme } from './render/theme.js';
 import { ViewButtons } from './render/ViewButtons.js';
 import { useViewport } from './render/viewport.js';
+import { analysisPlan, blastPlan } from './view/overlayPlan.js';
+import { buildDrawnIndex } from './view/overlayState.js';
+import { useOverlay } from './view/useOverlay.js';
 import { useViewOverride } from './view/useViewOverride.js';
 import { connectViewer, type ConnectionState } from './ws.js';
 
@@ -83,10 +121,25 @@ function makeLayoutWorker(): WorkerLike {
 
 /** Everything one painted frame needs. Rebuilt only when a layout arrives. */
 interface Frame {
+  /** The DERIVED document — what is drawn (§7). */
   doc: GraphDoc;
+  /**
+   * The FULL document it was derived from. The analysis overlays run on this
+   * one and only this one (A2), and holding it on the frame is what keeps the
+   * lens exactly as old as the picture (header note 2).
+   */
+  source: GraphDoc;
+  /** deriveView's own bookkeeping: what it hid, and which edges it merged. */
+  detail: DerivedView;
   laidOut: LaidOut;
   /** Composed edge paths, index-aligned with laidOut.edges. */
   paths: string[];
+}
+
+/** The pair one layout request is made from: the full doc and its derived view. */
+interface Pending {
+  source: GraphDoc;
+  detail: DerivedView;
 }
 
 /**
@@ -94,12 +147,19 @@ interface Frame {
  * against the segments of ALL edges at once and guarded against NODE rects
  * only — groups are containers, not obstacles.
  */
-function buildFrame(doc: GraphDoc, laidOut: LaidOut): Frame {
+function buildFrame(pending: Pending, laidOut: LaidOut): Frame {
+  const doc = pending.detail.doc;
   const nodeRects: Rect[] = doc.nodes.flatMap((n) => {
     const r = laidOut.nodes.get(n.id);
     return r ? [r] : [];
   });
-  return { doc, laidOut, paths: composeFramePaths(laidOut.edges, nodeRects) };
+  return {
+    doc,
+    source: pending.source,
+    detail: pending.detail,
+    laidOut,
+    paths: composeFramePaths(laidOut.edges, nodeRects),
+  };
 }
 
 /** Window size minus the status strip, tracked for fit-to-content (§8.3). */
@@ -262,7 +322,7 @@ export function App(): JSX.Element {
   const clientRef = useRef<LayoutClient | null>(null);
   // The doc belonging to the LATEST request; LayoutClient only ever delivers
   // the latest response, so pairing through this ref is safe (§5.4).
-  const pendingDocRef = useRef<GraphDoc | null>(null);
+  const pendingDocRef = useRef<Pending | null>(null);
 
   // Layout client + socket: one of each for the life of the page.
   useEffect(() => {
@@ -306,24 +366,30 @@ export function App(): JSX.Element {
   // rather than the array so a re-render for an unrelated reason — a hover, a
   // pan, the "Xs ago" tick — cannot trigger a fresh layout.
   // (views.key deliberately stands in for views.collapsed in the deps.)
-  const derived = useMemo(
-    () => (doc === null ? null : deriveView(doc, views.collapsed)),
+  const detail = useMemo(
+    () => (doc === null ? null : deriveViewDetail(doc, views.collapsed)),
     [doc, views.key],
   );
+  const derived = detail?.doc ?? null;
 
   // One place requests layout, for both causes (a new document, a new view).
   useEffect(() => {
     const client = clientRef.current;
     if (client === null) return;
-    if (derived === null || (derived.nodes.length === 0 && derived.groups.length === 0)) {
+    if (
+      doc === null ||
+      detail === null ||
+      derived === null ||
+      (derived.nodes.length === 0 && derived.groups.length === 0)
+    ) {
       // Nothing to lay out; drop the stale frame so the hint shows.
       pendingDocRef.current = null;
       setFrame(null);
       return;
     }
-    pendingDocRef.current = derived;
+    pendingDocRef.current = { source: doc, detail };
     client.request(derived);
-  }, [derived]);
+  }, [doc, detail, derived]);
 
   const { vw, vh } = useCanvasSize();
   const bounds = useMemo(
@@ -345,6 +411,48 @@ export function App(): JSX.Element {
     groups: shown?.groups.length ?? 0,
     edges: shown?.edges.length ?? 0,
   };
+
+  // --- the analysis overlays (§15.5, §18.7) -------------------------------
+  // Every input comes off the PAINTED frame (header note 2), so the lens and
+  // the picture cannot disagree about which boxes exist. `source` is the full
+  // document — the only thing `analyse` and `blastRadius` are ever handed
+  // (A2) — and `detail` is deriveView's merge map, which is how a finding
+  // about a hidden edge still lights up the merged edge that replaced it.
+  const drawnIndex = useMemo(
+    () => buildDrawnIndex(frame?.source ?? null, frame?.detail ?? null),
+    [frame],
+  );
+  const overlay = useOverlay(frame?.source ?? null, drawnIndex);
+
+  const analysisView = useMemo(
+    () =>
+      frame === null || overlay.analysis === null
+        ? null
+        : analysisPlan(frame.source, overlay.analysis, drawnIndex),
+    [frame, overlay.analysis, drawnIndex],
+  );
+  const blastView = useMemo(
+    () => (overlay.blast === null ? null : blastPlan(overlay.blast, drawnIndex)),
+    [overlay.blast, drawnIndex],
+  );
+
+  const overlaySvg =
+    frame === null
+      ? null
+      : overlayFor(overlay.mode, analysisView, blastView, {
+          laidOut: frame.laidOut,
+          paths: frame.paths,
+          nodeIds: frame.doc.nodes.map((n) => n.id),
+        });
+
+  // The caption is not decoration: A4, A5, C2 and C3 are printed from it,
+  // verbatim, in core's own words. See render/OverlayCaption.tsx.
+  const caption: Caption | null =
+    overlay.analysis !== null && analysisView !== null
+      ? analysisCaption(overlay.analysis, analysisView)
+      : overlay.blast !== null && blastView !== null
+        ? blastCaption(overlay.blast, blastView)
+        : null;
 
   // Saving (§8.4). The frame is serialised as-is — no re-layout, no second
   // renderer — so what lands on disk is what is on screen.
@@ -451,6 +559,10 @@ export function App(): JSX.Element {
                 hoveredId={hoveredNode?.id ?? null}
                 onHoverNode={hoverApi.onHoverNode}
                 onHoverMove={hoverApi.onHoverMove}
+                // Layer 7 (§8.1), above everything and never hit-tested —
+                // the slot Canvas already exposes, so nothing about layers
+                // 1-6 changes and the overlay-off picture is untouched.
+                hoverOverlay={overlaySvg ?? undefined}
               />
             </g>
           </svg>
@@ -468,6 +580,10 @@ export function App(): JSX.Element {
             vh={vh}
           />
         )}
+        {/* The overlay's caption: HTML, fixed to the container, so it cannot
+            be panned or zoomed off the screenshot someone pastes into a
+            decision. It carries the A4/A5/C2/C3 sentences verbatim. */}
+        {caption === null ? null : <OverlayCaption caption={caption} />}
       </div>
       <StatusBar
         title={doc?.title ?? 'diagram'}
@@ -481,6 +597,14 @@ export function App(): JSX.Element {
             focusLabel={views.focusLabel}
             focusEnabled={views.focusEnabled}
             onSelect={views.select}
+          />
+        }
+        analysis={
+          <OverlayButtons
+            mode={overlay.mode}
+            targetLabel={overlay.targetLabel}
+            blastEnabled={overlay.blastEnabled}
+            onSelect={overlay.select}
           />
         }
         save={

@@ -59,9 +59,9 @@ diagram init          # .mcp.json, .gitignore, agent rules, Claude Code skill
 diagram serve         # viewer on http://localhost:4400
 ```
 
-Then start your agent. It picks up the MCP server on next launch and gets seven tools:
+Then start your agent. It picks up the MCP server on next launch and gets nine tools:
 `diagram_get`, `diagram_patch`, `diagram_undo`, `diagram_redo`, `diagram_view`,
-`diagram_export`, `diagram_reset`.
+`diagram_export`, `diagram_analyse`, `diagram_blast_radius`, `diagram_reset`.
 
 The package is not published yet, so `diagram` must be on your `PATH` — `npm link` from
 this repo, or install it globally.
@@ -96,6 +96,8 @@ serve     the viewer, with live reload
 export    write json or svg
 import    replace the document from a JSON file
 check     validate; exit 1 with the problems on stderr
+analyse   structural pressure: chokepoints, sync chains, cycles, boundaries
+blast-radius   what is at risk if a component dies; no id ranks the experiments
 rules     print the agent rules (--erd for ERD mode)
 mcp       run the MCP server on stdio
 reset     clear the diagram (requires --confirm; undoable)

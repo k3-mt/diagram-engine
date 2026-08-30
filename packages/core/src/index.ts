@@ -32,4 +32,12 @@ export * from './view/presets.js';
 // browser bundle.
 export * from './view/derive.js';
 
+// Part 15 / Part 18: the read-only analysis pass — the runtime projection, the
+// six structural signals, the assembled Analysis, and the blast radius and
+// experiment backlog built on top of it. Nothing under analysis/ touches
+// node:fs, so the viewer imports that directory BY PATH
+// (`core/src/analysis/index.js`) exactly as it does view/derive.js — this
+// barrel re-exports store/ and must not reach the browser bundle.
+export * from './analysis/index.js';
+
 export const CORE_PACKAGE = '@diagram-engine/core';

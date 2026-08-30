@@ -121,6 +121,11 @@ const GITIGNORE_BODY = [
   '.diagram/out.json',
   '.diagram/out.svg',
   '.diagram/.lock',
+  // Chaos predictions and results (spec §18.6). They are computed FROM the
+  // document, never part of it (C5), and each one is only meaningful against
+  // the document hash it was computed under — a stale prediction in a commit
+  // is worse than no prediction, so the directory is ignored from day one.
+  '.diagram/chaos/',
 ].join('\n');
 
 /**

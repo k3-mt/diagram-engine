@@ -1,8 +1,10 @@
-// mcp/tools.ts — the seven MCP tool definitions (spec §4.1, M6 Step 15).
+// mcp/tools.ts — the MCP tool definitions (spec §4.1, M6 Step 15; §15.4, §18.7).
 //
 // This is the primary agent surface: an agent that speaks MCP (Model Context
 // Protocol — the open standard for handing tools to a coding agent over
-// stdio) drives the whole engine through these seven tools and nothing else.
+// stdio) drives the whole engine through these tools and nothing else. §4.1
+// specifies seven; Part 15 adds diagram_analyse as the eighth and Part 18
+// adds diagram_blast_radius as the ninth.
 //
 // Three things about this file carry more weight than the code does:
 //
@@ -51,6 +53,7 @@ import {
   type CommandResult,
   type DiagramContext,
 } from '../commands/context.js';
+import { runAnalyse } from '../commands/analyse.js';
 import { runGet } from '../commands/get.js';
 import { runUndo } from '../commands/undo.js';
 import { runRedo } from '../commands/redo.js';
@@ -66,6 +69,7 @@ import {
   renderViewResult,
   runView,
 } from '../commands/view.js';
+import { runBlastRadius } from '../commands/blastRadius.js';
 
 /**
  * What a tool hands back: the text the agent reads, and whether it worked.
@@ -444,6 +448,35 @@ const diagramExport: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// diagram_analyse
+// ---------------------------------------------------------------------------
+
+const diagramAnalyse: ToolDefinition = {
+  name: 'diagram_analyse',
+  strictArgs: true,
+  // No arguments at all: the scope is the full document, always (spec §15.3
+  // A2). A `view` or `collapsed` argument here would be a way to ask for the
+  // analysis of a picture rather than of the system, which is precisely the
+  // mistake A2 exists to prevent — so the schema offers no way to ask.
+  inputSchema: NO_INPUT,
+  description:
+    'Report the structural pressure in the diagram: chokepoints (fan-in, ' +
+    'split synchronous vs asynchronous, and single points of failure), the ' +
+    'longest synchronous call chain, synchronous cycles, boundary crossings ' +
+    'and entry points. Always reads the FULL document, never the collapsed ' +
+    'view, and never changes anything. These are STRUCTURAL facts only — the ' +
+    'document knows nothing about traffic, latency or capacity, so the ' +
+    'result ends with a coverage block saying what was excluded and how many ' +
+    'nodes carry no operational meta. State a number about load only by ' +
+    'citing the `meta` key it came from; do not infer one from a fan-in.',
+  annotations: { title: 'Analyse the diagram', readOnlyHint: true, idempotentHint: true },
+  // Literally `diagram analyse`: same blocks, same wording, same coverage
+  // note, same read failure — the honesty sentences are core's and neither
+  // surface gets to re-phrase or drop them.
+  handler: (_args, ctx) => runAnalyse(opts(ctx)),
+};
+
+// ---------------------------------------------------------------------------
 // diagram_reset
 // ---------------------------------------------------------------------------
 
@@ -486,10 +519,81 @@ const diagramReset: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// diagram_blast_radius (spec §18.5, §18.7)
+// ---------------------------------------------------------------------------
+
+const BLAST_SCHEMA: PlainJsonSchema = {
+  type: 'object',
+  properties: {
+    id: {
+      type: 'string',
+      description:
+        'The node or group to predict for. Omit it for the ranked experiment ' +
+        'backlog. A group id is one experiment: killing a boundary kills every ' +
+        'component inside it.',
+    },
+    groups: {
+      type: 'boolean',
+      description:
+        'Backlog only. true also ranks each boundary as an experiment (a VPC, ' +
+        'region or AZ outage). Ignored when an id is given.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const diagramBlastRadius: ToolDefinition = {
+  name: 'diagram_blast_radius',
+  strictArgs: true,
+  // `<id>` is positional on the CLI and `id` here; the other plausible names
+  // an agent carries over would otherwise be dropped in silence and answer
+  // with the backlog, which looks like a working call.
+  argHints: { node: 'id', target: 'id', nodeId: 'id', node_id: 'id' },
+  description:
+    'Predict what is AT RISK if a component dies — reverse dependency ' +
+    'reachability over synchronous edges only, so a dashed (asynchronous) edge ' +
+    'stops propagation and its far side is reported as contained. Pass ' +
+    '{"id":"postgres"} for one component or a boundary; call it with no ' +
+    'arguments for the ranked experiment backlog — what is worth breaking ' +
+    'first. This NEVER runs anything: it reads the diagram and returns text, ' +
+    'and it never writes to the document. The result says "at risk", not "will ' +
+    'fail" — the diagram records no timeouts, retries or circuit breakers, and ' +
+    'the assumptions line on every result says what it does not know.',
+  inputSchema: BLAST_SCHEMA,
+  annotations: { title: 'Predict blast radius', readOnlyHint: true },
+  handler: (args, ctx) => {
+    const id = args['id'];
+    if (id !== undefined && typeof id !== 'string') {
+      return refuse('id must be a string', [
+        'e.g. {"id": "postgres"}, or no arguments at all for the backlog',
+      ]);
+    }
+    const groups = args['groups'];
+    if (groups !== undefined && typeof groups !== 'boolean') {
+      return refuse('groups must be a boolean', ['e.g. {"groups": true}']);
+    }
+    // Literally `diagram blast-radius [id]`: same prediction, same backlog,
+    // same refusal for an unknown id, same assumptions line, same document
+    // hash. One body, so the two surfaces cannot make different predictions.
+    return runBlastRadius(typeof id === 'string' ? id : undefined, {
+      ...opts(ctx),
+      ...(groups !== undefined ? { groups } : {}),
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
 // The set
 // ---------------------------------------------------------------------------
 
-/** The seven tools of spec §4.1, in the order they are advertised. */
+/**
+ * The tools of spec §4.1, in the order they are advertised.
+ *
+ * §4.1 says seven and Part 15 adds an eighth (diagram_analyse, spec §15.4),
+ * so the count in the spec's prose is now one behind the surface it
+ * describes. The list is the authority; nothing here should be read as
+ * "seven" again.
+ */
 export const TOOLS: readonly ToolDefinition[] = [
   diagramGet,
   diagramPatch,
@@ -497,13 +601,15 @@ export const TOOLS: readonly ToolDefinition[] = [
   diagramRedo,
   diagramView,
   diagramExport,
+  diagramAnalyse,
+  diagramBlastRadius,
   diagramReset,
 ] as const;
 
 /** Tool names, for error messages and tests. */
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
-/** Look a tool up by name. Undefined for anything not in the seven. */
+/** Look a tool up by name. Undefined for anything not in the set. */
 export function findTool(name: string): ToolDefinition | undefined {
   return TOOLS.find((t) => t.name === name);
 }
@@ -513,7 +619,8 @@ export function findTool(name: string): ToolDefinition | undefined {
  * here that is a real error; everything else the agent can act on comes back
  * as ok:false text.
  *
- * Always a promise, even though six of the seven tools answer immediately.
+ * Always a promise, even though every tool but diagram_export answers
+ * immediately.
  * Every MCP transport can await, so a second synchronous entry point would
  * buy nothing and cost the one thing that matters: a caller that took it
  * would silently lose `diagram_export {"format":"svg"}`.

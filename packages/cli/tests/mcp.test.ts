@@ -82,7 +82,7 @@ function currentDoc(ctx: DiagramContext) {
 // ---------------------------------------------------------------------------
 
 describe('the tool set', () => {
-  it('advertises exactly the seven tools of spec §4.1', async () => {
+  it('advertises exactly the tools of spec §4.1 and §15.4', async () => {
     expect(TOOL_NAMES).toEqual([
       'diagram_get',
       'diagram_patch',
@@ -90,6 +90,8 @@ describe('the tool set', () => {
       'diagram_redo',
       'diagram_view',
       'diagram_export',
+      'diagram_analyse',
+      'diagram_blast_radius',
       'diagram_reset',
     ]);
   });

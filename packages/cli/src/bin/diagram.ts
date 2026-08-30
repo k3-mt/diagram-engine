@@ -26,6 +26,8 @@ import { registerView } from '../commands/view.js';
 import { registerExport } from '../commands/export.js';
 import { registerImport } from '../commands/import.js';
 import { registerCheck } from '../commands/check.js';
+import { registerAnalyse } from '../commands/analyse.js';
+import { registerBlastRadius } from '../commands/blastRadius.js';
 import { registerRules } from '../commands/rules.js';
 import { registerReset } from '../commands/reset.js';
 import { registerMcp } from '../mcp/server.js';
@@ -66,10 +68,17 @@ export function buildProgram(): Command {
 
   // Registration order is the order `diagram --help` lists them, so it runs
   // in the order an agent meets them: set up, read, write, history, view,
-  // output, verify, learn — and reset last, where a destructive command
-  // belongs. `import` sits next to `export` because it is the other half of
-  // the same file pair, and reading them apart is how you end up with two
-  // vocabularies for one round trip.
+  // output, verify, reason, learn — and reset last, where a destructive
+  // command belongs. `import` sits next to `export` because it is the other
+  // half of the same file pair, and reading them apart is how you end up with
+  // two vocabularies for one round trip.
+  //
+  // `analyse` and `blast-radius` come after `check` and before `rules`: they
+  // are the reasoning pair (Parts 15 and 18), and they only make sense once
+  // the document is known to be valid. `analyse` is first because it is what
+  // raises the question `blast-radius` answers — a chokepoint is where you
+  // point a prediction — and reading them the other way round teaches an
+  // agent to predict before it knows where to look.
   registerInit(program);
   registerGet(program);
   registerPatch(program);
@@ -80,6 +89,8 @@ export function buildProgram(): Command {
   registerExport(program);
   registerImport(program);
   registerCheck(program);
+  registerAnalyse(program);
+  registerBlastRadius(program);
   registerRules(program);
   registerMcp(program);
   registerReset(program);

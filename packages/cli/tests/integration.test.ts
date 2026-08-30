@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { GraphPatch } from '../../core/src/index.js';
 import { buildProgram } from '../src/bin/diagram.js';
 import { createContext, type DiagramContext } from '../src/commands/context.js';
+import { runAnalyse } from '../src/commands/analyse.js';
 import { runGet } from '../src/commands/get.js';
 import { runPatchText } from '../src/commands/patch.js';
 import { runExport } from '../src/commands/export.js';
@@ -79,6 +80,8 @@ describe('the diagram program', () => {
       'export',
       'import',
       'check',
+      'analyse',
+      'blast-radius',
       'rules',
       'mcp',
       'reset',
@@ -113,7 +116,7 @@ describe('the diagram program', () => {
 });
 
 describe('the CLI and the MCP tools are one implementation', () => {
-  it('advertises the seven tools of spec §4.1', async () => {
+  it('advertises the tools of spec §4.1 and §15.4', async () => {
     expect(TOOL_NAMES).toEqual([
       'diagram_get',
       'diagram_patch',
@@ -121,6 +124,8 @@ describe('the CLI and the MCP tools are one implementation', () => {
       'diagram_redo',
       'diagram_view',
       'diagram_export',
+      'diagram_analyse',
+      'diagram_blast_radius',
       'diagram_reset',
     ]);
   });
@@ -128,6 +133,22 @@ describe('the CLI and the MCP tools are one implementation', () => {
   it('reads the same table through `diagram get` and diagram_get', async () => {
     const ctx = await seeded();
     expect((await callTool('diagram_get', {}, ctx)).text).toBe(runGet({ dir: ctx.dir }).text);
+  });
+
+  it('analyses through `diagram analyse` and diagram_analyse identically', async () => {
+    const ctx = await seeded();
+    const viaTool = await callTool('diagram_analyse', {}, ctx);
+    expect(viaTool.ok).toBe(true);
+    expect(viaTool.text).toBe(runAnalyse({ dir: ctx.dir }).text);
+    // A2 and A5 on both surfaces at once: the coverage block is not something
+    // one of the two renderers may drop.
+    expect(viaTool.text).toContain('scope: full document');
+    expect(viaTool.text).toContain('carry no operational meta');
+  });
+
+  it('says the same thing about a project with no diagram on both analyse surfaces', async () => {
+    const ctx = tempContext();
+    expect((await callTool('diagram_analyse', {}, ctx)).text).toBe(runAnalyse({ dir: ctx.dir }).text);
   });
 
   it('says the same thing about an empty project on both surfaces', async () => {

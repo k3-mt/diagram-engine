@@ -1,0 +1,446 @@
+// tests/blast.test.ts — predicted blast radius and the experiment backlog
+// (spec §18.3, §18.4, rules C1–C3).
+//
+// The three details §18.3 says carry the weight get a test each, and each one
+// is a claim that would be silently wrong rather than loudly broken:
+//
+//   * direction — the traversal runs BACKWARDS, so a dependency is never
+//     reported as a dependent. Reverse the arrows and this file fails.
+//   * dashed edges stop propagation, and the far side is named as CONTAINED.
+//   * a group experiment takes its descendants with it.
+//
+// Plus the line C3 draws: nothing here ever says "will fail", and the
+// assumptions block that says so travels on every result.
+
+import { describe, expect, it } from 'vitest';
+import {
+  ASSUMPTION_AT_RISK,
+  ASSUMPTION_SYNC_ONLY,
+  backlog,
+  blastRadius,
+  runtimeGraph,
+} from '../src/analysis/index.js';
+import { GraphDocSchema, type GraphDoc } from '../src/schema/graph.js';
+import { doc, edge, fixtureJson, group, node } from './helpers.js';
+
+function fixture(name: string): GraphDoc {
+  return GraphDocSchema.parse(fixtureJson(name));
+}
+
+const ids = (xs: { id: string }[]) => xs.map((x) => x.id);
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// direction — the gate M8 had to clear before any of this was allowed
+// ---------------------------------------------------------------------------
+
+describe('blast radius follows edges backwards', () => {
+  const cross = () => fixture('cross-boundary-edges.json');
+
+  it('names everything that depends on the target, nearest first', () => {
+    const r = blastRadius(cross(), 'postgres');
+    expect(r.targetKind).toBe('node');
+    expect(r.killed).toEqual(['postgres']);
+    expect(r.atRisk.map((a) => [a.id, a.depth])).toEqual([
+      ['auth-service', 1],
+      ['orders-service', 1],
+      ['api-gateway', 2],
+      ['web-client', 3],
+      ['ios-app', 3],
+    ]);
+  });
+
+  it('reports nothing at risk for a leaf dependency of nobody', () => {
+    // Reversing the arrows would make this the biggest blast radius in the
+    // document instead of the smallest, which is exactly §18.10 gate 2.
+    const r = blastRadius(cross(), 'web-client');
+    expect(r.atRisk).toEqual([]);
+    expect(r.contained).toEqual([]);
+    expect(r.note).toBeNull();
+  });
+
+  it('records the edge each at-risk node was reached by', () => {
+    const r = blastRadius(cross(), 'postgres');
+    expect(r.atRisk.find((a) => a.id === 'auth-service')?.via).toBe('e5');
+    expect(r.atRisk.find((a) => a.id === 'api-gateway')?.via).toBe('e3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detail 1 — dashed edges stop propagation, and containment is stated
+// ---------------------------------------------------------------------------
+
+describe('dashed edges contain the blast', () => {
+  it('halts at the dashed edge and names the far side, with the edge', () => {
+    const r = blastRadius(fixture('cross-boundary-edges.json'), 'kafka');
+    expect(r.atRisk).toEqual([]);
+    expect(r.contained).toEqual([
+      {
+        id: 'auth-service',
+        label: 'Auth Service',
+        edge: 'e10',
+        from: 'kafka',
+        edgeLabel: 'audit events',
+      },
+      {
+        id: 'orders-service',
+        label: 'Orders Service',
+        edge: 'e7',
+        from: 'kafka',
+        edgeLabel: 'publishes',
+      },
+    ]);
+  });
+
+  it('stops a chain part way and reports both halves', () => {
+    // s3 <- worker <⇠ kafka : the worker is at risk, kafka is contained.
+    const r = blastRadius(fixture('cross-boundary-edges.json'), 's3-archive');
+    expect(ids(r.atRisk)).toEqual(['fulfilment-worker']);
+    expect(ids(r.contained)).toEqual(['kafka']);
+    expect(r.contained[0]?.edge).toBe('e8');
+  });
+
+  it('prefers at risk over contained when a node has both paths', () => {
+    // b publishes to c asynchronously AND calls it synchronously. The queue
+    // does not protect b, so b is at risk, not contained.
+    const d = doc({
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [
+        edge('e1', 'b', 'c', { style: 'dashed' }),
+        edge('e2', 'b', 'c'),
+        edge('e3', 'a', 'b'),
+      ],
+    });
+    const r = blastRadius(d, 'c');
+    expect(ids(r.atRisk)).toEqual(['b', 'a']);
+    expect(r.contained).toEqual([]);
+  });
+
+  it('contains the whole tail: nothing behind a dashed edge is reached', () => {
+    const d = doc({
+      nodes: [node('a'), node('b'), node('c'), node('d')],
+      edges: [
+        edge('e1', 'a', 'b'),
+        edge('e2', 'b', 'c', { style: 'dashed' }),
+        edge('e3', 'c', 'd'),
+      ],
+    });
+    // d dies: c depends on it synchronously; b is contained by the queue; a
+    // is behind b and is never reached at all.
+    const r = blastRadius(d, 'd');
+    expect(ids(r.atRisk)).toEqual(['c']);
+    expect(ids(r.contained)).toEqual(['b']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detail 2 — killing a group kills its descendants
+// ---------------------------------------------------------------------------
+
+describe('a group is one experiment', () => {
+  it('kills every descendant and propagates from all of them', () => {
+    const r = blastRadius(fixture('nested-two-deep.json'), 'vpc-private');
+    expect(r.targetKind).toBe('group');
+    expect(r.killed).toEqual([
+      'vpc-private',
+      'auth-service',
+      'orders-service',
+      'postgres',
+    ]);
+    expect(r.atRisk.map((a) => [a.id, a.depth])).toEqual([
+      ['api-gateway', 1],
+      ['web-client', 2],
+    ]);
+  });
+
+  it('kills nested groups too', () => {
+    const r = blastRadius(fixture('nested-two-deep.json'), 'region-eu');
+    expect(r.killed).toContain('api-gateway');
+    expect(r.killed).toContain('postgres');
+    expect(ids(r.atRisk)).toEqual(['web-client']);
+  });
+
+  it('never claims a group is an articulation point', () => {
+    // Articulation points are a property of the runtime nodes (§15.2); a
+    // boundary is not one, and must not be reported as one (detail 3).
+    expect(blastRadius(fixture('nested-two-deep.json'), 'vpc-private').articulation).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detail 3 — articulation point and blast radius are different metrics
+// ---------------------------------------------------------------------------
+
+describe('blast radius is not an articulation point', () => {
+  it('reports both, side by side, without merging them', () => {
+    const r = blastRadius(fixture('cross-boundary-edges.json'), 'api-gateway');
+    expect(ids(r.atRisk)).toEqual(['web-client', 'ios-app']);
+    expect(r.articulation?.isolates).toBe(2);
+  });
+
+  it('shows them disagreeing: an articulation point with nothing at risk', () => {
+    // kafka splits the diagram in two (undirected connectivity) and yet
+    // nothing depends on it synchronously. Conflating the two would report
+    // four services at risk from a queue outage that the design contains.
+    const r = blastRadius(fixture('cross-boundary-edges.json'), 'kafka');
+    expect(r.articulation?.isolates).toBe(2);
+    expect(r.atRisk).toEqual([]);
+  });
+
+  it('shows them disagreeing the other way: at risk without being a cut', () => {
+    const r = blastRadius(fixture('cross-boundary-edges.json'), 'postgres');
+    expect(r.atRisk).toHaveLength(5);
+    expect(r.articulation).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C3, A4, A5 — what the result refuses to claim
+// ---------------------------------------------------------------------------
+
+describe('C3: at risk, never will fail', () => {
+  it('carries the assumptions on every result, including an empty one', () => {
+    for (const target of ['postgres', 'web-client', 'no-such-node']) {
+      const r = blastRadius(fixture('cross-boundary-edges.json'), target);
+      expect(r.assumptions).toContain(ASSUMPTION_AT_RISK);
+      expect(r.assumptions).toContain(ASSUMPTION_SYNC_ONLY);
+      expect(r.assumptions[0]).toBe('9 of 9 nodes carry no operational meta');
+    }
+  });
+
+  it('says "will fail" only to disown it', () => {
+    const r = blastRadius(fixture('cross-boundary-edges.json'), 'postgres');
+    // The phrase appears exactly once in the whole result: in the sentence
+    // that refuses it. No field is named for it and no list implies it.
+    const hits = JSON.stringify(r).match(/will fail/g) ?? [];
+    expect(hits).toHaveLength(1);
+    expect(r.assumptions).toContain(ASSUMPTION_AT_RISK);
+    expect(JSON.stringify({ atRisk: r.atRisk, contained: r.contained })).not.toContain('fail');
+  });
+});
+
+describe('A4/A5 travel with the prediction', () => {
+  it('refuses an entity target and says why, rather than answering zero', () => {
+    const r = blastRadius(fixture('mixed-erd-architecture.json'), 'invoices');
+    expect(r.targetKind).toBe('entity');
+    expect(r.atRisk).toEqual([]);
+    expect(r.note).toBe(
+      '"invoices" is an entity node: a data model, not a runtime component — there is nothing to predict',
+    );
+    expect(r.excluded.entityNodes).toEqual(['invoices', 'invoice-lines']);
+  });
+
+  it('answers an unknown id with a note, not a throw', () => {
+    const r = blastRadius(doc(), 'ghost');
+    expect(r.targetKind).toBe('unknown');
+    expect(r.note).toBe('no node or group with id "ghost"');
+  });
+
+  it('ignores an ERD edge when predicting on a mixed document', () => {
+    // billing-db ⇢ invoices exists in the document and is not a call.
+    const r = blastRadius(fixture('mixed-erd-architecture.json'), 'billing-db');
+    expect(ids(r.atRisk)).toEqual(['billing-api', 'invoice-jobs']);
+    expect(r.contained).toEqual([]);
+  });
+});
+
+describe('C1/A1: the engine is the map, never the hand on the switch', () => {
+  it('predicts over a deeply frozen document', () => {
+    const d = deepFreeze(fixture('cross-boundary-edges.json'));
+    const before = JSON.stringify(d);
+    expect(blastRadius(d, 'postgres').atRisk).toHaveLength(5);
+    expect(backlog(d)).toHaveLength(7);
+    expect(JSON.stringify(d)).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §18.4 — the experiment backlog
+// ---------------------------------------------------------------------------
+
+describe('experiment backlog', () => {
+  it('ranks by at-risk count, then articulation point, then sync fan-in', () => {
+    const rows = backlog(fixture('cross-boundary-edges.json'));
+    expect(rows.map((r) => [r.id, r.atRisk, r.articulationPoint])).toEqual([
+      ['postgres', 5, false],
+      ['auth-service', 3, false],
+      ['orders-service', 3, false],
+      ['api-gateway', 2, true],
+      ['s3-archive', 1, false],
+      ['kafka', 0, true],
+      ['fulfilment-worker', 0, true],
+    ]);
+  });
+
+  it('excludes entry points — killing the browser is not an experiment', () => {
+    const rows = backlog(fixture('cross-boundary-edges.json'));
+    expect(ids(rows)).not.toContain('web-client');
+    expect(ids(rows)).not.toContain('ios-app');
+  });
+
+  it('does NOT exclude external nodes — a third-party outage is an experiment', () => {
+    const d = doc({
+      nodes: [
+        node('web', { type: 'client' }),
+        node('api'),
+        node('stripe', { type: 'external' }),
+      ],
+      edges: [edge('e1', 'web', 'api'), edge('e2', 'api', 'stripe')],
+    });
+    const rows = backlog(d);
+    expect(rows[0]?.id).toBe('stripe');
+    expect(rows[0]?.type).toBe('external');
+    expect(rows[0]?.atRisk).toBe(2);
+  });
+
+  it('excludes entity nodes, which are not runtime components', () => {
+    expect(ids(backlog(fixture('mixed-erd-architecture.json')))).toEqual([
+      'billing-db',
+      'billing-api',
+    ]);
+  });
+
+  it('counts the containments a candidate relies on', () => {
+    const rows = backlog(fixture('cross-boundary-edges.json'));
+    expect(rows.find((r) => r.id === 'kafka')?.contained).toBe(2);
+    expect(rows.find((r) => r.id === 's3-archive')?.contained).toBe(1);
+  });
+
+  it('adds boundary experiments only when asked', () => {
+    const nodesOnly = backlog(fixture('nested-two-deep.json'));
+    expect(ids(nodesOnly)).not.toContain('vpc-private');
+    const withGroups = backlog(fixture('nested-two-deep.json'), { includeGroups: true });
+    // Killing the whole region leaves only the browser at risk; killing
+    // postgres alone puts four services at risk. The bigger box is not
+    // automatically the bigger experiment, and the ranking says so.
+    expect(withGroups[0]).toMatchObject({ id: 'postgres', kind: 'node', atRisk: 4 });
+    expect(withGroups.find((r) => r.id === 'region-eu')).toMatchObject({
+      kind: 'group',
+      atRisk: 1,
+      articulationPoint: false,
+    });
+    expect(ids(withGroups)).toContain('vpc-private');
+  });
+
+  it('is empty for a document with nothing to break', () => {
+    expect(backlog(doc())).toEqual([]);
+    expect(
+      backlog(doc({ groups: [group('vpc', { kind: 'vpc' })], nodes: [node('a')] })),
+    ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An edge that terminates on a BOUNDARY is a dependency on what the boundary
+// holds. Without this, killing a component inside a depended-on VPC reported
+// nothing at risk — a silent zero on the one command whose refusal path exists
+// because "nothing is at risk" is the most dangerous thing it can say by
+// accident.
+// ---------------------------------------------------------------------------
+
+describe('an edge into a boundary reaches the components inside it', () => {
+  const d = doc({
+    nodes: [node('client'), node('api', { parent: 'vpc' })],
+    groups: [group('vpc')],
+    edges: [edge('e1', 'client', 'vpc')],
+  });
+
+  it('puts the boundary’s dependents at risk when a component inside dies', () => {
+    const r = blastRadius(d, 'api');
+    expect(ids(r.atRisk)).toEqual(['client']);
+    expect(r.atRisk[0]?.depth).toBe(1);
+    expect(r.atRisk[0]?.via).toBe('e1');
+  });
+
+  it('still answers the boundary experiment the same way', () => {
+    const r = blastRadius(d, 'vpc');
+    expect(r.killed).toEqual(['vpc', 'api']);
+    expect(ids(r.atRisk)).toEqual(['client']);
+  });
+
+  it('names the far side of a dashed edge that lands on the boundary', () => {
+    const async_ = doc({
+      nodes: [node('client'), node('api', { parent: 'vpc' })],
+      groups: [group('vpc')],
+      edges: [edge('e1', 'client', 'vpc', { style: 'dashed' })],
+    });
+    const r = blastRadius(async_, 'api');
+    expect(ids(r.atRisk)).toEqual([]);
+    expect(r.contained).toEqual([
+      { id: 'client', label: 'client', edge: 'e1', from: 'vpc', edgeLabel: null },
+    ]);
+  });
+
+  it('changes nothing for a document whose edges never name a group', () => {
+    const plain = doc({
+      nodes: [node('client'), node('api', { parent: 'vpc' })],
+      groups: [group('vpc')],
+      edges: [edge('e1', 'client', 'api')],
+    });
+    expect(ids(blastRadius(plain, 'api').atRisk)).toEqual(['client']);
+    expect(blastRadius(plain, 'vpc').killed).toEqual(['vpc', 'api']);
+  });
+});
+
+describe('the killed list does not reorder for unrelated reasons', () => {
+  it('is the target then its descendants, edge or no edge on the group', () => {
+    const nodes = [node('web'), node('api', { parent: 'vpc' })];
+    const groups = [group('vpc')];
+    const untouched = doc({ nodes, groups, edges: [edge('e1', 'web', 'api')] });
+    const touched = doc({ nodes, groups, edges: [edge('e1', 'web', 'vpc')] });
+    expect(blastRadius(untouched, 'vpc').killed).toEqual(['vpc', 'api']);
+    expect(blastRadius(touched, 'vpc').killed).toEqual(['vpc', 'api']);
+  });
+});
+
+describe('a boundary experiment carries what it kills', () => {
+  it('reports the kill count the at-risk number leaves out', () => {
+    const d = doc({
+      nodes: [node('web'), node('api', { parent: 'vpc' }), node('db', { parent: 'vpc' })],
+      groups: [group('vpc')],
+      edges: [edge('e1', 'web', 'api'), edge('e2', 'api', 'db')],
+    });
+    const rows = backlog(d, { includeGroups: true });
+    const vpc = rows.find((r) => r.id === 'vpc');
+    expect(vpc?.atRisk).toBe(1);
+    expect(vpc?.kills).toBe(2);
+    expect(rows.filter((r) => r.kind === 'node').every((r) => r.kills === 0)).toBe(true);
+  });
+});
+
+describe('one articulation sweep, not one per candidate', () => {
+  it('ranks a 150-node document well inside the §15.2 budget', () => {
+    const n = 150;
+    const nodes = Array.from({ length: n }, (_, i) => node(`n${i}`));
+    const edges = Array.from({ length: n - 1 }, (_, i) =>
+      edge(`e${i}`, `n${i}`, `n${i + 1}`),
+    );
+    const d = doc({ nodes, edges });
+    const started = Date.now();
+    expect(backlog(d)).toHaveLength(n - 1);
+    // The naive sweep is O(n·(n+e)) and is meant to run ONCE. Running it per
+    // candidate put this at ~2s against a sub-millisecond budget; the bound
+    // here is loose enough not to be a flaky clock test and tight enough that
+    // the quadratic sweep cannot come back unnoticed.
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
+
+describe('a component inside a depended-on boundary is not an entry point', () => {
+  it('is ranked as an experiment rather than dismissed as a browser', () => {
+    const d = doc({
+      nodes: [node('client'), node('api', { parent: 'vpc' })],
+      groups: [group('vpc')],
+      edges: [edge('e1', 'client', 'vpc')],
+    });
+    expect(runtimeGraph(d).entryPoints).toEqual(['client']);
+    expect(backlog(d).map((r) => [r.id, r.atRisk])).toEqual([['api', 1]]);
+  });
+});

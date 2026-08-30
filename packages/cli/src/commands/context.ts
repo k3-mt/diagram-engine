@@ -267,6 +267,43 @@ export function renderCounts(doc: GraphDoc): string {
 }
 
 /**
+ * `a, b, c, +4 more` — one truncated list, for every command that has to name
+ * a set of ids without filling the screen with them.
+ *
+ * Exported for the same reason `plural` is. `analyse` names entry points,
+ * `blast-radius` names the components a refused id could have meant, and the
+ * viewer caption names at-risk nodes; three hand-written copies is how one of
+ * them starts writing "and 4 others" while the others write "+4 more", and an
+ * agent diffing two outputs cannot tell a wording change from a data change.
+ * `max` is the caller's, because how many ids are useful genuinely differs —
+ * twelve entry points is a roster, thirty candidate ids is a typo-fixing aid.
+ */
+export function truncatedList(items: readonly string[], max: number): string {
+  const shown = items.slice(0, max);
+  const more = items.length - shown.length;
+  return `${shown.join(', ')}${more > 0 ? `, +${more} more` : ''}`;
+}
+
+/**
+ * The A2 sentence (spec §15.3): the one line that says a collapsed view is in
+ * force and was IGNORED — analysis and prediction always run on the full
+ * document, never on the picture.
+ *
+ * `null` when nothing is collapsed, so the common case pays nothing. It lives
+ * here, beside `renderViewLine`, because `analyse` and `blast-radius` both owe
+ * the reader this fact and two hand-written copies is exactly the drift A2
+ * exists to prevent: an agent that ran `diagram view exec` sees four boxes,
+ * and must be told the same thing by both commands in the same words.
+ *
+ * The caller decides where it sits — `analyse` hangs it off its scope line,
+ * `blast-radius` gives it a keyed row — but not what it says.
+ */
+export function collapsedScopeNote(doc: GraphDoc): string | null {
+  if (doc.collapsed.length === 0) return null;
+  return `the collapsed view (${doc.collapsed.join(', ')}) is ignored here`;
+}
+
+/**
  * One line saying WHICH PICTURE the stored document currently shows — the
  * §7 collapsed view, in the wording every surface uses.
  *

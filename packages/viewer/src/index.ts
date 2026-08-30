@@ -238,6 +238,87 @@ export {
   type ViewState,
 } from './view/viewState.js';
 
+// --- Part 15 / Part 18 analysis overlay (spec §15.5, §18.7) ----------------
+// The pure halves of the lens: the mode machine plus the full-document -> drawn
+// projection, and the two plans that turn an `Analysis` / a `BlastRadius` into
+// lists of DRAWN ids. useOverlay.ts is deliberately NOT re-exported, for the
+// same reason useViewOverride.ts is not: it is a React hook reachable from
+// main.tsx, and the rules it binds are all here.
+export {
+  EMPTY_DRAWN_INDEX,
+  INITIAL_OVERLAY_STATE,
+  OVERLAY_BUTTONS,
+  blastCandidates,
+  blastTarget,
+  buildDrawnIndex,
+  canBlast,
+  nextBlastTarget,
+  projectEdge,
+  projectEdges,
+  projectId,
+  projectIds,
+  resolveOverlay,
+  resolveOverlayFrom,
+  selectOverlay,
+  type DrawnIndex,
+  type OverlayButtonName,
+  type OverlayMode,
+  type OverlayState,
+  type Projection,
+  type ResolvedOverlay,
+} from './view/overlayState.js';
+export {
+  analysisPlan,
+  blastPlan,
+  fanInBadge,
+  type AnalysisPlan,
+  type BlastPlan,
+  type RingedNode,
+  type WeightedEdge,
+} from './view/overlayPlan.js';
+// The SVG for both modes and the caption that carries A4/A5/C2/C3 verbatim.
+// Exported like the other render/ components (Canvas, StatusBar, HoverCard):
+// they are React + pure math, and vitest drives them in Node.
+export {
+  ANALYSIS_ACCENT,
+  ANALYSIS_INK,
+  AT_RISK_TINT,
+  AnalysisOverlay,
+  BlastOverlay,
+  EDGE_MASK_ID,
+  FIREBREAK_LEN,
+  OVERLAY_BADGE_FONT,
+  OVERLAY_EDGE_W,
+  OVERLAY_EDGE_W_MAX,
+  RING_PAD,
+  RING_W,
+  TARGET_HALO_PAD,
+  edgeIndex,
+  overlayFor,
+  polylineMidpoint,
+  weightedEdgeWidth,
+  type AnalysisOverlayProps,
+  type BlastOverlayProps,
+  type EdgeIndex,
+  type MidPoint,
+} from './render/AnalysisOverlay.js';
+export {
+  MAX_NAMED,
+  OverlayCaption,
+  analysisCaption,
+  blastCaption,
+  collapsedBlindSpot,
+  namedList,
+  type Caption,
+  type OverlayCaptionProps,
+} from './render/OverlayCaption.js';
+export {
+  OverlayButtons,
+  TARGET_LABEL_MAX,
+  blastButtonText,
+  type OverlayButtonsProps,
+} from './render/OverlayButtons.js';
+
 // --- Debug renderer frame (M2 step 9 / M3 exit) ----------------------------
 export {
   buildFrame,
