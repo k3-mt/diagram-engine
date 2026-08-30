@@ -92,6 +92,7 @@ describe('the tool set', () => {
       'diagram_export',
       'diagram_analyse',
       'diagram_blast_radius',
+      'diagram_check',
       'diagram_reset',
     ]);
   });

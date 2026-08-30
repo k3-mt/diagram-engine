@@ -16,6 +16,10 @@ export * from './document/history.js';
 // normalising a binding ref, and walking the document's bindings. No node:fs,
 // so `diagram check --bindings` is the IO half and nothing else.
 export * from './bindings/index.js';
+// P5-02: the IO half — resolving a ref against a real tree. Deliberately NOT
+// re-exported from bindings/index.js, which stays free of node:fs so the
+// viewer can import the parsing half by path (P5-03).
+export * from './bindings/resolve.js';
 export * from './format/summary.js';
 export * from './format/table.js';
 

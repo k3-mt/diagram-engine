@@ -3,8 +3,8 @@
 // This is the primary agent surface: an agent that speaks MCP (Model Context
 // Protocol — the open standard for handing tools to a coding agent over
 // stdio) drives the whole engine through these tools and nothing else. §4.1
-// specifies seven; Part 15 adds diagram_analyse as the eighth and Part 18
-// adds diagram_blast_radius as the ninth.
+// specifies seven; Part 15 adds diagram_analyse as the eighth, Part 18 adds
+// diagram_blast_radius as the ninth, and §3.8 adds diagram_check as the tenth.
 //
 // Three things about this file carry more weight than the code does:
 //
@@ -54,6 +54,7 @@ import {
   type DiagramContext,
 } from '../commands/context.js';
 import { runAnalyse } from '../commands/analyse.js';
+import { runCheck } from '../commands/check.js';
 import { runGet } from '../commands/get.js';
 import { runUndo } from '../commands/undo.js';
 import { runRedo } from '../commands/redo.js';
@@ -477,6 +478,70 @@ const diagramAnalyse: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// diagram_check (spec §3.3, §3.8)
+// ---------------------------------------------------------------------------
+
+const CHECK_SCHEMA: PlainJsonSchema = {
+  type: 'object',
+  properties: {
+    bindings: {
+      type: 'boolean',
+      description:
+        'true also resolves every binding against the filesystem: does the ' +
+        'cited path exist, and does the file still have the cited line?',
+    },
+    root: {
+      type: 'string',
+      description:
+        'Project root a repo-relative ref resolves against. Default: the ' +
+        'parent of the .diagram directory. Implies bindings: true.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const diagramCheck: ToolDefinition = {
+  name: 'diagram_check',
+  strictArgs: true,
+  // The rule-15 sanction — "an invented citation does not survive the next
+  // commit" — is only real if the agent can run the check that enforces it.
+  // diagram_patch already validates on every write, so the VALIDATION half of
+  // this tool is a convenience; the bindings half is the only way an MCP-only
+  // agent can find out whether what it cited is actually there, and that is
+  // why the tool exists.
+  description:
+    'Validate the stored document, and with {"bindings": true} resolve every ' +
+    'binding against the filesystem: each cited path must exist under the ' +
+    'project root, and a cited line must be within the file. Reports each ' +
+    'failure as missing (nothing there), stale (there, but not what the ref ' +
+    'claims), escaped (resolves outside the root) or unchecked (an ' +
+    'identifier such as compose=orders-api, which names something inside a ' +
+    'file and cannot be resolved as one — never counted as verified). This ' +
+    'is deterministic and read-only: it opens the cited files and changes ' +
+    'nothing. Run it after adding bindings — a citation that does not resolve ' +
+    'is worse than none, because it reads as evidence.',
+  inputSchema: CHECK_SCHEMA,
+  annotations: { title: 'Check the diagram', readOnlyHint: true, idempotentHint: true },
+  handler: (args, ctx) => {
+    const bindings = args['bindings'];
+    if (bindings !== undefined && typeof bindings !== 'boolean') {
+      return refuse('bindings must be a boolean', ['e.g. {"bindings": true}']);
+    }
+    const root = args['root'];
+    if (root !== undefined && typeof root !== 'string') {
+      return refuse('root must be a string', ['e.g. {"root": "/path/to/repo"}']);
+    }
+    // Literally `diagram check [--bindings] [--root]`: one body, so the two
+    // surfaces cannot disagree about whether a citation resolves.
+    return runCheck({
+      ...opts(ctx),
+      ...(bindings !== undefined ? { bindings } : {}),
+      ...(root !== undefined ? { root } : {}),
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
 // diagram_reset
 // ---------------------------------------------------------------------------
 
@@ -603,6 +668,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   diagramExport,
   diagramAnalyse,
   diagramBlastRadius,
+  diagramCheck,
   diagramReset,
 ] as const;
 

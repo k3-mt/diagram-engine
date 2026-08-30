@@ -28,6 +28,7 @@ import { runExport } from '../src/commands/export.js';
 import { runView, runViewCollapsed } from '../src/commands/view.js';
 import { runUndo } from '../src/commands/undo.js';
 import { runBlastRadius } from '../src/commands/blastRadius.js';
+import { runCheck } from '../src/commands/check.js';
 import { callTool, TOOL_NAMES } from '../src/mcp/tools.js';
 
 const cleanups: Array<() => void> = [];
@@ -127,6 +128,7 @@ describe('the CLI and the MCP tools are one implementation', () => {
       'diagram_export',
       'diagram_analyse',
       'diagram_blast_radius',
+      'diagram_check',
       'diagram_reset',
     ]);
   });
@@ -277,6 +279,67 @@ describe('the CLI and the MCP tools are one implementation', () => {
     expect(viaTool.ok).toBe(false);
     expect(viaTool.text).toBe(viaCli.text);
     expect(viaTool.text).toContain('diagram serve');
+  });
+
+  it('resolves bindings identically through `diagram check --bindings` and diagram_check', async () => {
+    // The provenance seam (spec §3.8). An agent driving the engine over MCP
+    // has no shell, so diagram_check is the ONLY way it can find out whether
+    // what it cited is actually there — and rule 15's sanction is only real if
+    // the two surfaces give the same verdict. Asserted on the strings, and on
+    // a document that FAILS, because a checker that agrees only when
+    // everything passes agrees about nothing.
+    const ctx = tempContext();
+    const root = path.dirname(ctx.dir);
+    fs.mkdirSync(path.join(root, 'internal'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'internal', 'pay.go'), 'a\nb\nc\n');
+
+    const cited: GraphPatch = {
+      ops: [
+        {
+          op: 'addNode',
+          node: {
+            id: 'orders',
+            label: 'Orders',
+            type: 'service',
+            parent: null,
+            bindings: [
+              { source: 'repo', ref: 'internal/pay.go', line: 3 },
+              { source: 'compose', ref: 'orders-api' },
+            ],
+          },
+        },
+        {
+          op: 'addNode',
+          node: {
+            id: 'billing',
+            label: 'Billing',
+            type: 'service',
+            parent: null,
+            bindings: [{ source: 'repo', ref: 'internal/gone.go' }],
+          },
+        },
+      ],
+      summary: 'cited',
+    };
+    expect(runPatchText(JSON.stringify(cited), 'test', { dir: ctx.dir }).stderr).toBe('');
+
+    const viaTool = await callTool('diagram_check', { bindings: true }, ctx);
+    const viaCli = runCheck({ dir: ctx.dir, bindings: true });
+    expect(viaTool.text).toBe(viaCli.text);
+    expect(viaTool.ok).toBe(false);
+    expect(viaTool.code).toBe(1);
+    // The three claims, on both surfaces at once: verified, unresolvable, and
+    // wrong. An identifier must never be counted as verified.
+    expect(viaTool.text).toContain('  ok         1');
+    expect(viaTool.text).toContain('  unchecked  1');
+    expect(viaTool.text).toContain('  missing    1');
+    expect(viaTool.text).toContain('no such path');
+
+    // And plain check — which does NOT resolve — agrees on both surfaces too.
+    const plainTool = await callTool('diagram_check', {}, ctx);
+    expect(plainTool.text).toBe(runCheck({ dir: ctx.dir }).text);
+    expect(plainTool.ok).toBe(true);
+    expect(plainTool.text).toContain('run `diagram check --bindings`');
   });
 
   it('undoes with the same result text on both surfaces', async () => {
