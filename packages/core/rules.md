@@ -27,24 +27,25 @@ Every node and group needs "parent": a group id, or null for top level.
 ## Rules
 
 1. CALL diagram_get FIRST if you are not sure of the current state.
-   Reuse existing ids. "the auth service" and "auth" both mean the
-   existing node "auth-service"; never create a second node for one
-   concept.
+   Reuse existing ids. "the auth service", "auth", and "authsvc" all
+   refer to an existing node with id "auth-service". Never create a
+   second node for the same concept.
 
 2. IDS are lowercase-hyphenated, derived from the label:
-   "Order Service" -> "order-service". Nodes and groups share one id
-   namespace.
+   "Order Service" -> "order-service". Nodes and groups share one
+   namespace, so ids must be unique across both.
 
-3. MINIMAL OPS. "Put X and Y in a vpc" is one addGroup plus two
-   updateNode ops changing parent. Do not remove and re-add nodes.
+3. MINIMAL OPS. Emit only what is needed. "Put X and Y in a vpc" is
+   one addGroup plus two updateNode ops changing parent. Do not
+   remove and re-add nodes.
 
 4. EDGE DIRECTION POINTS AT THE DEPENDENCY: caller to callee. A
    service that reads a database has an edge FROM the service TO the
    database; the data flows back the other way, the arrow does not.
-   CHECK EVERY EDGE: read it aloud as "<from> <label> <to>". "orders
-   reads postgres" is right, "s3 reads etl" is backwards. A protocol
-   label ("https", "grpc") is a noun, not a verb: the arrow still runs
-   from whoever initiates the call.
+   CHECK EVERY EDGE by reading it aloud as "<from> <label> <to>":
+   "orders reads postgres" is right, "s3 reads etl" is backwards. A
+   protocol label ("https", "grpc") is a noun, not a verb: there the
+   arrow still runs from whoever initiates the call.
 
 5. EDGE LABELS are 1-3 words: "reads", "publishes", "grpc". Omit the
    label when the relationship is obvious from the types.
@@ -62,6 +63,7 @@ Every node and group needs "parent": a group id, or null for top level.
    system serves is still a node, though no file deploys it.
 
 9. IF READING A CODEBASE, cite the file each node and edge came from.
+   Do not guess at connections.
 
 10. DELETION. "Remove the cache" means removeNode plus removeEdge for
     every edge touching it, in one patch.
@@ -74,11 +76,10 @@ Every node and group needs "parent": a group id, or null for top level.
     viewer already shows the picture, do not describe it back.
 
 14. REDUNDANCY IS TOLD, NEVER DEDUCED. When the user says two things
-    are replicas, standbys or instances of one component, give their
-    edges the same `alt` tag: alternatives, not two dependencies.
-    Never infer it from code — two connection strings are not failover.
-    Ask, or leave `alt` off: over-reporting a blast radius is
-    survivable, a guessed `alt` hides a real single point of failure.
+    are replicas or standbys, give their edges the same `alt`:
+    alternatives, not two dependencies. Never infer it from code. Ask,
+    or leave `alt` off — a guessed `alt` hides a real single point of
+    failure, and over-reporting is survivable.
 
 ---
 
@@ -96,6 +97,10 @@ alternatives instead — failure reaches the source only when EVERY edge
 in that set is down. The tag is scoped per source node, must be on a
 solid (synchronous) edge, and needs at least two edges to two distinct
 targets. See rule 14: `alt` is recorded because the user said so.
+
+To take a tag back off, `updateEdge` with `"alt": null` — one op, same edge
+id. `""` is not a tag and is rejected; an omitted key means "leave it
+alone". `label` and `cardinality` clear the same way.
 
 ### Node metadata (`meta`)
 

@@ -791,7 +791,18 @@ describe('the caption prints core sentences verbatim', () => {
   it('carries every assumption the prediction produced, unaltered (C2, C3)', () => {
     const blast = blastRadiusMulti(doc, ['db']);
     const caption = blastCaption(blast, blastPlan(blast, openIdx));
-    for (const a of blast.assumptions) expect(caption.notes).toContain(a);
+    // Every assumption reaches the screen verbatim. The §18.11 caveat is
+    // deliberately lifted out of the grey notes block into the rows (see the
+    // §18.11 test below), so it is checked against both — printed exactly
+    // once, unaltered, and never dropped on the way.
+    for (const a of blast.assumptions) {
+      expect([...caption.notes, ...caption.rows].filter((line) => line.includes(a))).toHaveLength(
+        1,
+      );
+    }
+    for (const a of blast.assumptions) {
+      if (a !== blast.redundancyCaveat) expect(caption.notes).toContain(a);
+    }
     expect(caption.notes.join(' ')).toContain('"at risk" is not "will fail"');
   });
 
@@ -845,12 +856,52 @@ describe('the caption prints core sentences verbatim', () => {
     expect(caption.rows.join(' ')).toContain('replicas');
     // Verbatim in exactly ONE place: never rephrased, and never twice.
     expect(caption.notes).not.toContain(ASSUMPTION_NO_REDUNDANCY);
-    // and a SINGLE target does not get the caveat — it is a claim about the
-    // combination, and adding it everywhere would make it invisible.
+    // A SINGLE target gets it too, and this is a deliberate reversal of the
+    // earlier contract. The over-report belongs to the document's untagged
+    // edges, not to the union, so it is as true of one click as of five —
+    // and while it was multi-only, the CLI printed a redundancy sentence on
+    // every prediction while this surface, the one you can click, printed
+    // none. Two surfaces making different honesty claims about one document
+    // is the failure C3 exists to prevent. Still in the rows, still verbatim,
+    // still exactly once.
     const one = blastRadiusMulti(doc, ['db']);
     const oneCaption = blastCaption(one, blastPlan(one, openIdx));
+    expect(one.redundancyCaveat).toBe(ASSUMPTION_NO_REDUNDANCY);
+    expect(oneCaption.rows.filter((r) => r.includes(ASSUMPTION_NO_REDUNDANCY))).toHaveLength(1);
     expect(oneCaption.notes).not.toContain(ASSUMPTION_NO_REDUNDANCY);
-    expect(oneCaption.rows.join(' ')).not.toContain(ASSUMPTION_NO_REDUNDANCY);
+  });
+
+  it('names what a live alternative held up — the §18.11 row (spared)', () => {
+    // The surface §18.11 was written about: toggle off a replica and the
+    // at-risk set shrinks. Without this row the reason is invisible, which is
+    // also what a wrong answer looks like. Core's computation, the same one
+    // the CLI prints, so the two cannot disagree about who was held up.
+    const ha: GraphDoc = {
+      schemaVersion: 1,
+      title: 'HA',
+      direction: 'DOWN',
+      groups: [],
+      nodes: [
+        { id: 'app', label: 'App', type: 'service', parent: null },
+        { id: 'pg-primary', label: 'Primary', type: 'database', parent: null },
+        { id: 'pg-replica', label: 'Replica', type: 'database', parent: null },
+      ],
+      edges: [
+        { id: 'e1', from: 'app', to: 'pg-primary', alt: 'db' },
+        { id: 'e2', from: 'app', to: 'pg-replica', alt: 'db' },
+      ],
+      collapsed: [],
+    };
+    const idx = buildDrawnIndex(ha, deriveViewDetail(ha, []));
+    const b = blastRadiusMulti(ha, ['pg-primary']);
+    const rows = blastCaption(b, blastPlan(b, idx)).rows.join('\n');
+    expect(rows).toContain('at risk (0)');
+    expect(rows).toContain(
+      'spared (1)  App (alt \u201cdb\u201d — lost pg-primary, still up: pg-replica)',
+    );
+    // and nothing of the sort on a document that states no redundancy
+    const plain = blastRadiusMulti(doc, ['db']);
+    expect(blastCaption(plain, blastPlan(plain, openIdx)).rows.join('\n')).not.toContain('spared');
   });
 
   it('captions an empty selection as empty, never as "nothing is at risk"', () => {

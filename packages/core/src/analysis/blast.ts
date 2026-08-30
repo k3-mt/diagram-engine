@@ -120,6 +120,44 @@ export type ContainedNode = {
   edgeLabel: string | null;
 };
 
+/**
+ * One alternative that this experiment took out, and WHY it is unavailable.
+ *
+ * `downInside` exists because an edge may name a boundary (§3.1) and a
+ * boundary counts as unavailable as soon as anything inside it is down. Saying
+ * only "lost az-a" when az-a is intact and one unrelated service inside it
+ * died reads as an AZ outage — the internal "this edge is down" state rendered
+ * to the reader as a named loss. So the vertex that actually went down travels
+ * with the target, and the surface can say which of the two happened.
+ */
+export type FallenAlternative = {
+  /** the edge's target: the alternative that is no longer available */
+  target: string;
+  /**
+   * null when `target` itself is down; otherwise the down vertex INSIDE it
+   * (nearest in document order) that took this path out while the boundary
+   * itself is untouched.
+   */
+  downInside: string | null;
+};
+
+/**
+ * One node that survived because an alternative was still up (§18.11), and the
+ * set that held it: the tag, what it lost, and what it still has.
+ */
+export type SparedNode = {
+  /** the source node the alt set belongs to — the thing that was spared */
+  id: string;
+  /** its label, so a caption naming things by label needs no second lookup */
+  label: string;
+  /** the `alt` tag naming the set */
+  tag: string;
+  /** the alternatives this experiment took out, in document order */
+  lost: FallenAlternative[];
+  /** the alternatives still standing — why `id` is not in `atRisk` */
+  live: string[];
+};
+
 /** The answer to "if this dies, what is at risk?" (§18.3). */
 export type BlastRadius = {
   /** the id that was asked about, verbatim */
@@ -136,6 +174,12 @@ export type BlastRadius = {
   atRisk: AtRiskNode[];
   /** dependents the dashed edges contain, by name (detail 1, C2) */
   contained: ContainedNode[];
+  /**
+   * What an alt set held up (§18.11): the nodes that would be at risk if the
+   * document had not stated a redundancy, with the alternative that is still
+   * standing. Empty for every document that carries no `alt`.
+   */
+  spared: SparedNode[];
   /**
    * Part 15's articulation-point finding for this target, or null. A SEPARATE
    * metric, reported alongside and never merged into the at-risk count
@@ -183,6 +227,26 @@ export function articulationValue(r: BlastRadius): string {
 /** The assumptions block: blind spots first, then the two claims C2 and C3 make. */
 export function blastAssumptions(coverage: Coverage, excluded: Exclusions): string[] {
   return [...blindSpotNotes(coverage, excluded), ASSUMPTION_SYNC_ONLY, ASSUMPTION_AT_RISK];
+}
+
+/**
+ * The assumptions block for a prediction over a specific projection: the same
+ * three, plus §18.11's caveat about what the DOCUMENT does and does not say
+ * about redundancy (see redundancyCaveatFor).
+ *
+ * It lives on the result rather than in a surface for the reason C3 gives: an
+ * honesty sentence a surface decides to print is an honesty sentence a surface
+ * can decide to drop. Every prediction — single, combined, and every row of
+ * the backlog — carries the same one, so the CLI, the MCP twin and the viewer
+ * cannot caveat the same document three different ways, and a one-id combined
+ * result stays byte-identical to the single-target answer.
+ */
+export function blastAssumptionsFor(g: RuntimeGraph, resolvedTargets = 1): string[] {
+  const caveat = redundancyCaveatFor(g, resolvedTargets);
+  return [
+    ...blastAssumptions(g.coverage, g.excluded),
+    ...(caveat !== null ? [caveat] : []),
+  ];
 }
 
 /**
@@ -387,6 +451,91 @@ function propagate(
 }
 
 /**
+ * Everything an alt set saved, derived from the prediction that was just made.
+ *
+ * WHY IT LIVES IN ANALYSIS. `atRisk` is an assertion; a spared node is the
+ * ABSENCE of one, and absences are exactly what §18.3 says to state rather
+ * than leave as silence (the same argument that makes `contained` a named
+ * list). It reads only the down set and the alt-set index, so it belongs
+ * beside them — and beside them ONCE, so the CLI, the MCP twin and the viewer
+ * cannot each own a slightly different derivation of the same absence. It was
+ * briefly a CLI-local function, which is how the viewer came to have no spared
+ * row at all.
+ *
+ * "Down" is killed OR at risk — the same "unavailable" the fixpoint uses —
+ * plus the boundaries that contain a down vertex: an edge may name a group
+ * (§3.1), so an alternative inside a dead VPC is a fallen alternative however
+ * the edge was drawn. A source that is itself down is not spared; it is at
+ * risk, and saying both about one node would be a contradiction on screen. A
+ * set every member of which fell is not here either: that source is at risk,
+ * and `via` already names the last alternative to fall.
+ */
+function sparedFrom(
+  g: RuntimeGraph,
+  killed: readonly string[],
+  atRisk: readonly AtRiskNode[],
+): SparedNode[] {
+  if (g.altSets.size === 0) return [];
+
+  const down = new Set<string>([...killed, ...atRisk.map((a) => a.id)]);
+  // A boundary counts as unavailable as soon as anything inside it is down,
+  // and `downVertex` remembers WHICH thing, so the surface can say "az-a is
+  // untouched, other-a inside it is down" instead of asserting an AZ outage.
+  const unavailable = new Set<string>(down);
+  const downVertex = new Map<string, string>();
+  for (const id of byDocumentOrder(g, down)) {
+    for (const gid of participatingAncestors(g, id)) {
+      unavailable.add(gid);
+      if (!down.has(gid) && !downVertex.has(gid)) downVertex.set(gid, id);
+    }
+  }
+
+  const spared: SparedNode[] = [];
+  for (const [source, byTag] of g.altSets) {
+    if (down.has(source)) continue; // at risk or killed: not spared by anything
+    for (const [tag, set] of byTag) {
+      const lost = set.filter((e) => unavailable.has(e.to));
+      if (lost.length === 0 || lost.length === set.length) continue;
+      spared.push({
+        id: source,
+        label: labelOf(g, source),
+        tag,
+        lost: lost.map((e) => ({
+          target: e.to,
+          downInside: down.has(e.to) ? null : downVertex.get(e.to) ?? null,
+        })),
+        live: set.filter((e) => !unavailable.has(e.to)).map((e) => e.to),
+      });
+    }
+  }
+  // Nearest-to-the-document order, like every other list in this file.
+  spared.sort((a, b) => documentRank(g, a.id) - documentRank(g, b.id));
+  return spared;
+}
+
+/**
+ * articulationIndexOf(), memoised per projection.
+ *
+ * articulationPoints() is the deliberately naive O(n·(n+e)) sweep §15.2 asks
+ * for. blastRadiusOn falls back to computing it when no index is handed in,
+ * which made the PUBLIC single-target entry point — the one the CLI and the
+ * viewer's click handler reach for — pay the whole sweep on every call: ~10-19
+ * ms at the 200-element cap, against a sub-millisecond budget, on a prediction
+ * an agent runs mid-turn. The index is a pure function of the projection and
+ * every caller that wants one wants the same one, so it is cached against the
+ * graph object and dies with it. Nothing mutates a RuntimeGraph after
+ * runtimeGraph() returns it, so there is no staleness to manage.
+ */
+const articulationCache = new WeakMap<RuntimeGraph, Map<string, ArticulationPoint>>();
+function articulationIndexFor(g: RuntimeGraph): Map<string, ArticulationPoint> {
+  const hit = articulationCache.get(g);
+  if (hit !== undefined) return hit;
+  const built = articulationIndexOf(g);
+  articulationCache.set(g, built);
+  return built;
+}
+
+/**
  * Blast radius over an already-built projection (used by backlog()).
  *
  * `articulation` may be handed in precomputed. articulationPoints() is the
@@ -401,7 +550,7 @@ export function blastRadiusOn(
   id: string,
   articulationIndex?: Map<string, ArticulationPoint>,
 ): BlastRadius {
-  const assumptions = blastAssumptions(g.coverage, g.excluded);
+  const assumptions = blastAssumptionsFor(g);
   const base = {
     target: id,
     label: labelOf(g, id),
@@ -422,6 +571,7 @@ export function blastRadiusOn(
       killed: [],
       atRisk: [],
       contained: [],
+      spared: [],
       articulation: null,
       note: `"${id}" is an entity node: a data model, not a runtime component — there is nothing to predict`,
     };
@@ -433,6 +583,7 @@ export function blastRadiusOn(
       killed: [],
       atRisk: [],
       contained: [],
+      spared: [],
       articulation: null,
       note: `no node or group with id "${id}"`,
     };
@@ -449,7 +600,7 @@ export function blastRadiusOn(
   const articulation =
     group !== undefined
       ? null
-      : (articulationIndex ?? articulationIndexOf(g)).get(id) ?? null;
+      : (articulationIndex ?? articulationIndexFor(g)).get(id) ?? null;
 
   return {
     ...base,
@@ -461,6 +612,7 @@ export function blastRadiusOn(
     killed: [id, ...byDocumentOrder(g, killed.slice(1))],
     atRisk,
     contained,
+    spared: sparedFrom(g, killed, atRisk),
     articulation,
     note: null,
   };
@@ -482,34 +634,44 @@ export function blastRadius(doc: GraphDoc, id: string): BlastRadius {
 // ---------------------------------------------------------------------------
 
 /**
- * §18.11, in the one sentence a multi-target surface must print over a
- * document that states NO redundancy — which is every document that carries no
- * `alt` tag.
+ * §18.11, in the one sentence a surface must print over a document that states
+ * NO redundancy — which is every document that carries no `alt` tag.
  *
- * An untagged edge asserts a HARD dependency. With no `alt` anywhere there is
- * no way to say that two of the selected targets are replicas of each other
- * and that losing one alone was survivable. The union is arithmetically right
- * and the model underneath it cannot express the thing multi-select is usually
- * used to investigate, which makes this the one result in Part 18 that is more
- * confident than the document deserves. It is data on the result, not prose in
- * a surface, because three surfaces would otherwise each decide whether to
- * mention it.
+ * An untagged edge asserts a HARD dependency. With no `alt` anywhere, nothing
+ * in the document says that two of its components are replicas of each other
+ * and that losing one alone was survivable. The radius is arithmetically right
+ * and rests on a claim nobody made, which makes it the one number in Part 18
+ * that is more confident than the document deserves. It is data on the result,
+ * not prose in a surface, because three surfaces would otherwise each decide
+ * whether to mention it.
  *
- * Once the document DOES express redundancy, this sentence is no longer true
- * of it — see ASSUMPTION_PARTIAL_REDUNDANCY, which replaces it.
+ * IT IS A CLAIM ABOUT THIS DOCUMENT, NOT ABOUT THE TOOL. The earlier wording
+ * ("the document cannot say two targets are replicas") was true until M18f
+ * built `alt` and false the moment it shipped: the document CAN say it, and
+ * the user simply has not. Printing that over the nine untagged fixtures would
+ * have told every reader that the tool lacks the capability this milestone
+ * added — and it contradicts rule 14, which says redundancy is told rather
+ * than deduced, i.e. an untagged edge means nobody said so.
+ *
+ * It also says "this radius", not "a combined radius": the sentence is now
+ * printed beside single-target predictions too (the CLI footer), where there
+ * is no combination on screen for "combined" to refer to.
+ *
+ * Once the document DOES express redundancy, this sentence is no longer the
+ * right one — see ASSUMPTION_PARTIAL_REDUNDANCY, which replaces it.
  */
 export const ASSUMPTION_NO_REDUNDANCY =
-  'every edge is a hard dependency: the document cannot say two targets are replicas, so a combined radius over-reports wherever redundancy exists (§18.11)';
+  'this document says no two targets are replicas: every edge in it is a hard dependency, so this radius over-reports wherever redundancy exists but was never stated (§18.11)';
 
 /**
  * The same caveat, for a document that DOES express redundancy (§18.11).
  *
  * This is the one place where building the feature changed an existing claim.
- * `ASSUMPTION_NO_REDUNDANCY` says the model cannot express redundancy at all;
- * once a single edge carries `alt`, that sentence is false for the edges that
- * carry it and still true for every edge that does not. Printing the old
- * wording over a document with alt sets would understate the tool and,
- * worse, invite the reader to discount a number that is now partly exact.
+ * `ASSUMPTION_NO_REDUNDANCY` says this document states no alternatives; once a
+ * single edge carries `alt`, that is false of it — the radius is exact for the
+ * edges that carry the tag and pessimistic only for the ones that do not.
+ * Printing the other sentence over a document with alt sets would invite the
+ * reader to discount a number that is now partly exact.
  *
  * So the caveat stays a caveat and narrows to what is actually unknown: the
  * untagged edges. It is deliberately NOT "redundancy is modelled, this result
@@ -518,7 +680,7 @@ export const ASSUMPTION_NO_REDUNDANCY =
  * the conservative direction (§18.11).
  */
 export const ASSUMPTION_PARTIAL_REDUNDANCY =
-  'alternatives are honoured where `alt` is set; every untagged edge is still a hard dependency, so a combined radius over-reports wherever redundancy exists but was never stated (§18.11)';
+  'alternatives are honoured where `alt` is set; every untagged edge is still a hard dependency, so this radius over-reports wherever redundancy exists but was never stated (§18.11)';
 
 /** True when the projection contains at least one usable alternative set (§18.11). */
 export function hasAlternatives(g: RuntimeGraph): boolean {
@@ -529,14 +691,23 @@ export function hasAlternatives(g: RuntimeGraph): boolean {
 }
 
 /**
- * The §18.11 caveat that fits THIS document, or null when it does not apply.
+ * The §18.11 caveat that fits THIS document, or null when there is nothing to
+ * caveat (no target resolved, so no prediction was made).
  *
- * It applies to a multi-target result with two or more resolved targets — the
- * union is the shape §18.7 warns about — and its wording depends on whether
- * the document expresses any redundancy at all.
+ * It used to apply only to a multi-target result with two or more resolved
+ * targets, on the reasoning that the union is the shape §18.7 warns about.
+ * That left the two surfaces making DIFFERENT honesty claims about the same
+ * document: the CLI printed a redundancy sentence on every prediction and on
+ * the backlog, while the viewer — the surface with the click/shift-click
+ * interaction that motivated §18.11 — said nothing at all on a single target,
+ * which is precisely the case where a live replica is what the reader needs
+ * told. The over-report is a property of the DOCUMENT'S untagged edges, not of
+ * the combination, so it is true of one target as much as of five; the wording
+ * says "this radius" for that reason. C3's honesty sentences are unconditional
+ * everywhere else, and this one is now unconditional too.
  */
 export function redundancyCaveatFor(g: RuntimeGraph, resolvedTargets: number): string | null {
-  if (resolvedTargets < 2) return null;
+  if (resolvedTargets < 1) return null;
   return hasAlternatives(g) ? ASSUMPTION_PARTIAL_REDUNDANCY : ASSUMPTION_NO_REDUNDANCY;
 }
 
@@ -596,6 +767,15 @@ export type MultiBlastResult = {
    * risk; reporting it as contained would be a false safety claim.
    */
   contained: ContainedNode[];
+  /**
+   * What an alt set held up across the WHOLE selection (§18.11), computed from
+   * the combined at-risk set rather than merged from the per-target answers: a
+   * node one target spares and another endangers is at risk, and must not also
+   * appear here. This is the field §18.7's multi-select was missing — toggle
+   * off two replicas and the reader can now see that the first alone was
+   * survivable.
+   */
+  spared: SparedNode[];
   /** `atRisk` ids alone, same order — the viewer's tint set, no recomputation */
   atRiskIds: string[];
   /** `contained` ids alone, same order — the viewer's boundary set */
@@ -644,7 +824,7 @@ export function blastRadiusMultiOn(
   // whose answer never consults the index — still pays nothing.
   const index =
     articulationIndex ??
-    (targets.some((id) => g.nodeById.has(id)) ? articulationIndexOf(g) : undefined);
+    (targets.some((id) => g.nodeById.has(id)) ? articulationIndexFor(g) : undefined);
   const per = targets.map((id) => blastRadiusOn(g, id, index));
 
   const resolved: string[] = [];
@@ -659,6 +839,7 @@ export function blastRadiusMultiOn(
   // earlier group target is already in the set and is not repeated.
   const killed = [...new Set(per.flatMap((r) => r.killed))];
   const { atRisk, contained } = propagate(g, killed);
+  const spared = sparedFrom(g, killed, atRisk);
 
   const redundancyCaveat = redundancyCaveatFor(g, resolved.length);
 
@@ -672,14 +853,12 @@ export function blastRadiusMultiOn(
     killed,
     atRisk,
     contained,
+    spared,
     atRiskIds: atRisk.map((a) => a.id),
     containedIds: contained.map((c) => c.id),
     coverage: g.coverage,
     excluded: g.excluded,
-    assumptions: [
-      ...blastAssumptions(g.coverage, g.excluded),
-      ...(redundancyCaveat !== null ? [redundancyCaveat] : []),
-    ],
+    assumptions: blastAssumptionsFor(g, resolved.length),
     redundancyCaveat,
     note: multiNote(targets, unresolved),
   };

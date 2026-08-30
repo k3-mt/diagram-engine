@@ -54,6 +54,23 @@ function isDescendantOf(doc: GraphDoc, id: string, gid: string): boolean {
 }
 
 /**
+ * The first (container, contained) pair among an alt set's targets, or null.
+ *
+ * Two ids that name a boundary and something inside it are not two
+ * alternatives — see V18 below. Quadratic in the size of one alt set, which is
+ * the number of replicas of one component: three or four in practice, and the
+ * whole loop runs only over sets that already passed the distinct-id test.
+ */
+function nestedPair(doc: GraphDoc, targets: string[]): [string, string] | null {
+  for (const outer of targets) {
+    for (const inner of targets) {
+      if (outer !== inner && isDescendantOf(doc, inner, outer)) return [outer, inner];
+    }
+  }
+  return null;
+}
+
+/**
  * Validate a document against invariants V1–V13 (spec §3.3) and V18–V19
  * (spec §18.11).
  * Collects every violation; the exact message formats are the contract.
@@ -235,10 +252,17 @@ export function validate(doc: GraphDoc): ValidationResult {
   // mistake makes the agent fix the wrong thing (the V13 precedent).
   // ---------------------------------------------------------------------
 
-  // Group the alt-carrying edges by (source, tag) in document order.
+  // Group the alt-carrying edges by (source, tag) in document order. DASHED
+  // EDGES ARE NOT MEMBERS: the analysis builds its alt sets from synchronous
+  // edges only (analysis/graph.ts), so counting a dashed edge here would let
+  // V18 and the propagation disagree about what a set is — a solid+dashed pair
+  // would pass V18 while behaving as a lone hard dependency, and the agent
+  // would be told about the dashed tag (V19) and only on the NEXT round trip
+  // about the meaningless one that remains. One validate, both corrections.
   const altSets = new Map<string, { tag: string; from: string; edges: typeof doc.edges }>();
   for (const e of doc.edges) {
     if (e.alt === undefined) continue;
+    if (e.style === 'dashed') continue; // V19 reports it; it is not an alternative
     if (!allIdSet.has(e.from) || !allIdSet.has(e.to)) continue;
     const key = `${e.from}\x00${e.alt}`;
     const set = altSets.get(key);
@@ -263,6 +287,22 @@ export function validate(doc: GraphDoc): ValidationResult {
     if (targets.size < 2) {
       errors.push(
         `edge "${first.id}" has alt "${set.tag}" but every edge from "${set.from}" with that tag points at "${first.to}": alternatives need at least two distinct targets`,
+      );
+      continue;
+    }
+    // Two distinct ids are still not two alternatives when one CONTAINS the
+    // other: an edge naming a boundary is a dependency on what the boundary
+    // holds (§3.1), so killing the inner node takes both edges out and killing
+    // the group takes the inner node with it. Tagging an AZ and a database
+    // inside that AZ is the likeliest hand-written version of this mistake,
+    // and it is the same claim V18 exists to catch — a redundancy the document
+    // does not describe. The propagation is already correct on such a document
+    // (both edges fall in one wave and the source is at risk); what was
+    // missing was the sentence saying the tag bought nothing.
+    const nested = nestedPair(doc, [...targets]);
+    if (nested !== null) {
+      errors.push(
+        `edge "${first.id}" has alt "${set.tag}" but "${nested[0]}" contains "${nested[1]}": one failure takes both out, so they are not alternatives`,
       );
     }
   }

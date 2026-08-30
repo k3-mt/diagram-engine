@@ -196,12 +196,20 @@ export function blastCaption(b: MultiBlastResult, plan: BlastPlan): Caption {
     rows.push(
       'combined  the union of each target\u2019s at-risk set — a node is at risk if ANY of them dies',
     );
-    // Duty 2: the caveat goes next to the claim it qualifies, in the rows'
-    // own weight — not fifth in a grey footnote under two sentences the
-    // reader has already learned to skip. Core's wording, unaltered, and
-    // removed from `notes` below so it prints exactly once.
-    if (b.redundancyCaveat !== null) rows.push(`but  ${b.redundancyCaveat}`);
   }
+
+  // Duty 2: the caveat goes next to the claim it qualifies, in the rows' own
+  // weight — not fifth in a grey footnote under two sentences the reader has
+  // already learned to skip. Core's wording, unaltered, and removed from
+  // `notes` below so it prints exactly once.
+  //
+  // It is printed for ONE target as well as for a combination. The
+  // over-report belongs to the document's untagged edges, not to the union, so
+  // it is as true of a single click as of five; and while it was multi-only,
+  // the CLI printed a redundancy sentence on every prediction and this surface
+  // printed none — two surfaces making different honesty claims about one
+  // document, the quieter one being the one you can click.
+  if (b.redundancyCaveat !== null) rows.push(`but  ${b.redundancyCaveat}`);
 
   // Duty 3: what the experiment takes out DIRECTLY, beyond the targets
   // themselves — the components inside a killed boundary. They are absent
@@ -218,6 +226,25 @@ export function blastCaption(b: MultiBlastResult, plan: BlastPlan): Caption {
   rows.push(
     `at risk (${b.atRisk.length})  ${namedList(b.atRisk.map((r) => r.label))}`,
   );
+  // §18.11, and the reason this feature exists on THIS surface: toggle off two
+  // replicas and the at-risk set shrinks, with nothing on screen saying why.
+  // A spared node is an absence in the list above, so it has to be named or it
+  // is invisible — the same argument that makes `contained` a named row.
+  // Core's computation, shared with the CLI, so the two cannot disagree about
+  // who was held up. Printed only when something was actually spared, so a
+  // document with no `alt` renders exactly as it did before.
+  if (b.spared.length > 0) {
+    rows.push(
+      `spared (${b.spared.length})  ${namedList(
+        b.spared.map(
+          (s) =>
+            `${s.label} (alt “${s.tag}” — lost ${s.lost
+              .map((f) => (f.downInside === null ? f.target : `${f.target} (${f.downInside} is down inside it)`))
+              .join(', ')}, still up: ${s.live.join(', ')})`,
+        ),
+      )}`,
+    );
+  }
   rows.push(
     `contained (${b.contained.length})  ${namedList(
       b.contained.map((c) => `${c.label} (${c.edgeLabel ?? 'async'} from ${c.from})`),

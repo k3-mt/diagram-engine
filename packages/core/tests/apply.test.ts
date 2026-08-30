@@ -309,3 +309,78 @@ describe('summarise reports reparenting (spec §1.3 "group added, 2 moved")', ()
     expect(r.summary).toBe('+1 node');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Taking an optional property back OFF an edge (§18.11, and the G3 promise
+// that a correction costs one updateEdge with no lost ids).
+//
+// `alt` is the first optional property whose ABSENCE is enforced by an
+// invariant: V18 rejects a lone alt tag outright. So "we dropped the replica"
+// — an ordinary edit — was unexpressible while there was no way to clear the
+// tag: `""` fails min(1), an omitted key means "leave untouched", and the only
+// remaining route was removeEdge + addEdge, which rule 3 forbids and which
+// loses the edge id. §18.11 is explicit that the correction has to be as cheap
+// as the original claim or it will not get made.
+// ---------------------------------------------------------------------------
+describe('clearing an optional edge property (§18.11)', () => {
+  function replicated(): GraphDoc {
+    return doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica')],
+      edges: [
+        edge('e1', 'app', 'pg-primary', { alt: 'db' }),
+        edge('e2', 'app', 'pg-replica', { alt: 'db' }),
+      ],
+    });
+  }
+
+  it('removes alt when changes carry null, and keeps the edge id', () => {
+    // Both, because V18 rejects a document left with a lone alt tag — which is
+    // itself the invariant this escape exists to let an agent satisfy.
+    const r = applyPatch(
+      replicated(),
+      patch([
+        { op: 'updateEdge', id: 'e1', changes: { alt: null } },
+        { op: 'updateEdge', id: 'e2', changes: { alt: null } },
+      ]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.doc.edges[0]).toEqual({ id: 'e1', from: 'app', to: 'pg-primary' });
+    expect('alt' in r.doc.edges[0]!).toBe(false);
+  });
+
+  it('lets a replica be dropped in ONE patch, which V18 would otherwise reject', () => {
+    // Without the null escape this sequence is impossible: removeNode alone is
+    // rejected because it strands a one-member alt set, and no updateEdge could
+    // express the repair.
+    const r = applyPatch(
+      replicated(),
+      patch([
+        { op: 'updateEdge', id: 'e1', changes: { alt: null } },
+        { op: 'removeEdge', id: 'e2' },
+        { op: 'removeNode', id: 'pg-replica' },
+      ]),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.doc.edges.map((e) => e.id)).toEqual(['e1']);
+    expect(r.doc.edges[0]!.alt).toBeUndefined();
+  });
+
+  it('clears label and cardinality the same way, and leaves absent keys alone', () => {
+    const before = doc({
+      nodes: [node('a'), node('b')],
+      edges: [edge('e1', 'a', 'b', { label: 'reads', style: 'dashed' })],
+    });
+    const r = applyPatch(before, patch([{ op: 'updateEdge', id: 'e1', changes: { label: null } }]));
+    if (!r.ok) throw new Error(r.errors.join('; '));
+    expect(r.doc.edges[0]!.label).toBeUndefined();
+    // untouched: a key absent from `changes` is not a removal
+    expect(r.doc.edges[0]!.style).toBe('dashed');
+  });
+
+  it('still refuses an empty string — null is the removal, "" is not a tag', () => {
+    const r = applyPatch(replicated(), patch([{ op: 'updateEdge', id: 'e1', changes: { alt: '' } }]));
+    expect(r.ok).toBe(false);
+  });
+});

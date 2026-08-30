@@ -115,7 +115,16 @@ function applyOp(next: GraphDoc, op: PatchOp): void {
     case 'updateEdge': {
       const edge = next.edges.find((e) => e.id === op.id);
       if (!edge) throw unknownError('edge', op.id, next.edges.map((e) => e.id));
-      Object.assign(edge, op.changes);
+      // null means REMOVE THIS PROPERTY (see GEdgeChangesSchema). Object.assign
+      // alone would store the null, which is not a value any GEdge property
+      // has: an optional string is present or it is absent. This is the only
+      // way to take `alt` back off an edge without removeEdge + addEdge, and
+      // V18 makes a lone `alt` a rejection, so "we dropped the replica" needs
+      // it to be expressible in one op.
+      for (const [key, value] of Object.entries(op.changes)) {
+        if (value === null) delete (edge as Record<string, unknown>)[key];
+        else (edge as Record<string, unknown>)[key] = value;
+      }
       return;
     }
     case 'removeEdge': {

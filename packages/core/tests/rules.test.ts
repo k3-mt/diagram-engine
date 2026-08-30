@@ -96,12 +96,35 @@ describe('compactRules', () => {
     expect(compact).toContain('vpc, region, cluster, account, generic');
   });
 
-  it('keeps the headline of all twelve numbered rules', () => {
-    for (let n = 1; n <= 12; n += 1) {
-      expect(compact).toContain(`\n${n}. `);
-    }
+  it('keeps the headline of every numbered rule, and no others', () => {
+    // The rule NUMBERS present, as a set — not a loop to a hard-coded upper
+    // bound, which is how rule 14 arrived unpinned while this test still
+    // looped to 12 and passed. The 13 gap is deliberate: BUILD.md P5-02
+    // reserves it for bindings, so asserting the set documents the gap
+    // instead of inviting a renumbering.
+    const numbers = compact
+      .split('\n')
+      .map((line) => /^(\d+)\. /.exec(line)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14]);
     expect(compact).toContain('CALL diagram_get FIRST');
     expect(compact).toContain('DO NOT INVENT');
+    // Rule 9's edge-level prohibition. Rule 8 is entirely about BOXES ("a
+    // mention is not a component"), so this sentence is the only thing in the
+    // compact text telling the agent not to draw an edge it did not find —
+    // and edge invention is what the M8 precision metric measures. It was cut
+    // once to save 28 characters; this pins it.
+    expect(compact).toContain('Do not guess at connections.');
+    // §18.11's rule 14, and the asymmetry the spec says must stay in the text:
+    // over-reporting is survivable, a guessed alternative hides a real single
+    // point of failure. Nothing asserted this before, so the next trim against
+    // the cap could have dropped the rule this milestone added.
+    expect(compact).toContain('14. REDUNDANCY IS TOLD, NEVER DEDUCED.');
+    expect(compact).toContain('hides a real single point of failure');
+    // The preamble line dropped by COMPACT_SKIP_LINES really is dropped —
+    // asserted, not left to fail incidentally on the character budget.
+    expect(compact).not.toContain('You edit a structured diagram document');
   });
 
   it('keeps every rule whole, unwrapped onto one line', () => {

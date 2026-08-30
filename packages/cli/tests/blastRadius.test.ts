@@ -665,7 +665,25 @@ describe('spared — what a live alternative held up (§18.11)', () => {
     );
     // And it is NOT at risk: losing one replica alone was survivable, which is
     // the sentence §18.11 says the tool never got to say before.
+    //
+    // The empty at-risk placeholder must NOT be the graph claim here. "nothing
+    // depends on this synchronously" is false of this document — app depends
+    // on pg-primary synchronously, and is spared, not unattached — and it
+    // would sit one line above the spared row saying the opposite.
+    expect(valueOf(out.text, 'at risk (0)')).toBe(
+      'nothing left at risk — an alternative held, see spared below',
+    );
+    expect(out.text).not.toContain('nothing depends on this synchronously');
+  });
+
+  it('keeps the graph wording for a target genuinely nothing depends on', () => {
+    // The other half of the branch: web-client is an entry point, nothing
+    // points at it, and there is no alt set holding anything up. The original
+    // sentence is true here and is still printed verbatim.
+    const ctx = seeded(replicatedDoc());
+    const out = runBlastRadius('web-client', { dir: ctx.dir });
     expect(valueOf(out.text, 'at risk (0)')).toBe('nothing depends on this synchronously');
+    expect(out.text).not.toContain('spared');
   });
 
   it('is not a containment — a live replica and an async boundary are different claims', () => {
@@ -761,6 +779,34 @@ describe('spared — what a live alternative held up (§18.11)', () => {
       ],
     });
     const out = runBlastRadius('worker-a', { dir: ctx.dir });
+    // NAMING WHAT ACTUALLY WENT DOWN. az-a itself is untouched — one service
+    // inside it died — so a bare "lost az-a" would render the internal "this
+    // edge is down" state as an AZ outage, which is a bigger claim than the
+    // experiment made.
+    expect(valueOf(out.text, 'spared (1)')).toBe(
+      'app (alt "zone" — lost az-a (worker-a is down inside it), still up: az-b)',
+    );
+  });
+
+  it('names the boundary alone when the boundary itself was the target', () => {
+    const ctx = seeded({
+      ...emptyDoc(),
+      title: 'Zone edges',
+      nodes: [
+        node('app'),
+        node('worker-a', 'service', 'az-a'),
+        node('worker-b', 'service', 'az-b'),
+      ],
+      groups: [
+        { id: 'az-a', kind: 'cluster', label: 'az-a', parent: null },
+        { id: 'az-b', kind: 'cluster', label: 'az-b', parent: null },
+      ],
+      edges: [
+        { id: 'e1', from: 'app', to: 'az-a', alt: 'zone' },
+        { id: 'e2', from: 'app', to: 'az-b', alt: 'zone' },
+      ],
+    });
+    const out = runBlastRadius('az-a', { dir: ctx.dir });
     expect(valueOf(out.text, 'spared (1)')).toBe(
       'app (alt "zone" — lost az-a, still up: az-b)',
     );

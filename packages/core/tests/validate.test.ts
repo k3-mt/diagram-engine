@@ -357,6 +357,58 @@ describe('V18 — an alt tag needs at least two alternatives', () => {
   });
 });
 
+describe('V18 — a set whose members are not really alternatives', () => {
+  it('rejects a boundary and something inside it as two alternatives', () => {
+    // Two distinct ids, but not two alternatives: killing db-a takes out both
+    // edges (an edge into a boundary is down when a participating descendant
+    // is), and killing az-a takes db-a with it. The propagation is already
+    // correct on this document — what was missing is the sentence saying the
+    // tag bought nothing, which is V18's whole job.
+    const d = doc({
+      nodes: [node('app'), node('db-a', { parent: 'az-a' })],
+      groups: [group('az-a')],
+      edges: [
+        edge('e1', 'app', 'az-a', { alt: 'db' }),
+        edge('e2', 'app', 'db-a', { alt: 'db' }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'edge "e1" has alt "db" but "az-a" contains "db-a": one failure takes both out, so they are not alternatives',
+    ]);
+  });
+
+  it('accepts two boundaries that do not contain each other', () => {
+    const d = doc({
+      nodes: [node('app'), node('db-a', { parent: 'az-a' }), node('db-b', { parent: 'az-b' })],
+      groups: [group('az-a'), group('az-b')],
+      edges: [
+        edge('e1', 'app', 'az-a', { alt: 'zone' }),
+        edge('e2', 'app', 'az-b', { alt: 'zone' }),
+      ],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+
+  it('does not count a dashed edge towards "at least two"', () => {
+    // The analysis builds its alt sets from synchronous edges only, so a
+    // solid+dashed pair is a set of ONE there — the solid edge behaves as a
+    // hard dependency. Counting the dashed edge here would let V18 and the
+    // propagation disagree about what a set is, and would cost the agent a
+    // second round trip: fix V19, re-validate, only then be told about V18.
+    const d = doc({
+      nodes: [node('app'), node('pg-primary'), node('kafka')],
+      edges: [
+        edge('e1', 'app', 'pg-primary', { alt: 'db' }),
+        edge('e2', 'app', 'kafka', { alt: 'db', style: 'dashed' }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'edge "e1" has alt "db" but it is the only edge from "app" with that tag: alternatives need at least two',
+      'edge "e2" is dashed and carries alt "db": asynchronous edges already contain failure; drop one',
+    ]);
+  });
+});
+
 describe('V19 — alt requires a synchronous edge', () => {
   it('flags a dashed edge carrying alt', () => {
     const d = doc({
@@ -366,7 +418,13 @@ describe('V19 — alt requires a synchronous edge', () => {
         edge('e10', 'orders', 'pg-primary', { alt: 'db' }),
       ],
     });
+    // BOTH corrections in one validate. A dashed edge is not a member of the
+    // set the analysis builds (it filters on `sync`), so once V19 has said the
+    // tag does not belong on e9, what remains is a lone alt on e10 — which is
+    // exactly the meaningless tag V18 exists to catch. Reporting only V19 sent
+    // the agent back for a second round trip to be told the rest.
     expect(errorsOf(d)).toEqual([
+      'edge "e10" has alt "db" but it is the only edge from "orders" with that tag: alternatives need at least two',
       'edge "e9" is dashed and carries alt "db": asynchronous edges already contain failure; drop one',
     ]);
   });

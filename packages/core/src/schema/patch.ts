@@ -18,7 +18,32 @@ import { DirectionSchema, GEdgeSchema, GGroupSchema, GNodeSchema } from './graph
 // `changes` is left untouched.
 export const GNodeChangesSchema = GNodeSchema.omit({ id: true }).partial();
 export const GGroupChangesSchema = GGroupSchema.omit({ id: true }).partial();
-export const GEdgeChangesSchema = GEdgeSchema.omit({ id: true }).partial();
+/**
+ * Edge changes, with one addition to the derived shape: the OPTIONAL STRING
+ * properties also accept `null`, meaning REMOVE THIS PROPERTY (apply.ts).
+ *
+ * Without it there is no way to take an optional string back off an edge over
+ * the wire. `{"alt": ""}` fails min(1), `{"alt": null}` failed the type, and
+ * an omitted key means "leave untouched", so the only route was removeEdge +
+ * addEdge — which rule 3 forbids and which loses the edge id (G3). §18.11 is
+ * explicit that the correction has to be as cheap as the original claim or it
+ * will not get made, and `alt` is the first optional property whose ABSENCE is
+ * enforced by an invariant (V18: a lone alt is a hard error), so "we dropped
+ * the replica" was an ordinary edit the patch model could not express.
+ *
+ * `label` and `cardinality` get the same escape for the same reason — V13
+ * already says "drop the cardinality" — and no GEdge property stores null, so
+ * null is unambiguous here. Node and group changes are deliberately untouched:
+ * `parent: null` already MEANS top level there, and overloading it to mean
+ * removal would make the one field where null is data unwritable.
+ */
+export const GEdgeChangesSchema = GEdgeSchema.omit({ id: true })
+  .partial()
+  .extend({
+    label: GEdgeSchema.shape.label.unwrap().nullable().optional(),
+    cardinality: GEdgeSchema.shape.cardinality.unwrap().nullable().optional(),
+    alt: GEdgeSchema.shape.alt.unwrap().nullable().optional(),
+  });
 
 export const AddNodeOpSchema = z.object({
   op: z.literal('addNode'),

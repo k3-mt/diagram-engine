@@ -18,9 +18,11 @@ import {
   ASSUMPTION_NO_REDUNDANCY,
   ASSUMPTION_PARTIAL_REDUNDANCY,
   ASSUMPTION_SYNC_ONLY,
+  articulationIndexOf,
   backlog,
   blastRadius,
   blastRadiusMulti,
+  blastRadiusOn,
   hasAlternatives,
   runtimeGraph,
 } from '../src/analysis/index.js';
@@ -655,10 +657,19 @@ describe('§18.11: a multi-target result says what it cannot know', () => {
     expect(r.assumptions).toContain(ASSUMPTION_SYNC_ONLY);
   });
 
-  it('does not add it to a one-target result, which is the single-target answer', () => {
+  it('adds it to a one-target result too, which is still the single-target answer', () => {
+    // It USED to be multi-only, on the reading that the union is the shape
+    // §18.7 warns about. But the over-report belongs to the document's
+    // untagged edges, not to the combination, so it is as true of one target
+    // as of five — and multi-only left the viewer silent on a single click
+    // while the CLI caveated every prediction: two surfaces, two honesty
+    // claims, one document. It comes from core either way, so a one-id
+    // combined result is still exactly the single-target answer.
     const r = blastRadiusMulti(d(), ['pg-primary']);
-    expect(r.redundancyCaveat).toBeNull();
+    expect(r.redundancyCaveat).toBe(ASSUMPTION_NO_REDUNDANCY);
     expect(r.assumptions).toEqual(blastRadius(d(), 'pg-primary').assumptions);
+    expect(r.assumptions).toContain(ASSUMPTION_NO_REDUNDANCY);
+    expect(r.assumptions.filter((a) => a === ASSUMPTION_NO_REDUNDANCY)).toHaveLength(1);
   });
 
   it('still never says "will fail", in any field', () => {
@@ -1057,9 +1068,24 @@ describe('§18.11: the caveat narrows once the document states redundancy', () =
     expect(hasAlternatives(runtimeGraph(bare()))).toBe(false);
   });
 
-  it('adds no caveat at all to a one-target result, either way', () => {
-    expect(blastRadiusMulti(tagged(), ['pg-primary']).redundancyCaveat).toBeNull();
-    expect(blastRadiusMulti(bare(), ['pg-primary']).redundancyCaveat).toBeNull();
+  it('caveats a one-target result too, with the wording that fits the document', () => {
+    expect(blastRadiusMulti(tagged(), ['pg-primary']).redundancyCaveat).toBe(
+      ASSUMPTION_PARTIAL_REDUNDANCY,
+    );
+    expect(blastRadiusMulti(bare(), ['pg-primary']).redundancyCaveat).toBe(
+      ASSUMPTION_NO_REDUNDANCY,
+    );
+    // and the single-target entry point says the same thing, so no surface
+    // has to decide which sentence is true of the document.
+    expect(blastRadius(tagged(), 'pg-primary').assumptions).toContain(
+      ASSUMPTION_PARTIAL_REDUNDANCY,
+    );
+    expect(blastRadius(bare(), 'pg-primary').assumptions).toContain(ASSUMPTION_NO_REDUNDANCY);
+  });
+
+  it('says nothing about redundancy when no target resolved — no prediction to caveat', () => {
+    expect(blastRadiusMulti(bare(), []).redundancyCaveat).toBeNull();
+    expect(blastRadiusMulti(bare(), []).assumptions).not.toContain(ASSUMPTION_NO_REDUNDANCY);
   });
 
   it('still never says "will fail" (C3 is untouched by any of this)', () => {
@@ -1100,8 +1126,150 @@ describe('§18.11: the fixpoint stays linear inside the backlog', () => {
     // easy question: killing the deepest PAIR exhausts s65's set, which
     // exhausts s64's, all the way to the top (196 of the 198 nodes), while
     // killing one of the pair costs nothing at all.
-    expect(blastRadiusMulti(d, ['a65', 'b65']).atRisk).toHaveLength(196);
+    const cascade = blastRadiusMulti(d, ['a65', 'b65']);
+    expect(cascade.atRisk).toHaveLength(196);
     expect(blastRadius(d, 'a65').atRisk).toEqual([]);
+    // THE WAVES, not just the clock. The cascade is one alt set per wave all
+    // the way up, so the deepest at-risk node sits ~3 waves per rung above the
+    // kill; asserting the depth pins the propagation SHAPE, which a wall-clock
+    // budget on a fast machine would not. A re-scan-until-stable fixpoint
+    // would produce the same set and do |V| times the work — and would show up
+    // here first as changed depths, not as a slower test.
+    expect(Math.max(...cascade.atRisk.map((a) => a.depth))).toBeGreaterThan(100);
     expect(elapsed).toBeLessThan(500);
+  });
+
+  it('does not re-run the articulation sweep for every prediction on one projection', () => {
+    // articulationPoints() is the deliberately naive O(n·(n+e)) sweep §15.2
+    // asks for: the right trade once, the wrong one n+1 times. backlog() hands
+    // its index down, but a caller making many single-target predictions over
+    // one projection used to pay the whole sweep per call — ~10ms each at the
+    // 200-element cap, against a sub-millisecond budget, on a prediction an
+    // agent runs mid-turn. It is a pure function of the projection, so it is
+    // memoised against it.
+    const nodes = [];
+    const edges = [];
+    for (let i = 0; i < 200; i += 1) {
+      nodes.push(node(`n${i}`));
+      if (i > 0) edges.push(edge(`e${i}`, `n${i - 1}`, `n${i}`));
+    }
+    const g = runtimeGraph(doc({ nodes, edges }));
+    const started = Date.now();
+    for (const n of nodes) blastRadiusOn(g, n.id);
+    expect(Date.now() - started).toBeLessThan(500);
+    // and the answer is the same one the precomputed index gives
+    const index = articulationIndexOf(g);
+    expect(blastRadiusOn(g, 'n100')).toEqual(blastRadiusOn(g, 'n100', index));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `spared` — the absence §18.11 exists to name (analysis, not a surface).
+//
+// A spared node is the difference between this prediction and the one the same
+// document produced before the redundancy was stated, and it is invisible
+// unless it is named: it simply does not appear in `atRisk`, which is what a
+// WRONG answer looks like too. It was briefly computed in the CLI, which is
+// how the viewer came to have no spared row at all; it lives here now so both
+// surfaces read one derivation.
+// ---------------------------------------------------------------------------
+describe('§18.11: what an alternative held up is named, not left as an absence', () => {
+  const replicated = () =>
+    doc({
+      nodes: [
+        node('web'),
+        node('app'),
+        node('pg-primary', { type: 'database' }),
+        node('pg-replica', { type: 'database' }),
+        node('redis', { type: 'cache' }),
+      ],
+      edges: [
+        edge('e0', 'web', 'app'),
+        edge('e1', 'app', 'pg-primary', { alt: 'db' }),
+        edge('e2', 'app', 'pg-replica', { alt: 'db' }),
+        edge('e3', 'app', 'redis'),
+      ],
+    });
+
+  it('names the spared node, the tag, what fell and what still stands', () => {
+    const r = blastRadius(replicated(), 'pg-primary');
+    expect(r.atRisk).toEqual([]);
+    expect(r.spared).toEqual([
+      {
+        id: 'app',
+        label: 'app',
+        tag: 'db',
+        lost: [{ target: 'pg-primary', downInside: null }],
+        live: ['pg-replica'],
+      },
+    ]);
+  });
+
+  it('says nothing was spared when the dependency was hard', () => {
+    expect(blastRadius(replicated(), 'redis').spared).toEqual([]);
+    expect(blastRadius(replicated(), 'redis').atRisk.map((a) => a.id)).toEqual(['app', 'web']);
+  });
+
+  it('says nothing was spared once every alternative has fallen', () => {
+    // The source is at risk, and `via` already names the last one to fall.
+    const r = blastRadiusMulti(replicated(), ['pg-primary', 'pg-replica']);
+    expect(r.atRisk.map((a) => a.id)).toEqual(['app', 'web']);
+    expect(r.spared).toEqual([]);
+  });
+
+  it('is computed over the WHOLE selection, not merged from the per-target answers', () => {
+    // Each target on its own spares app; together they exhaust the set. A
+    // merge of the per-target answers would report app as both at risk and
+    // spared — the one contradiction this field could produce.
+    const r = blastRadiusMulti(replicated(), ['pg-primary', 'pg-replica']);
+    expect(r.per[0]!.spared.map((s) => s.id)).toEqual(['app']);
+    expect(r.per[1]!.spared.map((s) => s.id)).toEqual(['app']);
+    expect(r.spared).toEqual([]);
+    expect(r.atRisk.map((a) => a.id)).toContain('app');
+  });
+
+  it('a one-id combined result is still exactly the single-target answer', () => {
+    expect(blastRadiusMulti(replicated(), ['pg-primary']).spared).toEqual(
+      blastRadius(replicated(), 'pg-primary').spared,
+    );
+  });
+
+  it('names what actually went down inside an intact boundary', () => {
+    // The edge names the GROUP (§3.1). Killing one service inside az-a takes
+    // that path out, but az-a itself is untouched: "lost az-a" alone would
+    // render the internal edge-is-down state as an AZ outage.
+    const zones = doc({
+      nodes: [
+        node('app'),
+        node('worker-a', { parent: 'az-a' }),
+        node('worker-b', { parent: 'az-b' }),
+      ],
+      groups: [group('az-a'), group('az-b')],
+      edges: [
+        edge('e1', 'app', 'az-a', { alt: 'zone' }),
+        edge('e2', 'app', 'az-b', { alt: 'zone' }),
+      ],
+    });
+    expect(blastRadius(zones, 'worker-a').spared).toEqual([
+      {
+        id: 'app',
+        label: 'app',
+        tag: 'zone',
+        lost: [{ target: 'az-a', downInside: 'worker-a' }],
+        live: ['az-b'],
+      },
+    ]);
+    // and when the boundary itself is the target, it is the boundary that fell
+    expect(blastRadius(zones, 'az-a').spared[0]!.lost).toEqual([
+      { target: 'az-a', downInside: null },
+    ]);
+  });
+
+  it('is empty for every document that carries no alt', () => {
+    const bare = doc({
+      nodes: [node('app'), node('pg')],
+      edges: [edge('e1', 'app', 'pg')],
+    });
+    expect(blastRadius(bare, 'pg').spared).toEqual([]);
   });
 });
