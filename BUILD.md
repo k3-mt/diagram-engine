@@ -172,12 +172,14 @@ test runner, and record the translation in the ledger.
 
 ### Phase 2 — Rename
 
-Before rules tuning, not after. Phase 4 tunes `rules.md`, and `rules.md` names tools
-literally. Renaming afterwards invalidates the text you just spent a day tuning.
+P2-01 (rename Scribe to Topology) was DROPPED by human decision: the spec names the
+`diagram_*` tools throughout and R9 forbids editing it, so a rename would leave the spec
+and the code permanently disagreeing. The binary stays `diagram` and the document
+directory stays `.diagram/`. P2-02 remains, and still belongs before Part 16: plugin
+namespacing renames every tool, and rule 11 currently names one literally.
 
 | id | task | spec | verify |
 |---|---|---|---|
-| P2-01 | Rename Scribe to Topology: packages, the `diagram` binary to `topology`, `.diagram/` to `.topology/`, the seven tool names, every literal tool reference inside `rules.md`, init-written config | §16.5 | `npm test && ! grep -rniE "\\bscribe\\b\|\\.diagram/" packages/ scripts/` |
 | P2-02 | Rewrite `rules.md` to describe tools by role rather than by literal name, so plugin namespacing cannot break rule 11 | §16.5, §16.7 | `npm test -w packages/core -- rules` |
 
 ### Phase 3 — Test rig
@@ -228,10 +230,10 @@ There is no collector, no live status, no dashboard, no network.
 | P5-02 | Agent rule 13, never invent a binding. Add a binding-precision score to the eval harness | new | `./scripts/eval.sh --system b --runs 10` reports binding precision 1.0 |
 | P5-03 | Binding chips in the hover panel, each opening the referenced file. `small` | §8.6 | `npm test -w packages/viewer -- bindings` |
 | P5-04 | Analysis: the six signals as pure functions in `core/analysis/`, with fixtures | §15.2 | `npm test -w packages/core -- analysis` |
-| P5-05 | `topology analyse` CLI + MCP twin, terse output, A1–A5 enforced | §15.3, §15.4 | `npm test -w packages/cli -- analyse` |
+| P5-05 | `diagram analyse` CLI + MCP twin, terse output, A1–A5 enforced | §15.3, §15.4 | `npm test -w packages/cli -- analyse` |
 | P5-06 | Viewer analysis view mode | §15.5 | `npm test -w packages/viewer -- analysis-view` |
 | P5-07 | `blastRadius` and backlog ranking as pure functions, with fixtures | §18.3, §18.4 | `npm test -w packages/core -- blast` |
-| P5-08 | `topology blast-radius` CLI + MCP twin, C1–C5 enforced | §18.5, §18.7 | `npm test -w packages/cli -- blast` |
+| P5-08 | `diagram blast-radius` CLI + MCP twin, C1–C5 enforced | §18.5, §18.7 | `npm test -w packages/cli -- blast` |
 | P5-09 | Viewer blast-radius view mode | §18.7 | `npm test -w packages/viewer -- blast-view` |
 
 **P5-09 is the end of the build.** After it, Part 5's acceptance criteria are the

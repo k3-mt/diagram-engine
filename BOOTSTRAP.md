@@ -27,7 +27,7 @@ If any is missing or at a different path, stop and ask.
 | # | Rule |
 |---|---|
 | B1 | **Do not modify any existing source file.** Create new files only. You may append to `.gitignore` and to the `scripts` block of the root `package.json`. |
-| B2 | **Do not rename anything.** The Scribe-to-Topology rename is task P2-01. Use the repo's current names throughout. |
+| B2 | **Do not rename anything.** No rename task exists; the binary is `diagram` and the document directory is `.diagram/`. |
 | B3 | **Do not delete anything**, including code that looks dead or duplicated. Record it. |
 | B4 | **Do not mark a task `done` because the code looks right.** `done` requires that you constructed a verify command, ran it, and saw exit 0, this session. |
 | B5 | **Do not fix a guard violation.** It is a finding. Open task P0-02. |
@@ -80,8 +80,8 @@ you get to make silently. Do not add anything banned by R1.
 **2c. `CLAUDE.md`.** If one exists, append a section; do not replace it. It must say: read
 `BUILD.md` first, then restate ground rules R1–R9 compactly.
 
-**2d. `.gitignore`.** Append only what is missing: `logs/`, `.topology/history/`,
-`.topology/errors.txt`, `out.svg`.
+**2d. `.gitignore`.** Append only what is missing: `logs/`, `.diagram/history/`,
+`.diagram/errors.txt`, `out.svg`.
 
 ---
 
