@@ -8,6 +8,7 @@
 // about each. A checker that reports a citation as verified without opening
 // anything would pass a mocked test and fail the only job it has.
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -113,6 +114,10 @@ describe('isInside', () => {
   it('is not fooled by a sibling whose name starts with the root', () => {
     // The bug this exists to prevent: "/repo-backup".startsWith("/repo").
     expect(isInside('/repo', '/repo-backup/x')).toBe(false);
+    // ...nor by a child whose NAME starts with "..": that is a missing file,
+    // not an escape, and the two send a reader to very different places.
+    expect(isInside('/repo', '/repo/..%2fetc%2fpasswd')).toBe(true);
+    expect(isInside('/repo', '/etc/passwd')).toBe(false);
     expect(isInside('/repo', '/repo/x')).toBe(true);
     expect(isInside('/repo', '/repo')).toBe(true);
   });
@@ -228,11 +233,13 @@ describe('resolveBindings refuses to leave the root', () => {
     // The one no amount of string handling can see: the ref is a perfectly
     // ordinary repo-relative path and the file it names is real. Only
     // realpath tells you it is somebody else's file.
-    const { root } = fixtureTree();
-    expect(one(root, { source: 'repo', ref: 'links/escape.txt' })).toEqual({
-      status: 'escaped',
-      reason: 'symlink resolves outside the root',
-    });
+    const { root, outside } = fixtureTree();
+    const r = one(root, { source: 'repo', ref: 'links/escape.txt' });
+    expect(r.status).toBe('escaped');
+    expect(r.reason).toContain('symlink resolves outside the root');
+    // ...and says WHERE it went: an intentional monorepo link and a leak read
+    // identically without it.
+    expect(r.reason).toContain(path.join(outside, 'secret.txt'));
   });
 
   it('catches a path THROUGH a symlinked directory that leaves the tree', () => {
@@ -380,5 +387,156 @@ describe('the report as a whole', () => {
     );
     const keys = Object.keys(report.results[0] as object).sort();
     expect(keys).toEqual(['formatted', 'id', 'kind', 'reason', 'status']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lock 4 — the spelling on disk, not the spelling the kernel will accept
+// ---------------------------------------------------------------------------
+
+describe('a path that does not exist AS SPELLED is missing on every filesystem', () => {
+  // On macOS (APFS/HFS+) and on NTFS the kernel answers "yes, that exists" for
+  // the wrong case, and macOS's realpathSync hands back the spelling it was
+  // asked for rather than the stored one — so before lock 4 these two reported
+  // `ok` and exit 0 on a laptop and `missing` and exit 1 on Linux CI, from the
+  // same document and the same commit.
+
+  it('rejects a wrong-case ref', () => {
+    const { root } = fixtureTree();
+    const r = one(root, { source: 'repo', ref: 'Internal/PAY.GO', line: 3 });
+    expect(r.status).toBe('missing');
+    expect(r.reason).toContain('on disk it is "internal"');
+  });
+
+  it('rejects a wrong-case final segment', () => {
+    const { root } = fixtureTree();
+    const r = one(root, { source: 'repo', ref: 'internal/Pay.go' });
+    expect(r.status).toBe('missing');
+    expect(r.reason).toContain('on disk it is "pay.go"');
+  });
+
+  it('rejects an NFD spelling of a name stored NFC', () => {
+    const { root } = fixtureTree();
+    const nfc = 'café.go'; // café.go, single code point
+    const nfd = 'café.go'; // café.go, e + combining acute
+    fs.writeFileSync(path.join(root, nfc), 'x\n');
+    // Only meaningful where the filesystem actually stored what we wrote; a
+    // volume that normalises on write makes this a tautology, so assert
+    // against the listing rather than against the platform.
+    const stored = fs.readdirSync(root).find((e) => e.normalize('NFC') === nfc);
+    if (stored !== nfd) {
+      expect(one(root, { source: 'repo', ref: nfd }).status).toBe('missing');
+    }
+    expect(one(root, { source: 'repo', ref: stored ?? nfc }).status).toBe('ok');
+  });
+
+  it('still verifies the exact spelling', () => {
+    const { root } = fixtureTree();
+    expect(one(root, { source: 'repo', ref: 'internal/pay.go', line: 5 }).status).toBe('ok');
+  });
+
+  it('reads one directory once, however many bindings cite it', () => {
+    // The walk is cached per run: forty citations under one directory must not
+    // cost forty listings.
+    const { root } = fixtureTree();
+    const report = resolveBindings(
+      withBindings(
+        { source: 'repo', ref: 'internal/pay.go' },
+        { source: 'compose', ref: 'docker-compose.yml' },
+        { source: 'k8s-manifest', ref: 'services/orders/main.go' },
+      ),
+      root,
+    );
+    expect(report.counts.ok).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One bad file must not take the report with it
+// ---------------------------------------------------------------------------
+
+describe('a file that cannot be read', () => {
+  it('costs its own row and nothing else', () => {
+    const { root } = fixtureTree();
+    const locked = path.join(root, 'locked.txt');
+    fs.writeFileSync(locked, 'a\nb\n');
+    fs.chmodSync(locked, 0o000);
+    // Running as root, mode 000 is not enforced and there is nothing to test.
+    let readable = true;
+    try {
+      fs.readFileSync(locked);
+    } catch {
+      readable = false;
+    }
+    if (readable) return;
+
+    const report = resolveBindings(
+      withBindings(
+        { source: 'repo', ref: 'locked.txt', line: 1 },
+        { source: 'compose', ref: 'docker-compose.yml', line: 1 },
+      ),
+      root,
+    );
+    expect(report.results.map((r) => r.status)).toEqual(['unchecked', 'ok']);
+    expect(report.results[0]?.reason).toBe(
+      'file exists but could not be read — line not counted',
+    );
+    // Honest, and not a failure: we know the file is there and we did not count.
+    expect(report.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Not a file, not a directory
+// ---------------------------------------------------------------------------
+
+describe('a path that is neither a file nor a directory', () => {
+  it('is stale with or without a line', () => {
+    const { root } = fixtureTree();
+    const fifo = path.join(root, 'pipe.txt');
+    try {
+      execFileSync('mkfifo', [fifo]);
+    } catch {
+      return; // no mkfifo on this box; nothing to assert
+    }
+    expect(one(root, { source: 'repo', ref: 'pipe.txt' })).toEqual({
+      status: 'stale',
+      reason: 'not a regular file',
+    });
+    expect(one(root, { source: 'repo', ref: 'pipe.txt', line: 1 }).status).toBe('stale');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The source decides what a ref can name
+// ---------------------------------------------------------------------------
+
+describe('a repo ref is always a path, and so is always resolved', () => {
+  it('reports an invented repo ref as missing rather than unchecked', () => {
+    // The escape hatch this closes: `repo=schema.prisma` (prisma is not on the
+    // extension allowlist) and `repo=totally_invented_thing` were identifiers,
+    // came back `unchecked`, exited 0, and were excluded from the eval's
+    // precision while still counting as coverage. Effort scored, honesty not.
+    const { root } = fixtureTree();
+    for (const ref of ['schema.prisma', 'totally_invented_thing', '..%2fetc%2fpasswd']) {
+      expect(one(root, { source: 'repo', ref }).status, ref).toBe('missing');
+    }
+  });
+
+  it('still verifies a real extensionless repo file', () => {
+    const { root } = fixtureTree();
+    fs.writeFileSync(path.join(root, 'Makefile'), 'all:\n');
+    expect(one(root, { source: 'repo', ref: 'Makefile' }).status).toBe('ok');
+  });
+
+  it('does not read a scoped package name as a directory', () => {
+    // `@acme/utils` contains "/" and would otherwise be a path, so a correct
+    // scoped-package citation would be reported missing — the wrong "missing"
+    // the allowlist exists to avoid, in a second dress.
+    const { root } = fixtureTree();
+    expect(one(root, { source: 'package', ref: '@acme/utils' })).toEqual({
+      status: 'unchecked',
+      reason: 'identifier, not a path — nothing on disk to resolve',
+    });
   });
 });

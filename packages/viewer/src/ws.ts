@@ -36,7 +36,12 @@ export type WebSocketCtor = new (url: string) => WebSocketLike;
 
 /** A decoded server frame (spec §9). */
 export type ServerFrame =
-  | { type: 'doc'; doc: GraphDoc }
+  // `root` is the project root a repo-relative binding ref resolves against
+  // (§3.8) — the same root `diagram check --bindings` uses. It is what turns a
+  // binding chip in the hover panel into a link that opens the file (P5-03),
+  // and it is optional: an older server sends no root, and then a chip is text
+  // rather than a link that would point at a guess.
+  | { type: 'doc'; doc: GraphDoc; root: string | null }
   | { type: 'error'; errors: string[] };
 
 /**
@@ -54,10 +59,14 @@ export function parseServerMessage(data: unknown): ServerFrame | null {
     return null;
   }
   if (typeof msg !== 'object' || msg === null) return null;
-  const m = msg as { type?: unknown; doc?: unknown; errors?: unknown };
+  const m = msg as { type?: unknown; doc?: unknown; errors?: unknown; root?: unknown };
   if (m.type === 'doc') {
     if (typeof m.doc !== 'object' || m.doc === null) return null;
-    return { type: 'doc', doc: m.doc as GraphDoc };
+    return {
+      type: 'doc',
+      doc: m.doc as GraphDoc,
+      root: typeof m.root === 'string' && m.root !== '' ? m.root : null,
+    };
   }
   if (m.type === 'error') {
     if (!Array.isArray(m.errors)) return null;
@@ -86,7 +95,8 @@ export function defaultWsUrl(): string {
 export interface ViewerSocketOptions {
   /** Defaults to ws(s)://<location.host>. */
   url?: string;
-  onDoc: (doc: GraphDoc) => void;
+  /** `root` is the project root binding refs resolve against, or null. */
+  onDoc: (doc: GraphDoc, root: string | null) => void;
   onState?: (state: ConnectionState) => void;
   /**
    * A rejected graph.json (§9). Called with the validation messages; the
@@ -166,7 +176,7 @@ export function connectViewer(opts: ViewerSocketOptions): ViewerSocket {
       if (closed) return;
       const frame = parseServerMessage(ev.data);
       if (frame === null) return;
-      if (frame.type === 'doc') opts.onDoc(frame.doc);
+      if (frame.type === 'doc') opts.onDoc(frame.doc, frame.root);
       else opts.onError?.(frame.errors);
     };
     const dropped = (): void => {

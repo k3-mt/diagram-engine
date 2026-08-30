@@ -22,6 +22,7 @@
 // - Every newly connected client is sent the current doc immediately.
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type * as http from 'node:http';
 import chokidar from 'chokidar';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -35,6 +36,15 @@ import { diagramPaths, readDoc, type GraphDoc } from '../../../core/src/index.js
 export interface DocMessage {
   type: 'doc';
   doc: GraphDoc;
+  /**
+   * The project root a repo-relative binding ref resolves against (§3.8) — the
+   * parent of the .diagram directory, the same root `diagram check --bindings`
+   * defaults to. The viewer cannot work it out (it only ever sees the
+   * document), and without it a binding chip in the hover panel has no file to
+   * open (P5-03). It says where the served project IS; it is not a claim about
+   * a running system, and nothing is written back into the document (R5).
+   */
+  root: string;
 }
 
 /**
@@ -118,7 +128,7 @@ export function attachDocSync(server: http.Server, dir: string): DocSync {
       // Read-only directory or a race with another writer; the repaint below
       // is still the truth, so nothing here is worth failing for.
     }
-    deliver({ type: 'doc', doc: r.doc }, target);
+    deliver({ type: 'doc', doc: r.doc, root: path.dirname(path.resolve(p.dir)) }, target);
   };
 
   wss.on('connection', (ws) => publish(ws));

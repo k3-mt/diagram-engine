@@ -98,20 +98,26 @@ const BINDING_SOURCES = BindingSourceSchema.options.join(', ');
  * locks on a door that opens onto the developer's home directory is the right
  * number.
  */
-function refProblemError(problem: BindingRefProblem, id: string, ref: string): string {
+function refProblemError(
+  problem: BindingRefProblem,
+  kind: 'node' | 'edge',
+  id: string,
+  ref: string,
+): string {
   switch (problem) {
     case 'url':
+      // §3.8's wording, verbatim, and so not free to reword.
       return `binding ref on "${id}" must be a repo-relative path, not a URL`;
     case 'absolute':
-      return `binding ref "${ref}" on "${id}" must be repo-relative, not an absolute path`;
+      return `binding ref "${ref}" on ${kind} "${id}" must be repo-relative, not an absolute path`;
     case 'traversal':
-      return `binding ref "${ref}" on "${id}" escapes the repository root: cite a path inside the repo`;
+      return `binding ref "${ref}" on ${kind} "${id}" escapes the repository root: cite a path inside the repo`;
     case 'backslash':
-      return `binding ref "${ref}" on "${id}" must use "/" separators, not "\\"`;
+      return `binding ref "${ref}" on ${kind} "${id}" must use "/" separators, not "\\"`;
     case 'blank':
-      return `binding ref on "${id}" is blank: cite a path like "services/orders/" or an identifier like "orders-api"`;
+      return `binding ref on ${kind} "${id}" is blank: cite a path like "services/orders/" or an identifier like "orders-api"`;
     case 'control-char':
-      return `binding ref on "${id}" contains a control character: cite a plain repo-relative path`;
+      return `binding ref on ${kind} "${id}" contains a control character: cite a plain repo-relative path`;
   }
 }
 
@@ -142,7 +148,28 @@ function checkBindings(
     errors.push(`${kind} "${id}" has ${bindings.length} bindings, max ${max}`);
   }
 
-  const seenSource = new Set<string>();
+  // V15 — no duplicate source on one element, reported ONCE per offending
+  // source and with the real count. Pushed per surplus binding, three
+  // `compose` entries produced two identical lines both saying "two", and rule
+  // 11 asks the agent to read the errors and fix them in one retry — an error
+  // list that mis-describes the document it is asking to repair is how that
+  // retry goes wrong. V17 above already reports once, for the same reason.
+  const sourceCounts = new Map<string, number>();
+  for (const b of bindings) {
+    if (!BindingSourceSchema.safeParse(b.source).success) continue; // V14 owns it
+    sourceCounts.set(b.source, (sourceCounts.get(b.source) ?? 0) + 1);
+  }
+  for (const [source, n] of sourceCounts) {
+    if (n < 2) continue;
+    // §3.8's wording is the two-binding case, verbatim; a larger count says so
+    // rather than telling the agent there are two of three.
+    errors.push(
+      n === 2
+        ? `${kind} "${id}" has two "${source}" bindings: one entry per source`
+        : `${kind} "${id}" has ${n} "${source}" bindings: one entry per source`,
+    );
+  }
+
   for (const b of bindings) {
     // V14 — source is on the known list. The schema enum rejects this too, but
     // validate() also runs on documents built in memory and on the file
@@ -152,27 +179,23 @@ function checkBindings(
       errors.push(
         `binding source "${String(b.source)}" on ${kind} "${id}": use lowercase, one of ${BINDING_SOURCES}`,
       );
-    } else if (seenSource.has(b.source)) {
-      // V15 — no duplicate source on one element. A component read out of two
-      // files under one source is one binding with the directory, not two.
-      errors.push(`${kind} "${id}" has two "${b.source}" bindings: one entry per source`);
-    } else {
-      seenSource.add(b.source);
     }
 
     // V16 — ref is repo-relative, never a URL, and `line` only where a line
     // exists. The parse is the same one the checker uses (bindings/ref.ts), so
-    // what validates is exactly what the checker will try to open.
-    const parsed = parseBindingRef(b.ref);
+    // what validates is exactly what the checker will try to open — including
+    // the source, which is what decides whether `repo=schema.prisma` is a path
+    // (it is) or an identifier.
+    const parsed = parseBindingRef(b.ref, knownSource ? b.source : undefined);
     if (!parsed.ok) {
-      errors.push(refProblemError(parsed.problem, id, b.ref));
+      errors.push(refProblemError(parsed.problem, kind, id, b.ref));
       continue;
     }
     if (b.line !== undefined && !parsed.acceptsLine) {
       errors.push(
         parsed.kind === 'identifier'
-          ? `binding ref "${b.ref}" on "${id}" is an identifier, not a file, but carries line ${b.line}: drop the line`
-          : `binding ref "${b.ref}" on "${id}" names a directory but carries line ${b.line}: drop the line or cite the file`,
+          ? `binding ref "${b.ref}" on ${kind} "${id}" is an identifier, not a file, but carries line ${b.line}: drop the line`
+          : `binding ref "${b.ref}" on ${kind} "${id}" names a directory but carries line ${b.line}: drop the line or cite the file`,
       );
     }
   }

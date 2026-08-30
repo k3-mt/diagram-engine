@@ -96,9 +96,19 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
       // metric because nobody gave the scorer a root to resolve against (a
       // harness gap). Sending a reader to look at the agent for the second is
       // how an afternoon gets wasted.
-      const why = name.startsWith('binding.')
-        ? 'were scored without a --bindings-root, so their provenance was never resolved'
-        : 'had no denominator (an empty or wholly-invented document)';
+      // A binding metric is absent for TWO reasons, and they point in opposite
+      // directions: no root reached the scorer (a harness gap), or a root did
+      // and the run produced nothing to resolve — ratio(0,0) is null (an agent
+      // result). Blaming the harness for the second is the very inversion this
+      // comment warns about, so the cause is read off the runs themselves.
+      const scoredWithRoot =
+        name.startsWith('binding.') && runs.some((r) => r.bindings?.scored === true);
+      const why = !name.startsWith('binding.')
+        ? 'had no denominator (an empty or wholly-invented document)'
+        : scoredWithRoot
+          ? 'were scored against a root but produced no resolvable citation, so there was ' +
+            'nothing to compute over (see binding.coverage)'
+          : 'were scored without a --bindings-root, so their provenance was never resolved';
       flags.push(
         `${name}: scored in only ${s.n}/${attempted} run(s) — ${s.absent} of them ${why} ` +
           `and are excluded, so the mean describes a subset`,
@@ -158,6 +168,20 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
       flags.push(
         `binding.coverage mean ${bc.mean} — ${Math.round((1 - bc.mean) * 100)}% of produced nodes ` +
           'and edges carry no citation at all (acceptance G11 wants every one of them cited)',
+      );
+    }
+    // Precision is computed over the citations that COULD be resolved. An
+    // identifier ref (`terraform=aws_ecs_service.x`) is in neither side of it,
+    // which is right — but it also means a set cited mostly as identifiers is
+    // mostly unfalsifiable while reading as fully sourced. Nothing in the
+    // numbers says so on its own, so this does.
+    const producedTotal = bindingRuns.reduce((n, r) => n + (r.bindings.produced ?? 0), 0);
+    const uncheckedTotal = bindingRuns.reduce((n, r) => n + (r.bindings.unchecked ?? 0), 0);
+    if (producedTotal > 0 && uncheckedTotal / producedTotal > 0.5) {
+      flags.push(
+        `${uncheckedTotal}/${producedTotal} citations across the set are identifiers, which the ` +
+          'checker cannot resolve — precision is computed over the rest, so most of this set is ' +
+          'unfalsifiable. A path ref is the one that carries weight (rule 15).',
       );
     }
     if (hiddenFound > hiddenBound) {

@@ -787,6 +787,51 @@ describe('scorer — bindings (acceptance G10/G11)', () => {
     expect(scorer.scoreBindings(invented, root, ws).precision).toBe(0);
   });
 
+  it('does not give the alt-root credit for citing the rig\'s own scaffolding', () => {
+    // The alt-root is the workspace, and `diagram init` has already written
+    // CLAUDE.md, AGENTS.md, .mcp.json, the installed skill and — worst —
+    // .diagram/graph.json, the document the agent is itself writing, into it
+    // before the agent starts. Resolved against all of $ws, a citation of the
+    // agent's own output scored as verified provenance. The fallback exists
+    // for ONE reading ("system/..." spelled from one level up) and now gets
+    // exactly that.
+    const ws = tmpdir();
+    const root = path.join(ws, 'system');
+    fs.mkdirSync(path.join(root, 'web'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'web', 'nginx.conf'), 'server {\n}\n');
+    fs.mkdirSync(path.join(ws, '.diagram'), { recursive: true });
+    fs.writeFileSync(path.join(ws, '.diagram', 'graph.json'), '{}\n');
+    fs.writeFileSync(path.join(ws, 'CLAUDE.md'), '# rules\n');
+
+    const selfCiting = doc([
+      { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'repo', ref: 'system/web/nginx.conf', line: 1 }] },
+      { id: 'b', type: 'service', label: 'B', parent: null, bindings: [{ source: 'repo', ref: '.diagram/graph.json', line: 1 }] },
+      { id: 'c', type: 'service', label: 'C', parent: null, bindings: [{ source: 'repo', ref: 'CLAUDE.md', line: 1 }] },
+    ]);
+    const b = scorer.scoreBindings(selfCiting, root, ws);
+    // The honest one resolves; the two that name the harness do not.
+    expect(b.resolved).toBe(1);
+    expect(b.precision).toBe(0.3333);
+    expect(b.counts.viaAltRoot).toBe(1);
+    expect(b.counts.altRootRefused).toBe(2);
+  });
+
+  it('says out loud what share of the citations could not be resolved at all', () => {
+    // Precision is computed over the citations that could be resolved, which
+    // is right — and it means a document cited entirely as identifiers scores
+    // precision null while reading as fully sourced. identifierShare is what
+    // says so; aggregate.mjs flags a set where it dominates.
+    const root = tmpdir();
+    const idents = doc([
+      { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'terraform', ref: 'aws_ecs_service.a' }] },
+      { id: 'b', type: 'service', label: 'B', parent: null, bindings: [{ source: 'compose', ref: 'b-api' }] },
+    ]);
+    const b = scorer.scoreBindings(idents, root);
+    expect(b.precision).toBeNull();
+    expect(b.coverage).toBe(1);
+    expect(b.identifierShare).toBe(1);
+  });
+
   it('gold itself carries no bindings, so a gold-against-gold run is uncited, not wrong', () => {
     // The gold files predate P5-01 and are out of bounds for this milestone
     // (they are a signed-off M8 artefact). So coverage 0 against gold is the
@@ -867,6 +912,36 @@ describe('harness — aggregation', () => {
     expect(out.summary['direction.accuracy'].mean).toBe(1);
     expect(out.flags.join('\n')).toMatch(/direction\.accuracy: scored in only 1\/2 run/);
     expect(out.flags.join('\n')).toMatch(/node\.precision: scored in only 1\/2 run/);
+  });
+
+  it('does not blame the harness for a run that cited nothing', () => {
+    // binding.precision is null for two opposite reasons: no --bindings-root
+    // reached the scorer (a harness gap), or one did and the agent produced
+    // nothing to resolve — ratio(0,0) is null (an agent result). Hard-coding
+    // the first explanation sends the reader to the rig when the finding is
+    // about the agent, which is the inversion the code beside it warns about.
+    const cited = {
+      ...runOf(1, 1),
+      bindings: { scored: true, root: '/tmp/x', precision: null, coverage: 0, produced: 0, resolved: 0, unchecked: 0, failures: [] },
+    };
+    const out = aggregator.aggregate([cited, { ...cited, run: 2 }], 'b');
+    const flags = out.flags.join('\n');
+    expect(flags).toMatch(/produced no resolvable citation/);
+    expect(flags).not.toMatch(/scored without a --bindings-root/);
+    // ...and the real finding is still on screen.
+    expect(flags).toMatch(/binding\.coverage mean 0/);
+  });
+
+  it('flags a set whose citations are mostly unresolvable identifiers', () => {
+    // A document cited entirely as `terraform=aws_ecs_service.<anything>` is
+    // 100% unfalsifiable, exits 0, and reads as fully sourced. Precision is
+    // honest about it (null, never 1.0); nothing said so out loud until now.
+    const ident = {
+      ...runOf(1, 1),
+      bindings: { scored: true, precision: null, coverage: 1, produced: 8, resolved: 0, unchecked: 8, identifierShare: 1, failures: [] },
+    };
+    const out = aggregator.aggregate([ident, { ...ident, run: 2 }], 'b');
+    expect(out.flags.join('\n')).toMatch(/16\/16 citations across the set are identifiers/);
   });
 
   it('runs that never produced a score are recorded, not erased', () => {

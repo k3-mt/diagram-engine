@@ -547,6 +547,44 @@ describe('V15 — one entry per source', () => {
       'binding source "Compose" on node "orders": use lowercase, one of repo, compose, terraform, k8s-manifest, package',
     ]);
   });
+
+  it('flags a duplicate source on an EDGE, naming the edge', () => {
+    // V14–V17 run on edges through the same helper, but until now only V14 and
+    // V17 were pinned on that side; a change to the node path could have
+    // regressed the edge one with the suite still green.
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [
+        edge('e7', 'orders', 'pay', {
+          bindings: [
+            { source: 'repo', ref: 'internal/pay.go', line: 412 },
+            { source: 'repo', ref: 'services/orders/main.go', line: 12 },
+          ],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual(['edge "e7" has two "repo" bindings: one entry per source']);
+  });
+
+  it('says the real count, once, rather than "two" twice', () => {
+    // Pushed per surplus binding, three entries produced two identical lines
+    // both claiming there were two. Rule 11 asks the agent to read the errors
+    // and fix them in one retry.
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: [
+            { source: 'compose', ref: 'orders-api' },
+            { source: 'compose', ref: 'orders-worker' },
+            { source: 'compose', ref: 'orders-cron' },
+          ],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'node "orders" has 3 "compose" bindings: one entry per source',
+    ]);
+  });
 });
 
 describe('V16 — ref is repo-relative, never a URL', () => {
@@ -577,7 +615,7 @@ describe('V16 — ref is repo-relative, never a URL', () => {
       nodes: [node('orders', { bindings: [{ source: 'repo', ref: '/etc/passwd' }] })],
     });
     expect(errorsOf(d)).toContain(
-      'binding ref "/etc/passwd" on "orders" must be repo-relative, not an absolute path',
+      'binding ref "/etc/passwd" on node "orders" must be repo-relative, not an absolute path',
     );
   });
 
@@ -588,7 +626,7 @@ describe('V16 — ref is repo-relative, never a URL', () => {
       ],
     });
     expect(errorsOf(d)).toContain(
-      'binding ref "../../etc/passwd" on "orders" escapes the repository root: cite a path inside the repo',
+      'binding ref "../../etc/passwd" on node "orders" escapes the repository root: cite a path inside the repo',
     );
   });
 
@@ -604,9 +642,38 @@ describe('V16 — ref is repo-relative, never a URL', () => {
       ],
     });
     expect(errorsOf(d)).toEqual([
-      'binding ref "services/orders/" on "orders" names a directory but carries line 12: drop the line or cite the file',
-      'binding ref "orders-api" on "pay" is an identifier, not a file, but carries line 3: drop the line',
+      'binding ref "services/orders/" on node "orders" names a directory but carries line 12: drop the line or cite the file',
+      'binding ref "orders-api" on node "pay" is an identifier, not a file, but carries line 3: drop the line',
     ]);
+  });
+
+  it('names the ELEMENT KIND, because an edge id and a node id may be equal', () => {
+    // V2 dedupes ids across nodes ∪ groups only, so a node "orders" and an
+    // edge "orders" is a legal document; `on "orders"` alone does not say
+    // which one to open.
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [
+        edge('e7', 'orders', 'pay', {
+          bindings: [{ source: 'repo', ref: '/etc/passwd' }],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toContain(
+      'binding ref "/etc/passwd" on edge "e7" must be repo-relative, not an absolute path',
+    );
+  });
+
+  it('rejects a URL on an edge with the §3.8 message', () => {
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [
+        edge('e7', 'orders', 'pay', {
+          bindings: [{ source: 'repo', ref: 'https://github.com/org/repo/blob/main/a.go' }],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toContain('binding ref on "e7" must be a repo-relative path, not a URL');
   });
 
   it('accepts a directory, a file with a line, and an identifier', () => {

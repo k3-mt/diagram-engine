@@ -185,11 +185,16 @@ export const CONFIG_PATH = path.join(HERE, 'config.json');
 // feature exists to prevent, pointed at the agent instead of by it.
 //
 // So a binding is resolved against the staged system directory and, if that
-// misses, against the workspace above it. BOTH are inside the run's own temp
-// tree, so nothing outside what the agent could read becomes resolvable, and a
-// path that exists in neither is still missing. The split is reported
-// (`counts.viaAltRoot`) so a reader can see which spelling was used rather than
-// discovering it in a comment.
+// misses, against the workspace above it — but ONLY when the ref actually
+// spells the second reading, i.e. begins `system/`. The workspace also holds
+// everything `diagram init` writes (CLAUDE.md, AGENTS.md, .mcp.json, the
+// installed skill) and `.diagram/graph.json`, the agent's own output; without
+// that narrowing a citation of the rig's scaffolding resolved `ok` and counted
+// as verified provenance. BOTH roots are inside the run's own temp tree, so
+// nothing outside what the agent could read becomes resolvable, and a path that
+// exists in neither is still missing. The split is reported
+// (`counts.viaAltRoot`, `counts.altRootRefused`) so a reader can see which
+// spelling was used rather than discovering it in a comment.
 
 const RESOLVER_PATH = path.resolve(
   HERE,
@@ -314,15 +319,36 @@ export function scoreBindings(produced, root, altRoot = null) {
   const alternate =
     altRoot && altRoot !== root ? resolverModule.resolveBindings(doc, altRoot) : null;
 
+  // The alt-root is the workspace, and the workspace is not just a prefix
+  // above the staged system: `diagram init` has already written CLAUDE.md,
+  // AGENTS.md, .mcp.json, .claude/skills/... and .diagram/graph.json into it
+  // before the agent starts. Resolved against all of $ws, a binding citing the
+  // rig's own scaffolding — or `.diagram/graph.json`, the document the agent is
+  // itself writing — came back `ok` and entered the numerator of precision. A
+  // citation of the agent's own output scoring as verified provenance is this
+  // metric's own failure mode aimed at the metric.
+  //
+  // So the fallback is narrowed to the ONE reading it exists for: the agent
+  // stood in $ws and spelled the ref `system/web/nginx.conf`. A ref that does
+  // not begin with the staged directory's own name is not that reading, and
+  // does not get the second chance.
+  const altPrefix = `${path.basename(root)}/`;
+  const rawRefs = elements.flatMap((e) => e.bindings.map((b) => String(b.ref ?? '')));
   let viaAltRoot = 0;
+  let altRootRefused = 0;
   const results = primary.results.map((r, i) => {
     if (r.status === 'ok' || !alternate) return r;
     const other = alternate.results[i];
-    if (other && other.status === 'ok') {
-      viaAltRoot += 1;
-      return other;
+    if (!other || other.status !== 'ok') return r;
+    if (!(rawRefs[i] ?? '').trim().startsWith(altPrefix)) {
+      // It resolves somewhere in the workspace, but not as "the staged system,
+      // named from one level up". Kept as the primary verdict, and counted, so
+      // the refusal is visible rather than silent.
+      altRootRefused += 1;
+      return r;
     }
-    return r;
+    viaAltRoot += 1;
+    return other;
   });
   const counts = { ok: 0, unchecked: 0, missing: 0, stale: 0, escaped: 0, malformed: 0 };
   for (const r of results) counts[r.status] += 1;
@@ -348,7 +374,13 @@ export function scoreBindings(produced, root, altRoot = null) {
     // identifiers cannot hide behind a precision computed over three paths.
     precision: ratio(ok, ok + failed.length),
     unchecked,
-    counts: { ...report.counts, viaAltRoot },
+    // The share of citations that could not be resolved at all. Precision is
+    // computed over the rest, so a document cited entirely as identifiers
+    // scores precision `null` — never 1.0 — and this number is what says so
+    // out loud. aggregate.mjs flags a run where it dominates: an unfalsifiable
+    // citation must not read as a checked one just because nothing failed.
+    identifierShare: ratio(unchecked, produce),
+    counts: { ...report.counts, viaAltRoot, altRootRefused },
     // Every binding with what happened to it, in document order. Small (a
     // document carries tens, not thousands) and it is what makes a precision
     // number auditable by eye rather than taken on trust.

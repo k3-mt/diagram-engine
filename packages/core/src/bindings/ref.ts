@@ -11,7 +11,7 @@
 //
 // Nothing here imports node:fs, and nothing here knows a root directory.
 
-import type { GBinding, GraphDoc } from '../schema/graph.js';
+import type { BindingSource, GBinding, GraphDoc } from '../schema/graph.js';
 
 /**
  * Why a ref is not usable. Every one of these is decidable from the string,
@@ -126,9 +126,35 @@ export function isUrlLike(ref: string): boolean {
   return URL_SCHEME.test(ref) || BARE_SCHEME.test(ref) || SCP_LIKE.test(ref);
 }
 
-/** Path or identifier, by shape. See PATH_LIKE_EXTENSIONS for why shape. */
-export function bindingRefKind(ref: string): BindingRefKind {
+/** An npm scoped package: `@acme/utils`. Two segments, and not a path. */
+const SCOPED_PACKAGE = /^@[^/\s]+\/[^/\s]+$/;
+
+/**
+ * Path or identifier. Shape decides it (see PATH_LIKE_EXTENSIONS) — except
+ * where the SOURCE settles what the ref can possibly name, which is two cases:
+ *
+ *  1. `repo` NAMES SOMETHING IN THE REPOSITORY. There is nothing else a
+ *     repo-source ref could be: §3.8's examples are all paths, and "an
+ *     identifier inside a file" is what the other four sources are for. Left to
+ *     shape alone, `repo=schema.prisma` (prisma is not on the extension list)
+ *     and `repo=totally_invented_thing` came back `unchecked` and exited 0 —
+ *     an invented citation surviving the check that exists to catch it, and one
+ *     the eval then excluded from precision while still counting it as effort.
+ *     Under `repo` they are paths, they are resolved, and they are missing.
+ *  2. `package=@acme/utils` is ONE package name, not a directory. The "/" rule
+ *     would read it as a path and report every correct scoped-package citation
+ *     as missing — the wrong "missing" this file exists to avoid, the same
+ *     reason `terraform=aws_ecs_service.orders` is not a file called `.orders`.
+ *
+ * `compose`, `terraform` and `k8s-manifest` keep the pure shape rule: a service
+ * key, a resource address and a manifest resource name are all legitimate
+ * identifiers, and each of the three can equally name a file
+ * (`compose=docker-compose.yml`).
+ */
+export function bindingRefKind(ref: string, source?: BindingSource): BindingRefKind {
   const trimmed = ref.trim();
+  if (source === 'package' && SCOPED_PACKAGE.test(trimmed)) return 'identifier';
+  if (source === 'repo') return 'path';
   if (trimmed.includes('/')) return 'path';
   const dot = trimmed.lastIndexOf('.');
   if (dot > 0) {
@@ -145,7 +171,7 @@ export function bindingRefKind(ref: string): BindingRefKind {
  * NOT try to resolve as a file, or a problem — and a problem here means the
  * document should never have validated, because V16 rejects all six.
  */
-export function parseBindingRef(ref: string): ParsedBindingRef {
+export function parseBindingRef(ref: string, source?: BindingSource): ParsedBindingRef {
   const raw = ref;
   if (CONTROL_CHARS.test(ref)) return { ok: false, problem: 'control-char', raw };
   const trimmed = ref.trim();
@@ -156,7 +182,7 @@ export function parseBindingRef(ref: string): ParsedBindingRef {
     return { ok: false, problem: 'absolute', raw };
   }
 
-  if (bindingRefKind(trimmed) === 'identifier') {
+  if (bindingRefKind(trimmed, source) === 'identifier') {
     return { ok: true, kind: 'identifier', raw, normalised: trimmed, acceptsLine: false };
   }
 

@@ -138,6 +138,15 @@ export {
   type CardPlacement,
   type HoverCardProps,
 } from './render/HoverCard.js';
+// Binding chips (P5-03): from a citation to a link that opens the file. Pure,
+// and it shares core's ref parser, so a chip can never offer to open something
+// `diagram check --bindings` would refuse to resolve.
+export {
+  bindingHref,
+  editorSchemeFrom,
+  EDITOR_SCHEMES,
+  type EditorScheme,
+} from './render/bindingLink.js';
 export { ICON_SIZE, NODE_ICONS } from './render/icons.js';
 export { theme } from './render/theme.js';
 export {

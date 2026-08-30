@@ -128,3 +128,106 @@ No fix was made — `scripts/eval.sh` is not editable in M8.
 `bash scripts/eval.sh --system b --runs 20 --jobs 4` -> `direction.accuracy`
 mean **1.0000**, min 1, max 1, spread 0, over 20/20 scored runs, 0 failed,
 confined. **Bar (>= 0.95) met.** See `docs/m8-report.md`.
+
+### P5-01 / P5-02 / P5-03 — bindings, and the review that followed
+
+Three commits built the feature (`b9213d2` schema + V14–V17 + `### Bindings`,
+`498bbd0` `diagram check --bindings`, `fcbfab1` rule 15 + the eval's binding
+score); a fourth is the review fix below. Tests 1041 -> 1173, none weakened.
+`compactRules()` is **2985/3000** and the compact text is byte-identical to
+`fcbfab1` — the review added only to the `---` addendum, which the cap does not
+count. The three cuts that paid for rule 15 stand: the group-kind list (still
+shipped as the `kind` enum in `diagram_patch`'s generated inputSchema), rule
+11's second sentence (its premise was false three times in four), and the four
+product-to-category glosses on the element-type table.
+
+**Measured, n=20 on both systems, after the review fix** (`bash
+scripts/eval.sh --system a|b --runs 20 --jobs 4`, confined, 20/20 scored, 0
+failed):
+
+| | A | B |
+|---|---|---|
+| node / edge precision + recall | 1.0000 | 1.0000 |
+| `direction.accuracy` | 1.0000 | 1.0000 (G9 bar 0.95) |
+| `invention.count` | 0 | 0 (G13) |
+| `type.accuracy` | 1.0000 | 1.0000 |
+| `binding.precision` | 1.0000 (min 1) | 1.0000 (min 1) |
+| `binding.coverage` | 0.9977 | 1.0000 |
+| hidden edge found / right way / cited by a RESOLVING binding | 20/20/20 | 20/20/20 |
+
+**That last row is the milestone.** Before P5 the planted hidden edge was cited
+to its source file in 2 of 20 runs, because `GEdge` had nowhere to put a
+citation. It is now 20 of 20 on both systems. `type.accuracy` at 1.0000 on the
+held-out system says the gloss cut was free; it was the one trim resting on
+judgement rather than structure, and it is now measured rather than argued.
+
+**What the review changed, and why each one mattered:**
+
+- The checker inherited the filesystem's case- and Unicode-insensitivity.
+  `repo=Internal/PAY.GO:3` reported `ok` and exit 0 on macOS against a tree
+  holding only `internal/pay.go`, and `missing` and exit 1 on Linux — the same
+  document, the same commit, opposite verdicts, and `score.mjs` shares the
+  resolver, so a benchmark run on a Mac could score provenance that resolves
+  nothing on the machine the reference system lives on. `realpathSync` cannot
+  see it (macOS returns the spelling it was asked for), so resolution now walks
+  the directory listings and requires an exact byte match per segment.
+- `repo=schema.prisma`, `repo=totally_invented_thing` — anything under `repo`
+  with no `/` and an extension off the allowlist — were classed as identifiers,
+  reported `unchecked`, exited 0, and were excluded from the eval's precision
+  while still counting as coverage: effort scored, honesty not. A `repo` ref is
+  now always a path. The four other sources keep the shape rule, so
+  `terraform=aws_ecs_service.orders` is still correctly unresolvable rather
+  than falsely missing; `package=@acme/utils` is now one identifier rather than
+  a directory.
+- One unreadable file (mode 000, a root-owned artefact) threw an uncaught
+  EACCES out of the whole run: one permissions line, and none of the bindings
+  that resolved. It is now one `unchecked` row.
+- The eval's alt-root was the whole workspace, which `diagram init` has already
+  filled with CLAUDE.md, AGENTS.md, the installed skill and `.diagram/graph.json`
+  — the document the agent is itself writing. The fallback is now narrowed to
+  the one reading it exists for (a ref spelled `system/...` from one level up).
+  It cost nothing: **`viaAltRoot` 414/414 on A and 656/656 on B still resolved,
+  `altRootRefused` 0 on both.** The whole binding score still travels through
+  the alt-root, so that narrowing is the difference between a number about the
+  reference system and a number about the rig.
+- Smaller: `isInside` compared string prefixes, so a file literally named
+  `..%2fetc%2fpasswd` was reported as an escape rather than as missing; a FIFO
+  cited without a line was `ok`; V15 emitted one duplicate line per surplus
+  binding, each saying "two" whatever the count; V16's messages did not say
+  whether `"orders"` was a node or an edge (V2 does not dedupe edge ids against
+  node ids, so both can exist); the report printed the pre-realpath root; an
+  `escaped` row did not say where the symlink went; and the aggregator told the
+  reader a run had no `--bindings-root` when in fact it had one and cited
+  nothing.
+
+**Two things left undone, deliberately.**
+
+1. **V15 still allows one binding per source per element.** A node read out of
+   two files in the same repo cannot cite both, and the documented workaround
+   (cite the directory) cannot carry a line — so the rule pushes an agent from
+   `repo=internal/pay.go:412` towards `repo=internal/`, which is weaker
+   evidence exactly where the benchmark measures it. The reviewer proposed
+   keying uniqueness on `source + ref`. **That contradicts spec §3.8**, whose
+   invariant table says "No duplicate `source` on one element" with the error
+   message to match, and the spec is not editable in this milestone (R9). The
+   constraint is now written down in the rules addendum so an agent learns it
+   from the text rather than from a rejected patch. If it is to change, §3.8
+   changes first. Note the knock-on: with five sources, `MAX_NODE_BINDINGS = 8`
+   can only fire on a document V15 already rejects.
+2. **An identifier under `compose`, `terraform`, `k8s-manifest` or `package`
+   is still unfalsifiable.** That is inherent and correct — resolving them as
+   paths would report every correct terraform citation as missing — but it does
+   mean rule 15's "resolves every one" is a promise kept only for path refs.
+   The addendum now says so plainly, and `aggregate.mjs` flags a set where
+   unresolvable citations exceed half. Observed share: 125/539 on A, 76/732 on B.
+
+**P5-03 (the viewer half) was missing entirely** from the three build commits
+and is included here: binding chips in the hover panel, each a link that opens
+the file. `diagram serve` now sends the project root with the doc frame (the
+viewer cannot know it), the chip's href is built by
+`packages/viewer/src/render/bindingLink.ts` from core's own `parseBindingRef`,
+and an identifier chip carries no link because there is no file to open.
+`?editor=idea|cursor|file` switches the scheme; the default is vscode. The card
+keeps §8.6's `pointer-events: none` on itself and opts back in on the chips row
+alone, and the hover leave grew from one animation frame to 220 ms so the row
+can actually be reached.

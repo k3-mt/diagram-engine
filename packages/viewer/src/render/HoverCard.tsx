@@ -34,11 +34,13 @@ import type { CSSProperties } from 'react';
 import type { GNode } from '@diagram-engine/core';
 // Runtime import of the core SOURCE module, not the barrel (node:fs) — the
 // same route toSvg.ts and NodeBox.tsx take.
+import { formatBinding } from '../../../core/src/bindings/ref.js';
 import {
   COLLAPSED_META_KEY,
   collapsedGroupKind,
   isCollapsedGroupNode,
 } from '../../../core/src/view/derive.js';
+import { bindingHref, type EditorScheme } from './bindingLink.js';
 import { theme } from './theme.js';
 
 /** Card width, px. Fixed so the flip math needs no measurement. */
@@ -81,9 +83,11 @@ export function kindText(node: GNode): string {
 export function cardHeight(node: GNode): number {
   const metaCount = visibleMeta(node).length;
   const fieldCount = node.fields?.length ?? 0;
+  const bindingCount = node.bindings?.length ?? 0;
   let h = HEAD_H + PAD;
   if (node.note !== undefined) h += LINE_H + 2;
   if (metaCount > 0) h += SECTION_GAP + metaCount * LINE_H;
+  if (bindingCount > 0) h += SECTION_GAP + LINE_H + bindingCount * (LINE_H + 4);
   if (fieldCount > 0) h += SECTION_GAP + LINE_H + fieldCount * LINE_H;
   return h;
 }
@@ -136,6 +140,23 @@ export interface HoverCardProps {
   /** Container size, px — what the flip math is measured against. */
   vw: number;
   vh: number;
+  /**
+   * The project root a repo-relative ref resolves against (§3.8), as `diagram
+   * serve` reports it. Null when the viewer was not told one — then a binding
+   * chip is text, not a link, because the file it names cannot be located.
+   */
+  root?: string | null;
+  /** Which URL scheme a chip's link uses. See bindingLink.ts. */
+  editor?: EditorScheme;
+  /**
+   * Called when the pointer enters / leaves the bindings row, the one part of
+   * this card that takes the pointer at all. The parent uses it to hold the
+   * card open long enough for a chip to be clicked. NOT a mutation callback —
+   * §8.6's prohibition is on the card touching the document, and it still
+   * cannot.
+   */
+  onChipsEnter?: () => void;
+  onChipsLeave?: () => void;
 }
 
 const rowStyle: CSSProperties = {
@@ -164,11 +185,37 @@ const sectionStyle: CSSProperties = {
   borderTop: `1px solid ${theme.node.stroke}`,
 };
 
+const chipStyle: CSSProperties = {
+  display: 'inline-block',
+  maxWidth: '100%',
+  padding: '1px 6px',
+  marginTop: 4,
+  marginRight: 4,
+  borderRadius: 4,
+  border: `1px solid ${theme.node.stroke}`,
+  font: '400 10px ui-monospace, SFMono-Regular, Menlo, monospace',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  verticalAlign: 'top',
+};
+
 /** The panel. Renders nothing but markup — no effects, no state. */
-export function HoverCard({ node, x, y, vw, vh }: HoverCardProps): JSX.Element {
+export function HoverCard({
+  node,
+  x,
+  y,
+  vw,
+  vh,
+  root = null,
+  editor = 'vscode',
+  onChipsEnter,
+  onChipsLeave,
+}: HoverCardProps): JSX.Element {
   const place = placeCard(x, y, vw, vh, cardHeight(node));
   const meta = visibleMeta(node);
   const fields = node.fields ?? [];
+  const bindings = node.bindings ?? [];
 
   return (
     <div
@@ -214,6 +261,61 @@ export function HoverCard({ node, x, y, vw, vh }: HoverCardProps): JSX.Element {
               <span style={valueStyle}>{v}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Provenance (§3.8, P5-03). Present ONLY when the node cites something,
+          the same rule the get-table's optional sections follow: an
+          architecture-only document's card is unchanged to the pixel.
+
+          Each chip is the checker's own spelling of the binding — formatBinding
+          from core, so the string here, the string in `### Bindings` and the
+          string in a `diagram check --bindings` failure row are one string, and
+          a reader can match them by eye. A path chip is an anchor that opens
+          the file; an identifier chip is a span with no link, because there is
+          no file to open and offering one would be a claim the document does
+          not support. */}
+      {bindings.length === 0 ? null : (
+        <div
+          data-hover-bindings={bindings.length}
+          style={{
+            ...sectionStyle,
+            // The one part of the card that takes the pointer. The card itself
+            // stays pointer-events:none (§8.6) so it can never steal the hover
+            // it describes; a chip has to be clickable or "a link that opens
+            // that file" is not a link.
+            pointerEvents: 'auto',
+          }}
+          onMouseEnter={onChipsEnter}
+          onMouseLeave={onChipsLeave}
+        >
+          <div style={{ color: theme.text.secondary, lineHeight: `${LINE_H}px` }}>
+            {bindings.length === 1 ? 'read from' : `read from ${bindings.length} sources`}
+          </div>
+          {bindings.map((b, i) => {
+            const text = formatBinding(b);
+            const href = bindingHref(b, root, editor);
+            return href === null ? (
+              <span
+                key={`${text} ${i}`}
+                data-binding={text}
+                title={`${text} — nothing to open: this names something inside a file, not a file`}
+                style={{ ...chipStyle, color: theme.text.secondary }}
+              >
+                {text}
+              </span>
+            ) : (
+              <a
+                key={`${text} ${i}`}
+                data-binding={text}
+                href={href}
+                title={`open ${text}`}
+                style={{ ...chipStyle, color: theme.text.primary, textDecoration: 'none' }}
+              >
+                {text}
+              </a>
+            );
+          })}
         </div>
       )}
 

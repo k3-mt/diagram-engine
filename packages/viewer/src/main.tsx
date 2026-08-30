@@ -84,6 +84,7 @@ import {
 } from './layout/worker.js';
 import { overlayFor } from './render/AnalysisOverlay.js';
 import { Canvas } from './render/Canvas.js';
+import { editorSchemeFrom } from './render/bindingLink.js';
 import { HoverCard } from './render/HoverCard.js';
 import { OverlayButtons } from './render/OverlayButtons.js';
 import {
@@ -193,6 +194,18 @@ const hintStyle: CSSProperties = {
   font: '14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif',
 };
 
+/**
+ * How long the card survives the pointer leaving a node.
+ *
+ * It was one animation frame, which was enough for the box→text micro-leave
+ * Canvas emits and for nothing else. A card whose binding chips are LINKS
+ * (P5-03) has to be reachable: the card sits 14px off the cursor and follows
+ * it while the pointer is over the node, so the only moment it stands still is
+ * after the leave. Under 200ms it cannot be caught; far above it, a card
+ * lingers over a diagram nobody is pointing at.
+ */
+const HOVER_LEAVE_MS = 220;
+
 /** What the hover panel needs: which node, and where the cursor is. */
 interface HoverState {
   /** id of the node under the pointer, or null for "nothing hovered". */
@@ -227,32 +240,36 @@ function useHover(panning: boolean): {
   onHoverNode: (id: string | null) => void;
   onHoverMove: (e: ReactMouseEvent<Element>) => void;
   containerRef: (el: HTMLDivElement | null) => void;
+  holdCard: () => void;
+  releaseCard: () => void;
 } {
   const [hover, setHover] = useState<HoverState>({ id: null, x: 0, y: 0 });
   const elRef = useRef<HTMLDivElement | null>(null);
   const ptRef = useRef({ x: 0, y: 0 });
   const moveRaf = useRef<number | null>(null);
-  const leaveRaf = useRef<number | null>(null);
+  const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heldRef = useRef(false);
   const panningRef = useRef(panning);
   panningRef.current = panning;
 
   const cancelLeave = useCallback(() => {
-    if (leaveRaf.current === null) return;
-    cancelAnimationFrame(leaveRaf.current);
-    leaveRaf.current = null;
+    if (leaveTimer.current === null) return;
+    clearTimeout(leaveTimer.current);
+    leaveTimer.current = null;
   }, []);
 
   // A drag owns the pointer: drop the card the moment a pan starts.
   useEffect(() => {
     if (!panning) return;
     cancelLeave();
+    heldRef.current = false;
     setHover((h) => (h.id === null ? h : { ...h, id: null }));
   }, [panning, cancelLeave]);
 
   useEffect(
     () => () => {
       if (moveRaf.current !== null) cancelAnimationFrame(moveRaf.current);
-      if (leaveRaf.current !== null) cancelAnimationFrame(leaveRaf.current);
+      if (leaveTimer.current !== null) clearTimeout(leaveTimer.current);
     },
     [],
   );
@@ -261,10 +278,14 @@ function useHover(panning: boolean): {
     (id: string | null) => {
       if (id === null) {
         cancelLeave();
-        leaveRaf.current = requestAnimationFrame(() => {
-          leaveRaf.current = null;
+        // The pointer is HELD on a binding chip: the card is being used, not
+        // left behind, and dropping it now would cancel the click it is in the
+        // middle of receiving.
+        if (heldRef.current) return;
+        leaveTimer.current = setTimeout(() => {
+          leaveTimer.current = null;
           setHover((h) => (h.id === null ? h : { ...h, id: null }));
-        });
+        }, HOVER_LEAVE_MS);
         return;
       }
       if (panningRef.current) return; // rule 1: the drag wins
@@ -291,7 +312,21 @@ function useHover(panning: boolean): {
     elRef.current = el;
   }, []);
 
-  return { hover, onHoverNode, onHoverMove, containerRef };
+  // Rule 4: a card with a LINK in it has to be reachable. Entering the chips
+  // row pins the card open; leaving it drops the card at once, so nothing
+  // lingers over the diagram after the pointer has gone elsewhere.
+  const holdCard = useCallback(() => {
+    heldRef.current = true;
+    cancelLeave();
+  }, [cancelLeave]);
+
+  const releaseCard = useCallback(() => {
+    heldRef.current = false;
+    cancelLeave();
+    setHover((h) => (h.id === null ? h : { ...h, id: null }));
+  }, [cancelLeave]);
+
+  return { hover, onHoverNode, onHoverMove, containerRef, holdCard, releaseCard };
 }
 
 /** Friendly empty state — never a blank page (§1.2). */
@@ -312,6 +347,10 @@ function EmptyHint({ connected }: { connected: boolean }): JSX.Element {
 
 export function App(): JSX.Element {
   const [doc, setDoc] = useState<GraphDoc | null>(null);
+  // The project root a repo-relative binding ref resolves against (§3.8).
+  // Null until a server that reports one has sent a document — then a binding
+  // chip is plain text rather than a link pointing at a guessed path.
+  const [root, setRoot] = useState<string | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [connection, setConnection] = useState<ConnectionState>('reconnecting');
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
@@ -337,8 +376,11 @@ export function App(): JSX.Element {
     clientRef.current = client;
 
     const socket = connectViewer({
-      onDoc: (next) => {
+      onDoc: (next, nextRoot) => {
         setDoc(next);
+        // The project root binding chips resolve against (§3.8, P5-03). It
+        // arrives with the document because only the server knows it.
+        setRoot(nextRoot);
         setLastUpdate(Date.now());
         setDocError(null); // a good doc clears the amber
         // Laying it out is NOT done here: the drawn document depends on the
@@ -543,6 +585,13 @@ export function App(): JSX.Element {
   // Capability B. The hovered id is resolved against the CURRENT frame, so a
   // document update that removes the node simply closes the card.
   const hoverApi = useHover(view.panning);
+  // Which URL scheme a binding chip opens with: `?editor=idea` on the viewer
+  // URL, vscode by default. Read once — it is a property of how the page was
+  // opened, not of the document.
+  const editor = useMemo(
+    () => editorSchemeFrom(typeof location === 'undefined' ? '' : location.search),
+    [],
+  );
   const { hover } = hoverApi;
   const hoveredNode: GNode | null =
     frame === null || hover.id === null
@@ -635,6 +684,10 @@ export function App(): JSX.Element {
             y={hover.y}
             vw={vw}
             vh={vh}
+            root={root}
+            editor={editor}
+            onChipsEnter={hoverApi.holdCard}
+            onChipsLeave={hoverApi.releaseCard}
           />
         )}
         {/* The overlay's caption: HTML, fixed to the container, so it cannot

@@ -145,6 +145,17 @@ how rule 9 is kept.
 - \`diagram check --bindings\` resolves every path ref against the
   filesystem. See rule 15: a citation that does not resolve is worse
   than no citation, because it reads as evidence.
+- A \`repo\` ref is ALWAYS a path and is always resolved, whatever it
+  looks like: \`repo=schema.prisma\` is checked and reported missing if
+  it is not there. An identifier is only for the other four sources —
+  a compose service key, a terraform address, a manifest resource
+  name, a package name — and those are RECORDED BUT NOT VERIFIED. The
+  path ref is the one that carries weight; prefer it where you have it.
+- Two files under one source is not two bindings: cite the directory
+  they share, or the one file the claim actually came from. If you read
+  a component out of both a handler and a config file, the handler with
+  its line is the stronger citation.
+- To take bindings off, \`updateNode\`/\`updateEdge\` with \`"bindings": []\`.
 
 ### Redundancy (\`alt\`)
 

@@ -109,6 +109,31 @@ describe('bindingRefKind — shape decides, not source', () => {
     expect(bindingRefKind('orders-api')).toBe('identifier');
     expect(bindingRefKind('module.payments.aws_sqs_queue.jobs')).toBe('identifier');
   });
+
+  it('reads EVERY repo ref as a path, whatever its shape', () => {
+    // `repo` names something in the repository; there is nothing else it could
+    // name. Left to shape alone these were identifiers, and an identifier is
+    // reported `unchecked` and exits 0 — an invented citation surviving the
+    // check that exists to catch it.
+    expect(bindingRefKind('schema.prisma', 'repo')).toBe('path');
+    expect(bindingRefKind('totally_invented_thing', 'repo')).toBe('path');
+    expect(bindingRefKind('main.zig', 'repo')).toBe('path');
+    // ...and the four other sources are unchanged, so the terraform address
+    // above is still an identifier.
+    expect(bindingRefKind('aws_ecs_service.orders', 'terraform')).toBe('identifier');
+    expect(bindingRefKind('orders-api', 'compose')).toBe('identifier');
+    expect(bindingRefKind('orders-deployment', 'k8s-manifest')).toBe('identifier');
+  });
+
+  it('reads a scoped package name as one identifier, not a directory', () => {
+    expect(bindingRefKind('@acme/utils', 'package')).toBe('identifier');
+    expect(bindingRefKind('lodash', 'package')).toBe('identifier');
+    // A real path under `package` is still a path.
+    expect(bindingRefKind('go.mod', 'package')).toBe('path');
+    expect(bindingRefKind('services/orders/package.json', 'package')).toBe('path');
+    // ...and the "/" rule still stands for every other source.
+    expect(bindingRefKind('@acme/utils', 'compose')).toBe('path');
+  });
 });
 
 describe('isUrlLike — a scheme is a scheme', () => {

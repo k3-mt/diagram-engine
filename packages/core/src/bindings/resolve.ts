@@ -67,7 +67,7 @@ export interface ResolvedBinding {
 
 /** The whole answer. `ok` is the exit-code question: nothing failed. */
 export interface BindingReport {
-  /** The root every path ref was resolved against (absolute, as given). */
+  /** The root every path ref was resolved against (absolute, symlinks collapsed). */
   root: string;
   /** How many nodes and edges carry at least one binding. */
   elements: number;
@@ -142,7 +142,17 @@ export function countLines(buf: Buffer): number {
 export function isInside(root: string, child: string): boolean {
   if (child === root) return true;
   const rel = path.relative(root, child);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  // Segments, not a string prefix, on BOTH sides: `/repo-backup` starts with
+  // `/repo`, and a child named `..%2fetc` makes `rel` start with ".." while
+  // being an ordinary file inside the root. The first mistake reads a
+  // directory nobody pointed at; the second calls a missing file an escape and
+  // sends the reader hunting a security problem that is not there.
+  return (
+    rel !== '' &&
+    rel !== '..' &&
+    !rel.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(rel)
+  );
 }
 
 /** `stat` without throwing: undefined when the path is not there. */
@@ -152,6 +162,69 @@ function statOrUndefined(p: string): fs.Stats | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A per-run cache of directory listings, so a document citing forty files
+ * under one directory reads that directory once. Keyed by absolute path;
+ * `null` means the listing could not be read.
+ */
+export type DirCache = Map<string, readonly string[] | null>;
+
+function readdirCached(dir: string, cache: DirCache | undefined): readonly string[] | null {
+  const hit = cache?.get(dir);
+  if (hit !== undefined) return hit;
+  let entries: readonly string[] | null;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    entries = null;
+  }
+  cache?.set(dir, entries);
+  return entries;
+}
+
+/**
+ * Does every segment of the ref match the name on disk EXACTLY, byte for byte?
+ *
+ * The answer has to come from a directory listing, not from `stat`, because on
+ * a case-insensitive or normalisation-insensitive filesystem — every default
+ * macOS volume, and NTFS — the kernel answers "yes, that file exists" for a
+ * spelling that is not on disk, and `fs.realpathSync` on macOS hands back the
+ * spelling it was ASKED for rather than the stored one, so it cannot see the
+ * difference either. Without this walk `repo=Internal/PAY.GO:3` reports `ok`
+ * on a laptop and `missing` on a Linux CI box, from the same document and the
+ * same commit. A checker whose verdict depends on the developer's filesystem
+ * is exactly the "reads as evidence" failure §3.8 exists to prevent — and the
+ * eval, which calls this same resolver, would score such a citation as honest
+ * provenance.
+ *
+ * Unicode is the same defect in a second dress and the same fix: a name stored
+ * NFC and cited NFD compares unequal here, as it must, because it will not
+ * resolve on the machine the reference system lives on.
+ *
+ * Returns the on-disk spelling of the first segment that differs, or undefined
+ * when every segment matches (or when a listing could not be read, in which
+ * case the earlier `stat` stands rather than a guess being invented).
+ */
+function firstMisspelledSegment(
+  realRoot: string,
+  segments: readonly string[],
+  cache: DirCache | undefined,
+): { cited: string; onDisk: string } | undefined {
+  let dir = realRoot;
+  for (const seg of segments) {
+    const entries = readdirCached(dir, cache);
+    if (entries === null) return undefined; // unreadable: do not invent a verdict
+    if (!entries.includes(seg)) {
+      const onDisk = entries.find(
+        (e) => e.toLowerCase() === seg.toLowerCase() || e.normalize('NFC') === seg.normalize('NFC'),
+      );
+      return { cited: seg, onDisk: onDisk ?? '' };
+    }
+    dir = path.join(dir, seg);
+  }
+  return undefined;
 }
 
 /**
@@ -175,8 +248,15 @@ function statOrUndefined(p: string): fs.Stats | undefined {
  *      symlink pointing out of the tree, which no amount of string handling
  *      can see. Two locks on a door that opens onto the developer's home
  *      directory is the right number.
+ *   4. The path is then re-spelled against the directory listings, because on
+ *      a case- or normalisation-insensitive filesystem every check above says
+ *      yes to a name that is not on disk (firstMisspelledSegment).
  */
-export function resolveBinding(bound: BoundBinding, realRoot: string): ResolvedBinding {
+export function resolveBinding(
+  bound: BoundBinding,
+  realRoot: string,
+  cache?: DirCache,
+): ResolvedBinding {
   const base = {
     kind: bound.kind,
     id: bound.id,
@@ -188,7 +268,7 @@ export function resolveBinding(bound: BoundBinding, realRoot: string): ResolvedB
     reason,
   });
 
-  const parsed = parseBindingRef(bound.binding.ref);
+  const parsed = parseBindingRef(bound.binding.ref, bound.binding.source);
   if (!parsed.ok) {
     return finish('malformed', MALFORMED_REASON[parsed.problem] ?? 'ref is not a usable path');
   }
@@ -220,7 +300,22 @@ export function resolveBinding(bound: BoundBinding, realRoot: string): ResolvedB
   // Lock 3 (symlinks). realpathSync has followed the whole chain, so a link
   // inside the tree that points out of it is caught here and nowhere else.
   if (!isInside(realRoot, real)) {
-    return finish('escaped', 'symlink resolves outside the root');
+    // Naming where it went is the difference between an intentional monorepo
+    // link and a leak, and the reader cannot tell those apart from the ref.
+    return finish('escaped', `symlink resolves outside the root (→ ${real})`);
+  }
+
+  // Lock 4 (spelling). The filesystem has said the path exists; that is not
+  // the same as the path the document cites existing. See
+  // firstMisspelledSegment.
+  const wrong = firstMisspelledSegment(realRoot, parsed.segments, cache);
+  if (wrong !== undefined) {
+    return finish(
+      'missing',
+      wrong.onDisk === ''
+        ? `no such path: "${wrong.cited}" is not there`
+        : `no such path: on disk it is "${wrong.onDisk}", not "${wrong.cited}"`,
+    );
   }
 
   const st = statOrUndefined(real);
@@ -234,6 +329,20 @@ export function resolveBinding(bound: BoundBinding, realRoot: string): ResolvedB
   }
 
   const line = bound.binding.line;
+
+  // A ref names a file or a directory. A FIFO, a socket or a device node is
+  // neither, and calling one a verified source citation is the same lie as
+  // citing a file that is not there. Checked ABOVE the `line === undefined`
+  // exit, or the same pipe reads `ok` without a line and `stale` with one.
+  if (!st.isDirectory() && !st.isFile()) {
+    return finish(
+      'stale',
+      line === undefined
+        ? 'not a regular file'
+        : `not a regular file, so line ${line} cites nothing`,
+    );
+  }
+
   if (line === undefined) return finish('ok', '');
 
   // V16 keeps `line` off a trailing-slash ref and off an identifier, so a line
@@ -243,9 +352,6 @@ export function resolveBinding(bound: BoundBinding, realRoot: string): ResolvedB
   if (st.isDirectory()) {
     return finish('stale', `is a directory, so line ${line} cites nothing`);
   }
-  if (!st.isFile()) {
-    return finish('stale', `not a regular file, so line ${line} cites nothing`);
-  }
   if (st.size > MAX_LINE_COUNT_BYTES) {
     return finish(
       'unchecked',
@@ -253,7 +359,19 @@ export function resolveBinding(bound: BoundBinding, realRoot: string): ResolvedB
     );
   }
 
-  const lines = countLines(fs.readFileSync(real));
+  // The one syscall left, and it is guarded like every other one in this file.
+  // A file that stats but cannot be opened (mode 000, a root-owned artefact, a
+  // vendored submodule) must cost its own row and nothing else: an uncaught
+  // EACCES here threw out of the whole run and printed one permissions line
+  // instead of the report — every binding that resolved perfectly lost with it.
+  // A check that cannot survive a chmod is a check that gets turned off.
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(real);
+  } catch {
+    return finish('unchecked', 'file exists but could not be read — line not counted');
+  }
+  const lines = countLines(buf);
   if (lines < line) {
     return finish('stale', `file has ${lines === 1 ? '1 line' : `${lines} lines`}`);
   }
@@ -285,10 +403,11 @@ export function resolveBindings(doc: GraphDoc, root: string): BindingReport {
     realRoot = undefined;
   }
 
+  const cache: DirCache = new Map();
   const results: ResolvedBinding[] =
     realRoot === undefined
       ? all.map((b) => {
-          const parsed = parseBindingRef(b.binding.ref);
+          const parsed = parseBindingRef(b.binding.ref, b.binding.source);
           const formatted = formatBinding(b.binding);
           if (parsed.ok && parsed.kind === 'identifier') {
             return {
@@ -307,7 +426,7 @@ export function resolveBindings(doc: GraphDoc, root: string): BindingReport {
             reason: 'the root itself does not exist',
           };
         })
-      : all.map((b) => resolveBinding(b, realRoot as string));
+      : all.map((b) => resolveBinding(b, realRoot as string, cache));
 
   const counts: Record<BindingStatus, number> = {
     ok: 0,
@@ -320,7 +439,11 @@ export function resolveBindings(doc: GraphDoc, root: string): BindingReport {
   for (const r of results) counts[r.status] += 1;
 
   return {
-    root: path.resolve(root),
+    // The root the containment decisions were ACTUALLY made against. When the
+    // root is reached through a symlink the two differ, and printing the
+    // pre-realpath spelling sends an operator debugging an `escaped` row to
+    // read the wrong directory.
+    root: realRoot ?? path.resolve(root),
     elements,
     bindings,
     results,

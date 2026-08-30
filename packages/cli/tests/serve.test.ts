@@ -160,6 +160,22 @@ describe('serve/watch', () => {
     expect(msg?.doc.title).toBe('on connect');
   });
 
+  it('sends the project root with the doc, so a binding chip has a file to open', () => {
+    // P5-03: a ref is repo-relative (§3.8) and only the server knows what it
+    // is relative to. The viewer cannot work it out from the document, and a
+    // chip with a guessed root opens the wrong file.
+    return (async () => {
+      const handle = await startServe();
+      writeRaw(handle.dir, JSON.stringify(docWith('rooted')));
+      const client = await connect(handle.port);
+      const msg = (await client.next(0, 3000)) as { type: string; root?: string } | undefined;
+      expect(msg?.type).toBe('doc');
+      // The parent of the .diagram directory — the same root
+      // `diagram check --bindings` defaults to.
+      expect(msg?.root).toBe(path.dirname(path.resolve(handle.dir)));
+    })();
+  });
+
   it('broadcasts a valid graph.json write to connected clients', async () => {
     const handle = await startServe();
     const client = await connect(handle.port);

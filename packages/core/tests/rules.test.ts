@@ -111,6 +111,12 @@ describe('compactRules', () => {
     // Every one of the eight type names still reaches the agent...
     for (const type of ['service', 'database', 'queue', 'cache', 'storage', 'client', 'external'])
       expect(compact, type).toContain(type);
+    // ...and the trimmed row is pinned AS A LINE. The loop above is a
+    // substring match, and rule 6 supplies "queue" ("queue consumption") while
+    // rule 10 supplies "cache" ("Remove the cache") — delete the row entirely
+    // and two of its four names would still be found. This assertion is what
+    // actually holds the cut in place.
+    expect(compact).toContain('\ndatabase, queue, cache, storage\n');
     // ...and so do the two glosses that are this project's convention rather
     // than general knowledge: who owns a service, and what a client is.
     expect(compact).toContain('service an application the user owns and deploys');
