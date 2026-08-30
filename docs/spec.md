@@ -2204,17 +2204,44 @@ it globally would silently link services that merely chose the same word.
 | V18 | An `alt` tag on a single edge from one source is meaningless | `edge "e7" has alt "db" but it is the only edge from "orders" with that tag: alternatives need at least two` |
 | V19 | `alt` requires a synchronous edge — an async path already stops propagation (§18.3) | `edge "e9" is dashed and carries alt "db": asynchronous edges already contain failure; drop one` |
 
+### How it actually gets expressed
+
+**This engine's input is a person describing their system in prose.** Redundancy therefore
+arrives the same way everything else does — in a sentence — and the design has to make that
+sentence sufficient. Nobody is going to hand-edit an `alt` tag.
+
+| What the user says | What the agent emits |
+|---|---|
+| "postgres has a read replica" | two nodes, both `orders → …` edges tagged `alt: "pg"` |
+| "we run three kafka brokers" | three nodes, consumers' edges sharing one `alt` |
+| "the api talks to whichever auth instance is up" | the auth instances' inbound edges sharing one `alt` |
+| "those two are replicas of each other" | `updateEdge` on the existing edges, adding `alt` |
+
+That last row matters as much as the others. Redundancy is usually **remembered late** —
+the diagram gets drawn, someone looks at a blast radius and says "that's not right, those
+are replicas". Under the patch model that is one `updateEdge` per edge on a document that
+already exists, with no re-drawing and no lost ids (G3). The correction has to be as cheap
+as the original claim, or it will not get made.
+
+**Granularity follows D-NODE.** The build plan already decided one node per deployable, so
+two replicas are two nodes and `alt` is the right shape. A user who says only "we run
+postgres" gets one node, and a blast radius on it correctly means losing the whole store;
+`alt` only enters once the instances are drawn separately, which happens exactly when the
+user cares about losing one of them.
+
 ### The agent rule
 
-> **14. RECORD REDUNDANCY WHEN YOU SEE IT.** Two edges to two replicas of the same thing are
-> alternatives, not two dependencies: tag both with the same `alt`. If you cannot tell from
-> the code whether a second endpoint is a replica or a separate system, leave `alt` off — a
-> wrongly-claimed redundancy hides a real single point of failure, which is the most
-> expensive mistake this document can make.
+> **14. REDUNDANCY IS SOMETHING YOU ARE TOLD, NOT SOMETHING YOU DEDUCE.** When the user says
+> two things are replicas, standbys or instances of the same component, tag their edges with
+> the same `alt`: they are alternatives, not two dependencies. When you are only reading a
+> codebase, do NOT infer it — two connection strings are not evidence of failover. Ask, or
+> leave `alt` off.
 
-That last clause is the whole risk. Over-reporting blast radius is conservative and
-survivable. **Under-reporting it because an agent guessed at redundancy is not**, and the
-asymmetry has to be in the rule text or the agent will optimise for a tidier diagram.
+The asymmetry behind that rule has to stay in the text or an agent will optimise for a
+tidier diagram. Over-reporting blast radius is conservative and survivable. **Under-reporting
+it because an agent guessed at redundancy hides a real single point of failure**, and the
+person reading the diagram has no way to tell the difference. A stated redundancy is a fact
+from the person who runs the system; an inferred one is a guess wearing the same clothes.
 
 ### What it unlocks
 
