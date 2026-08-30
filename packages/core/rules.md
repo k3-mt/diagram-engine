@@ -57,14 +57,14 @@ Every node and group needs "parent": a group id, or null for top level.
    accounts, clusters. Do not group things merely because they are
    related in topic.
 
-8. DO NOT INVENT. Four services described means four services drawn.
-   Do not add a load balancer, a CDN, or monitoring because it seems
-   architecturally sensible. Only what was described or what you
-   actually found in the codebase.
+8. DO NOT INVENT: A MENTION IS NOT A COMPONENT. A hostname in a
+   README or a comment is prose, not a box; text saying a box is
+   another team's or is not deployed here settles it — note it on the
+   node it fronts, do not draw it. A browser, app or device the
+   system serves is still a node, though no file deploys it.
 
-9. IF READING A CODEBASE, cite what you found. A node for every
-   service in docker-compose.yml; an edge for every dependency you
-   can actually see. Do not guess at connections.
+9. IF READING A CODEBASE, cite the file each node and edge came from.
+   Do not guess at connections.
 
 10. DELETION. "Remove the cache" means removeNode plus removeEdge for
     every edge touching it. Emit both in one patch.
