@@ -27,6 +27,7 @@ import { runPatchText } from '../src/commands/patch.js';
 import { runExport } from '../src/commands/export.js';
 import { runView, runViewCollapsed } from '../src/commands/view.js';
 import { runUndo } from '../src/commands/undo.js';
+import { runBlastRadius } from '../src/commands/blastRadius.js';
 import { callTool, TOOL_NAMES } from '../src/mcp/tools.js';
 
 const cleanups: Array<() => void> = [];
@@ -133,6 +134,37 @@ describe('the CLI and the MCP tools are one implementation', () => {
   it('reads the same table through `diagram get` and diagram_get', async () => {
     const ctx = await seeded();
     expect((await callTool('diagram_get', {}, ctx)).text).toBe(runGet({ dir: ctx.dir }).text);
+  });
+
+  it('surfaces §18.11 redundancy identically on both pairs of surfaces', async () => {
+    // One seam, two tools: `alt` has to reach the agent through diagram_get
+    // (the column it edits from) and through diagram_blast_radius (the node a
+    // live alternative held up). Both are one body per §4.2, and this asserts
+    // the strings rather than the call graph — sharing a function today is
+    // worth nothing if a later edit adds a second renderer.
+    const ctx = tempContext();
+    const ha: GraphPatch = {
+      ops: [
+        { op: 'addNode', node: { id: 'app', label: 'App', type: 'service', parent: null } },
+        { op: 'addNode', node: { id: 'pg-a', label: 'PG A', type: 'database', parent: null } },
+        { op: 'addNode', node: { id: 'pg-b', label: 'PG B', type: 'database', parent: null } },
+        { op: 'addEdge', edge: { id: 'a1', from: 'app', to: 'pg-a', alt: 'db' } },
+        { op: 'addEdge', edge: { id: 'a2', from: 'app', to: 'pg-b', alt: 'db' } },
+      ],
+      summary: 'two replicas',
+    };
+    expect(runPatchText(JSON.stringify(ha), 'test', { dir: ctx.dir }).stderr).toBe('');
+
+    const table = (await callTool('diagram_get', {}, ctx)).text;
+    expect(table).toBe(runGet({ dir: ctx.dir }).text);
+    expect(table).toContain('### Edges (id | from -> to | label | style | alt)');
+    expect(table).toContain('a1 | app -> pg-a | - | solid | db');
+
+    const radius = await callTool('diagram_blast_radius', { id: 'pg-a' }, ctx);
+    expect(radius.text).toBe(runBlastRadius('pg-a', { dir: ctx.dir }).text);
+    expect(radius.text).toContain('spared (1)     app (alt "db" — lost pg-a, still up: pg-b)');
+    // And the caveat that now fits this document, on both surfaces at once.
+    expect(radius.text).toContain('alternatives are honoured where `alt` is set');
   });
 
   it('analyses through `diagram analyse` and diagram_analyse identically', async () => {

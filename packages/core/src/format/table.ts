@@ -52,7 +52,8 @@ function alignRows(rows: string[][]): string[] {
  * Three sections appear only when the document uses them, so an
  * architecture-only diagram costs the agent exactly what it did before:
  *
- *   - the edges table grows a `cardinality` column when any edge carries one
+ *   - the edges table grows a `cardinality` column when any edge carries one,
+ *     and an `alt` column when any edge carries an alternative tag (§18.11)
  *   - ### Entities (id | fields) — one line per entity, columns comma-joined
  *   - ### Meta (id | key=value)  — only nodes that actually have meta
  */
@@ -74,14 +75,23 @@ export function toTable(doc: GraphDoc): string {
   lines.push('');
 
   const anyCardinality = doc.edges.some((e) => e.cardinality !== undefined);
+  // §18.11: the `alt` tag is the one thing on an edge that changes what a
+  // blast radius MEANS — two edges from one source sharing a tag are
+  // alternatives, not two hard dependencies — so it has to be readable in the
+  // same table the agent edits from. Conditional exactly like `cardinality`:
+  // a document that never says `alt` pays nothing, and a document that does
+  // shows the tag on every edge, `-` included, so "which edges are in the set"
+  // is one column to scan rather than a JSON export away.
+  const anyAlt = doc.edges.some((e) => e.alt !== undefined);
   lines.push(
-    `### Edges (id | from -> to | label | style${anyCardinality ? ' | cardinality' : ''})`,
+    `### Edges (id | from -> to | label | style${anyCardinality ? ' | cardinality' : ''}${anyAlt ? ' | alt' : ''})`,
   );
   lines.push(
     ...alignRows(
       doc.edges.map((e) => {
         const row = [e.id, `${e.from} -> ${e.to}`, e.label ?? '-', e.style ?? 'solid'];
         if (anyCardinality) row.push(e.cardinality ?? '-');
+        if (anyAlt) row.push(e.alt ?? '-');
         return row;
       }),
     ),

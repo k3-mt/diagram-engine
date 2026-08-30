@@ -32,6 +32,10 @@ import {
   runBlastRadius,
 } from '../src/commands/blastRadius.js';
 import { callTool, findTool, TOOL_NAMES } from '../src/mcp/tools.js';
+import {
+  ASSUMPTION_NO_REDUNDANCY,
+  ASSUMPTION_PARTIAL_REDUNDANCY,
+} from '../../core/src/analysis/index.js';
 
 const cleanups: Array<() => void> = [];
 const savedEnv = process.env['DIAGRAM_DIR'];
@@ -615,5 +619,208 @@ describe('C4: the hash tracks what the prediction was computed from', () => {
     expect(documentHash(renamed)).not.toBe(documentHash(d));
     const rewired = { ...d, edges: [...d.edges, edge('zz', 'analytics', 'redis-cache')] };
     expect(documentHash(rewired)).not.toBe(documentHash(d));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §18.11 — redundancy on the surface
+//
+// The maths is core's (tests/blast.test.ts pins the fixpoint). What is pinned
+// here is that the feature is VISIBLE: a node an alternative held up is named
+// on screen, it is not confused with a containment, and the assumptions line
+// says which of the two §18.11 caveats is true of the document in front of the
+// reader. Without the `spared` row the whole feature is an absence — the node
+// simply does not appear in `at risk`, which is exactly what a wrong answer
+// also looks like.
+// ---------------------------------------------------------------------------
+
+/** app depends on EITHER replica ("db"), and hard on redis. */
+function replicatedDoc(): GraphDoc {
+  return {
+    ...emptyDoc(),
+    title: 'HA',
+    nodes: [
+      node('web-client', 'client'),
+      node('app'),
+      node('pg-primary', 'database'),
+      node('pg-replica', 'database'),
+      node('redis-cache', 'cache'),
+    ],
+    edges: [
+      { id: 'e0', from: 'web-client', to: 'app' },
+      { id: 'e1', from: 'app', to: 'pg-primary', alt: 'db' },
+      { id: 'e2', from: 'app', to: 'pg-replica', alt: 'db' },
+      { id: 'e3', from: 'app', to: 'redis-cache' },
+    ],
+  };
+}
+
+describe('spared — what a live alternative held up (§18.11)', () => {
+  it('names the node, the tag, what fell and what is still up', () => {
+    const ctx = seeded(replicatedDoc());
+    const out = runBlastRadius('pg-primary', { dir: ctx.dir });
+    expect(out.ok).toBe(true);
+    expect(valueOf(out.text, 'spared (1)')).toBe(
+      'app (alt "db" — lost pg-primary, still up: pg-replica)',
+    );
+    // And it is NOT at risk: losing one replica alone was survivable, which is
+    // the sentence §18.11 says the tool never got to say before.
+    expect(valueOf(out.text, 'at risk (0)')).toBe('nothing depends on this synchronously');
+  });
+
+  it('is not a containment — a live replica and an async boundary are different claims', () => {
+    const ctx = seeded(replicatedDoc());
+    const out = runBlastRadius('pg-primary', { dir: ctx.dir });
+    expect(out.text).not.toContain('contained (');
+    // The headline still states C2 on the same result: the reader must be able
+    // to tell "spared by a replica" from "contained by a queue".
+    expect(out.text.split('\n')[0]).toContain(
+      '(synchronous only; dashed edges stop propagation)',
+    );
+  });
+
+  it('says nothing at all about sparing when the dependency was hard', () => {
+    const ctx = seeded(replicatedDoc());
+    const out = runBlastRadius('redis-cache', { dir: ctx.dir });
+    expect(valueOf(out.text, 'at risk (2)')).toBe('app, web-client');
+    expect(out.text).not.toContain('spared');
+  });
+
+  it('adds no line to a document that carries no alt at all', () => {
+    const ctx = seeded();
+    expect(runBlastRadius('postgres', { dir: ctx.dir }).text).not.toContain('spared');
+  });
+
+  it('reports nothing spared once EVERY alternative in the set has fallen', () => {
+    // The fixpoint case, from the surface: X → A and X → B are one alt set,
+    // and both depend on C. Killing C takes out the whole set, so X is at
+    // risk and there is nothing left holding it up to report.
+    const ctx = seeded({
+      ...emptyDoc(),
+      title: 'Fixpoint',
+      nodes: [node('x'), node('a'), node('b'), node('c', 'database')],
+      edges: [
+        { id: 'e1', from: 'x', to: 'a', alt: 'db' },
+        { id: 'e2', from: 'x', to: 'b', alt: 'db' },
+        { id: 'e3', from: 'a', to: 'c' },
+        { id: 'e4', from: 'b', to: 'c' },
+      ],
+    });
+    const out = runBlastRadius('c', { dir: ctx.dir });
+    expect(valueOf(out.text, 'at risk (3)')).toBe('a, b, x');
+    expect(out.text).not.toContain('spared');
+  });
+
+  it('counts a boundary outage as ONE fallen alternative, however wide it is', () => {
+    // Two zones, one replica each. Killing az-a kills pg-primary; the set still
+    // has pg-replica in az-b, so app is spared — and the boundary must not be
+    // read as two losses just because two vertices inside it went down.
+    const ctx = seeded({
+      ...emptyDoc(),
+      title: 'Two zones',
+      nodes: [
+        node('app'),
+        node('pg-primary', 'database', 'az-a'),
+        node('cache-a', 'cache', 'az-a'),
+        node('pg-replica', 'database', 'az-b'),
+      ],
+      groups: [
+        { id: 'az-a', kind: 'cluster', label: 'az-a', parent: null },
+        { id: 'az-b', kind: 'cluster', label: 'az-b', parent: null },
+      ],
+      edges: [
+        { id: 'e1', from: 'app', to: 'pg-primary', alt: 'db' },
+        { id: 'e2', from: 'app', to: 'pg-replica', alt: 'db' },
+      ],
+    });
+    const out = runBlastRadius('az-a', { dir: ctx.dir });
+    expect(valueOf(out.text, 'spared (1)')).toBe(
+      'app (alt "db" — lost pg-primary, still up: pg-replica)',
+    );
+  });
+
+  it('spares a node whose alternative points at a boundary that is still up', () => {
+    // The edge names the GROUP (§3.1 allows it). Killing a component inside
+    // az-a is killing part of what that edge depends on, so the alternative
+    // has fallen — and the one pointing at az-b has not.
+    const ctx = seeded({
+      ...emptyDoc(),
+      title: 'Zone edges',
+      nodes: [
+        node('app'),
+        node('worker-a', 'service', 'az-a'),
+        node('worker-b', 'service', 'az-b'),
+      ],
+      groups: [
+        { id: 'az-a', kind: 'cluster', label: 'az-a', parent: null },
+        { id: 'az-b', kind: 'cluster', label: 'az-b', parent: null },
+      ],
+      edges: [
+        { id: 'e1', from: 'app', to: 'az-a', alt: 'zone' },
+        { id: 'e2', from: 'app', to: 'az-b', alt: 'zone' },
+      ],
+    });
+    const out = runBlastRadius('worker-a', { dir: ctx.dir });
+    expect(valueOf(out.text, 'spared (1)')).toBe(
+      'app (alt "zone" — lost az-a, still up: az-b)',
+    );
+  });
+});
+
+describe('the §18.11 caveat on the assumptions line', () => {
+  it('stands verbatim over a document that states no redundancy', () => {
+    const ctx = seeded();
+    const assumptions = valueOf(runBlastRadius('postgres', { dir: ctx.dir }).text, 'assumptions') ?? '';
+    expect(assumptions).toContain(ASSUMPTION_NO_REDUNDANCY);
+    expect(assumptions).not.toContain(ASSUMPTION_PARTIAL_REDUNDANCY);
+  });
+
+  it('narrows to the untagged edges once the document says alt', () => {
+    const ctx = seeded(replicatedDoc());
+    const assumptions = valueOf(runBlastRadius('pg-primary', { dir: ctx.dir }).text, 'assumptions') ?? '';
+    expect(assumptions).toContain(ASSUMPTION_PARTIAL_REDUNDANCY);
+    // The old wording is now FALSE of this document — every edge is not a hard
+    // dependency any more — so it must not appear beside the new one.
+    expect(assumptions).not.toContain(ASSUMPTION_NO_REDUNDANCY);
+  });
+
+  it('is a property of the document, so the backlog carries the same one', () => {
+    const plain = seeded();
+    const ha = seeded(replicatedDoc());
+    expect(valueOf(runBlastRadius(undefined, { dir: plain.dir }).text, 'assumptions') ?? '').toContain(
+      ASSUMPTION_NO_REDUNDANCY,
+    );
+    expect(valueOf(runBlastRadius(undefined, { dir: ha.dir }).text, 'assumptions') ?? '').toContain(
+      ASSUMPTION_PARTIAL_REDUNDANCY,
+    );
+  });
+
+  it('never says redundancy is MODELLED — over-reporting stays the direction (C3)', () => {
+    const ctx = seeded(replicatedDoc());
+    const out = runBlastRadius('pg-primary', { dir: ctx.dir });
+    expect(out.text).toContain('over-reports');
+    expect(out.text.toLowerCase()).not.toContain('exact');
+    // C3 is untouched by any of it: still one "will fail", still the sentence
+    // that forbids it.
+    const saying = out.text.split('\n').filter((l) => l.includes('will fail'));
+    expect(saying).toHaveLength(1);
+  });
+
+  it('returns byte-identical text through diagram_blast_radius (§4.2)', async () => {
+    const ctx = seeded(replicatedDoc());
+    for (const id of ['pg-primary', 'redis-cache', undefined]) {
+      const tool = await callTool(
+        'diagram_blast_radius',
+        id === undefined ? {} : { id },
+        ctx,
+      );
+      const cli = runBlastRadius(id, { dir: ctx.dir });
+      expect(tool.text).toBe(cli.text);
+      expect(tool.ok).toBe(cli.ok);
+    }
+    // Not vacuous: the thing being compared is the new output.
+    expect((await callTool('diagram_blast_radius', { id: 'pg-primary' }, ctx)).text).toContain(
+      'spared (1)',
+    );
   });
 });

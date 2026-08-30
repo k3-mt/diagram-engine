@@ -70,7 +70,12 @@ import {
   backlog,
   blastAssumptions,
   blastRadiusOn,
+  documentRank,
+  hasAlternatives,
+  participatingAncestors,
   runtimeGraph,
+  ASSUMPTION_NO_REDUNDANCY,
+  ASSUMPTION_PARTIAL_REDUNDANCY,
   type BacklogEntry,
   type BlastRadius,
   type RuntimeGraph,
@@ -150,10 +155,39 @@ function canonical(value: unknown): string {
   return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`;
 }
 
+/**
+ * The §18.11 caveat that fits THIS document, in core's words (§18.11).
+ *
+ * C3's honesty sentences are unconditional — there is no flag to suppress the
+ * assumptions line and no document that gets a quieter one — so the redundancy
+ * caveat is printed on every prediction and on the backlog too. What is
+ * conditional is WHICH sentence is true of the document in front of the
+ * reader, and getting that wrong in either direction is the failure mode:
+ *
+ *   - no `alt` anywhere: the old caveat stands verbatim. Every edge is a hard
+ *     dependency and the model cannot say two things are replicas, so the
+ *     radius over-reports wherever redundancy exists and nothing on screen
+ *     would otherwise say so.
+ *   - `alt` used somewhere: that sentence is now false for the edges carrying
+ *     it. Printing it anyway would invite the reader to discount a number that
+ *     is partly exact. So the caveat NARROWS to what is still unknown — the
+ *     untagged edges — rather than disappearing, because rule 14 says
+ *     redundancy is told, not deduced: an untagged edge means nobody said,
+ *     not that nothing is redundant.
+ *
+ * Both sentences are core's constants, not this file's prose. The wording of
+ * an assumption is analysis' vocabulary (the same arrangement `articulation`
+ * and the blind-spot notes already use), so the CLI, the MCP twin and the
+ * viewer cannot end up caveating the same document three different ways.
+ */
+function redundancyNote(g: RuntimeGraph): string {
+  return hasAlternatives(g) ? ASSUMPTION_PARTIAL_REDUNDANCY : ASSUMPTION_NO_REDUNDANCY;
+}
+
 /** The two lines every result ends with: the honesty block (C3) and the hash (C4). */
-function footer(doc: GraphDoc, assumptions: string[]): string[] {
+function footer(doc: GraphDoc, assumptions: string[], g: RuntimeGraph): string[] {
   return [
-    row('assumptions', assumptions.join('; ')),
+    row('assumptions', [...assumptions, redundancyNote(g)].join('; ')),
     row('document', `${documentHash(doc)} — ${renderCounts(doc)}`),
   ];
 }
@@ -176,8 +210,83 @@ function scopeLine(doc: GraphDoc): string[] {
 // The prediction (§18.7)
 // ---------------------------------------------------------------------------
 
+/**
+ * One node that survived because an alternative was still up (§18.11), and the
+ * set that held it: the tag, what it lost, and what it still has.
+ */
+export type SparedNode = {
+  /** the source node the alt set belongs to — the thing that was spared */
+  id: string;
+  /** the `alt` tag naming the set */
+  tag: string;
+  /** the alternatives this experiment took out, in document order */
+  lost: string[];
+  /** the alternatives still standing — why `id` is not in `at risk` */
+  live: string[];
+};
+
+/**
+ * Everything an alt set saved, derived from the prediction core already made.
+ *
+ * WHY THIS IS COMPUTED HERE AND NOT IN ANALYSIS. `atRisk` is an assertion; a
+ * spared node is the ABSENCE of one, and absences are exactly what §18.3 says
+ * to state rather than leave as silence (it is the same argument that makes
+ * `contained` a named list). Core's answer already contains everything needed
+ * to name them — the down set and the alt-set index — so this reads that
+ * answer instead of re-deriving a second propagation, which could disagree
+ * with the first.
+ *
+ * "Down" is killed OR at risk, the same "unavailable" the fixpoint uses, plus
+ * the boundaries that contain a down vertex: an edge may name a group (§3.1),
+ * so an alternative inside a dead VPC is a fallen alternative however the edge
+ * was drawn. A source that is itself down is not spared — it is at risk, and
+ * saying both about one node would be the one contradiction this block could
+ * produce.
+ *
+ * A set every member of which fell is not here either: that source is at risk,
+ * and core's `via` already names the last alternative to fall.
+ */
+export function sparedByAlternatives(g: RuntimeGraph, r: BlastRadius): SparedNode[] {
+  if (g.altSets.size === 0) return [];
+
+  const down = new Set<string>([...r.killed, ...r.atRisk.map((a) => a.id)]);
+  const unavailable = new Set<string>(down);
+  for (const id of down) for (const gid of participatingAncestors(g, id)) unavailable.add(gid);
+
+  const spared: SparedNode[] = [];
+  for (const [source, byTag] of g.altSets) {
+    if (down.has(source)) continue; // at risk or killed: not spared by anything
+    for (const [tag, set] of byTag) {
+      const lost = set.filter((e) => unavailable.has(e.to));
+      if (lost.length === 0 || lost.length === set.length) continue;
+      spared.push({
+        id: source,
+        tag,
+        lost: lost.map((e) => e.to),
+        live: set.filter((e) => !unavailable.has(e.to)).map((e) => e.to),
+      });
+    }
+  }
+  // Nearest-to-the-document order, like every other list this command prints.
+  spared.sort((a, b) => documentRank(g, a.id) - documentRank(g, b.id));
+  return spared;
+}
+
+/** How many alternatives to name on each side before summarising the tail. */
+const MAX_ALTERNATIVES = 4;
+
+/** `orders (alt "db" — lost pg-primary, still up: pg-replica)` */
+function sparedValue(spared: readonly SparedNode[]): string {
+  return spared
+    .map(
+      (s) =>
+        `${s.id} (alt "${s.tag}" — lost ${truncatedList(s.lost, MAX_ALTERNATIVES)}, still up: ${truncatedList(s.live, MAX_ALTERNATIVES)})`,
+    )
+    .join('; ');
+}
+
 /** Render one prediction, exactly the shape of §18.7. */
-export function renderBlastRadius(r: BlastRadius, doc: GraphDoc): string {
+export function renderBlastRadius(r: BlastRadius, doc: GraphDoc, g: RuntimeGraph): string {
   const kills =
     r.targetKind === 'group'
       ? ` (boundary — kills ${plural(Math.max(r.killed.length - 1, 0), 'component')})`
@@ -192,6 +301,19 @@ export function renderBlastRadius(r: BlastRadius, doc: GraphDoc): string {
         : 'nothing depends on this synchronously',
     ),
   );
+  // §18.11: a node an alt set held up is the most interesting thing on the
+  // screen — it is the whole difference between this prediction and the one
+  // the same document produced before the redundancy was stated — and it is
+  // invisible unless it is named, because being spared is an absence in the
+  // at-risk list. It is deliberately NOT folded into `contained`: containment
+  // is the design's asynchronous-boundary claim (C2), and a live replica is a
+  // different claim about a different mechanism. Printed only when something
+  // was actually spared, so a document with no `alt` is byte-for-byte the
+  // output it produced before.
+  const spared = sparedByAlternatives(g, r);
+  if (spared.length > 0) {
+    lines.push(row(`spared (${spared.length})`, sparedValue(spared)));
+  }
   // C2: by name, with the node on the far side of the dashed edge that
   // contained it. Omitted only when there is genuinely nothing to name — the
   // headline has already said dashed edges were considered.
@@ -205,7 +327,7 @@ export function renderBlastRadius(r: BlastRadius, doc: GraphDoc): string {
   }
   lines.push(row('articulation', articulationValue(r)));
   lines.push(...scopeLine(doc));
-  lines.push(...footer(doc, r.assumptions));
+  lines.push(...footer(doc, r.assumptions, g));
   return lines.join('\n');
 }
 
@@ -279,7 +401,7 @@ export function renderBacklog(
           : 'no component has synchronous dependents: nothing here cascades',
       ),
       ...scopeLine(doc),
-      ...footer(doc, assumptions),
+      ...footer(doc, assumptions, g),
     ].join('\n');
   }
 
@@ -294,7 +416,7 @@ export function renderBacklog(
     ...backlogRows(ranked),
     ...omittedNote,
     ...scopeLine(doc),
-    ...footer(doc, assumptions),
+    ...footer(doc, assumptions, g),
     // §3.3: say what to do next. The backlog names the experiment; the radius
     // names what it puts at risk, and that is the thing you write down BEFORE
     // running anything (§18.1).
@@ -400,7 +522,7 @@ export function runBlastRadius(
 
   const radius = blastRadiusOn(g, id);
   if (radius.note !== null) return refuseTarget(radius, doc, g);
-  return ok(renderBlastRadius(radius, doc));
+  return ok(renderBlastRadius(radius, doc, g));
 }
 
 /** Print it and set the exit code. `process.exitCode`, never process.exit(). */

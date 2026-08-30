@@ -53,6 +53,57 @@ describe('toTable (spec §4.1)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// §18.11 — the alt column
+// ---------------------------------------------------------------------------
+
+describe('toTable — alt (spec §18.11)', () => {
+  /** app depends on EITHER replica; nothing else in the document says `alt`. */
+  const replicated = doc({
+    title: 'HA',
+    nodes: [node('app'), node('pg-primary'), node('pg-replica'), node('redis')],
+    edges: [
+      edge('e1', 'app', 'pg-primary', { alt: 'db' }),
+      edge('e2', 'app', 'pg-replica', { alt: 'db' }),
+      edge('e3', 'app', 'redis'),
+    ],
+  });
+
+  it('adds an alt column to the edges section only when used', () => {
+    const table = toTable(replicated);
+    expect(table).toContain('### Edges (id | from -> to | label | style | alt)');
+    expect(table).toContain('e1 | app -> pg-primary | - | solid | db');
+    expect(table).toContain('e2 | app -> pg-replica | - | solid | db');
+  });
+
+  it('shows "-" for an untagged edge once the column exists — a hard dependency', () => {
+    // The whole point of the column: `-` is not decoration, it is the
+    // statement that e3 is a HARD dependency while e1 and e2 are alternatives.
+    expect(toTable(replicated)).toContain('e3 | app -> redis      | - | solid | -');
+  });
+
+  it('costs an architecture-only document nothing (§4.1)', () => {
+    const bare = doc({
+      nodes: [node('a'), node('b')],
+      edges: [edge('e1', 'a', 'b')],
+    });
+    const table = toTable(bare);
+    expect(table).toContain('### Edges (id | from -> to | label | style)');
+    expect(table).not.toContain('alt');
+  });
+
+  it('sits after cardinality, so an ERD column order never depends on alt', () => {
+    const both = doc({
+      nodes: [node('a'), node('b')],
+      edges: [edge('e1', 'a', 'b', { cardinality: '1:N', alt: 'db' })],
+    });
+    expect(toTable(both)).toContain(
+      '### Edges (id | from -> to | label | style | cardinality | alt)',
+    );
+    expect(toTable(both)).toContain('e1 | a -> b | - | solid | 1:N | db');
+  });
+});
+
 describe('summarise', () => {
   const base = doc({
     nodes: [node('a'), node('b')],
