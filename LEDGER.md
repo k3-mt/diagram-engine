@@ -231,3 +231,62 @@ and an identifier chip carries no link because there is no file to open.
 keeps §8.6's `pointer-events: none` on itself and opts back in on the chips row
 alone, and the hover leave grew from one animation frame to 220 ms so the row
 can actually be reached.
+
+---
+
+## §9.1 — auto-serve: drawing implies showing
+
+The gap: a first session says "draw our architecture", the agent patches
+correctly, and nothing appears, because `diagram serve` was never started. The
+tool worked and the user saw a blank terminal. A write that leaves content on
+the page now starts the viewer if one is not already up.
+
+**The reuse check is an HTTP GET of `/__diagram/serve.json`, not a TCP connect
+and not the pidfile alone.** `.diagram/serve.json` records contract, pid, port,
+url, absolute document path and state. It is a hint: `serve` auto-increments
+4400 → 4410, machines reboot, and `kill -9` leaves the file behind, so an entry
+is believed only when the pid is alive AND the port answers with our contract
+and *this* document's path. "Something is listening on 4400" is not the
+question — it could be a second viewer on a different diagram, which a connect
+test cannot tell from the right one. A stale or foreign entry is replaced in
+silence; the user did nothing wrong.
+
+**The one state that skips the probe is `starting`.** The spawner writes the
+record between fork and bind, because two patches 5ms apart would otherwise
+both find nothing listening and start two viewers — the exact bug S2 exists to
+prevent. The window is bounded at 15s so a child that dies during startup is
+not believed forever; the viewer overwrites the record with `listening` and the
+port it really bound.
+
+**The spawner picks the port.** `serve` keeps its own EADDRINUSE increment as
+the backstop, but the spawner scans 4400..4410 first so the URL it prints to
+the agent — the one line the user is going to click — is the port the child was
+asked for. `$DIAGRAM_PORT` moves the base, which is also how the suite avoids
+ever binding 4400 on a machine that may have a real viewer on it.
+
+**Which commands fire it, and why.** One rule, not five special cases: the
+write succeeded, the document actually MOVED, and the result has content.
+`patch` and `import` are the case §9.1 was written for. `undo` and `redo` are
+the same case running backwards — "put that back" is a request to *see* the
+diagram without the last change. `reset` needs no exception: its result is the
+empty document by definition, so the content gate excludes it. `view` is
+deliberately out — it writes a viewport setting, draws nothing new, and cannot
+be the first command in a session (it refuses when there is no diagram), so the
+silent failure auto-serve exists to prevent cannot occur through it.
+
+**S5 is load-bearing for M8.** `scripts/eval.sh` exports
+`DIAGRAM_NO_AUTOSERVE=1` before anything else: twenty sandboxed patches per
+system, four at a time, each spawning a detached server and a browser tab,
+would break the rig on the machine that is meant to be producing a timing
+benchmark. Three tests in `tests/autoserve.test.ts` fail if that export is
+removed, moved after the agent launch, or added to the environment scrub. The
+suite itself defaults auto-serve OFF via `tests/setup.ts`, so a test that wants
+the real behaviour has to say so out loud.
+
+**S3 is verified end to end, not asserted.** A real `node dist/bin/diagram.js
+patch` process runs, prints `viewer: started at …`, and exits; the test then
+proves the viewer it spawned is still alive and still answering its identity
+endpoint. `detached: true` + `stdio: 'ignore'` + `unref()` — drop any one and
+the feature works in every manual test from a shell that stays open and does
+nothing in production. `stdio: 'ignore'` is doubly required under MCP, where an
+inherited stdout is the JSON-RPC channel.

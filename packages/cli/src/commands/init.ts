@@ -121,6 +121,11 @@ const GITIGNORE_BODY = [
   '.diagram/out.json',
   '.diagram/out.svg',
   '.diagram/.lock',
+  // The auto-serve pidfile (spec §9.1, S2): the pid, port and document of the
+  // viewer running on THIS machine. Machine-local by definition and stale the
+  // moment it is committed — the same reason geometry never enters the
+  // document (§1.4).
+  '.diagram/serve.json',
   // Chaos predictions and results (spec §18.6). They are computed FROM the
   // document, never part of it (C5), and each one is only meaningful against
   // the document hash it was computed under — a stale prediction in a commit

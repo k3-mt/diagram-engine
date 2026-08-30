@@ -44,6 +44,7 @@ import {
 } from '../../../core/src/index.js';
 import {
   applyAndCommit,
+  autoServe,
   failed,
   loadDoc,
   ok,
@@ -56,8 +57,8 @@ import {
 import { runAnalyse } from '../commands/analyse.js';
 import { runCheck } from '../commands/check.js';
 import { runGet } from '../commands/get.js';
-import { runUndo } from '../commands/undo.js';
-import { runRedo } from '../commands/redo.js';
+import { runUndoServing } from '../commands/undo.js';
+import { runRedoServing } from '../commands/redo.js';
 import {
   DEFAULT_JSON_OUT,
   runExport,
@@ -243,7 +244,14 @@ const diagramPatch: ToolDefinition = {
     // race between two first patches.
     const result = applyAndCommit(ctx, parsed.data);
     const text = renderPatchResult(result);
-    return result.ok ? ok(text) : failed(text);
+    const out = result.ok ? ok(text) : failed(text);
+    // Spec §9.1 S1. The SAME spine function `diagram patch` calls, with the
+    // same `changed` flag out of the same applyAndCommit — the agent surface
+    // and the shell surface cannot come to different conclusions about
+    // whether a window should be on screen. There is no --no-serve here; an
+    // MCP client that must not raise a viewer sets DIAGRAM_NO_AUTOSERVE=1 in
+    // the server's environment, which is where .mcp.json puts DIAGRAM_DIR too.
+    return autoServe(out, ctx, result.ok && result.changed);
   },
 };
 
@@ -255,7 +263,7 @@ const diagramPatch: ToolDefinition = {
 function historyTool(
   name: 'diagram_undo' | 'diagram_redo',
   description: string,
-  step: (o: { dir: string }) => ToolResult,
+  step: (o: { dir: string }) => Promise<ToolResult>,
 ): ToolDefinition {
   return {
     name,
@@ -273,14 +281,14 @@ const diagramUndo = historyTool(
   'diagram_undo',
   'Step the diagram back to the state before the last change. Returns the ' +
     'new state, or "nothing to undo" when there is no earlier state.',
-  runUndo,
+  runUndoServing,
 );
 
 const diagramRedo = historyTool(
   'diagram_redo',
   'Step the diagram forward again after an undo. Returns the new state, or ' +
     '"nothing to redo" when there is nothing ahead.',
-  runRedo,
+  runRedoServing,
 );
 
 // ---------------------------------------------------------------------------

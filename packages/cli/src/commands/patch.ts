@@ -33,6 +33,7 @@ import {
 } from '../../../core/src/index.js';
 import {
   applyAndCommit,
+  autoServe,
   createContext,
   emit,
   failed,
@@ -41,9 +42,11 @@ import {
   renderPatchResult,
   type CommandOutput,
   type ContextOptions,
+  type DiagramContext,
+  type ServeControl,
 } from './context.js';
 
-export interface PatchOptions extends ContextOptions {
+export interface PatchOptions extends ContextOptions, ServeControl {
   /** Read the patch from stdin. */
   stdin?: boolean;
   /** Read the patch from this file instead. */
@@ -119,21 +122,58 @@ export async function readStream(
 }
 
 /**
+ * Apply an already-obtained patch text against an already-resolved context,
+ * and say whether the document MOVED.
+ *
+ * The `changed` half exists for auto-serve (spec §9.1 S1: a successful patch
+ * that changed the document, never a rejected one). It is reported rather
+ * than re-derived by the caller because only applyAndCommit sees both the
+ * before and the after document.
+ */
+export function patchTextIn(
+  ctx: DiagramContext,
+  raw: string,
+  source: string,
+): { out: CommandOutput; changed: boolean } {
+  const parsed = parsePatchText(raw, source);
+  if (!parsed.ok) return { out: rejected(parsed.errors), changed: false };
+
+  const result = applyAndCommit(ctx, parsed.patch);
+  const text = renderPatchResult(result);
+  return {
+    out: result.ok ? ok(text) : failed(text),
+    changed: result.ok && result.changed,
+  };
+}
+
+/**
  * Apply an already-obtained patch text. The whole command body minus the
- * reading of stdin, so tests can drive it synchronously.
+ * reading of stdin and the auto-serve hook, so tests can drive it
+ * synchronously.
  */
 export function runPatchText(
   raw: string,
   source: string,
   opts: ContextOptions = {},
 ): CommandOutput {
-  const parsed = parsePatchText(raw, source);
-  if (!parsed.ok) return rejected(parsed.errors);
-
   const ctx = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
-  const result = applyAndCommit(ctx, parsed.patch);
-  const text = renderPatchResult(result);
-  return result.ok ? ok(text) : failed(text);
+  return patchTextIn(ctx, raw, source).out;
+}
+
+/**
+ * `diagram patch` minus the stdin read: apply, then start a viewer if this
+ * patch left content on the page and none is running (spec §9.1).
+ */
+export async function runPatchTextServing(
+  raw: string,
+  source: string,
+  opts: PatchOptions = {},
+): Promise<CommandOutput> {
+  const ctx = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
+  const { out, changed } = patchTextIn(ctx, raw, source);
+  return autoServe(out, ctx, changed, {
+    ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
+  });
 }
 
 /**
@@ -147,7 +187,10 @@ export async function runPatch(
   opts: PatchOptions = {},
   stdin: NodeJS.ReadableStream = process.stdin,
 ): Promise<CommandOutput> {
-  const rest: ContextOptions = { ...(opts.dir !== undefined ? { dir: opts.dir } : {}) };
+  const rest: PatchOptions = {
+    ...(opts.dir !== undefined ? { dir: opts.dir } : {}),
+    ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
+  };
 
   if (opts.file !== undefined && opts.file !== '') {
     const file = path.resolve(opts.file);
@@ -157,10 +200,10 @@ export async function runPatch(
     } catch (e) {
       return rejected([`--file ${opts.file}: ${(e as NodeJS.ErrnoException).message}`]);
     }
-    return runPatchText(raw, file, rest);
+    return runPatchTextServing(raw, file, rest);
   }
 
-  return runPatchText(await readStream(stdin), 'stdin', rest);
+  return runPatchTextServing(await readStream(stdin), 'stdin', rest);
 }
 
 /** Register `diagram patch` on the program. The integrator calls this. */
@@ -171,12 +214,15 @@ export function registerPatch(program: Command): void {
     .option('--stdin', 'read the patch from stdin (the default)')
     .option('--file <path>', 'read the patch from this file instead of stdin')
     .option('--dir <path>', 'the .diagram directory (default: $DIAGRAM_DIR or ./.diagram)')
-    .action(async (opts: { stdin?: boolean; file?: string; dir?: string }) => {
+    // commander turns `--no-serve` into `serve: false`, defaulting to true.
+    .option('--no-serve', 'do not start the viewer if one is not already running')
+    .action(async (opts: { stdin?: boolean; file?: string; dir?: string; serve?: boolean }) => {
       emit(
         await runPatch({
           ...(opts.stdin !== undefined ? { stdin: opts.stdin } : {}),
           ...(opts.file !== undefined ? { file: opts.file } : {}),
           ...(opts.dir !== undefined ? { dir: opts.dir } : {}),
+          ...(opts.serve === false ? { noServe: true } : {}),
         }),
       );
     });

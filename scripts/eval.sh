@@ -107,6 +107,21 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# -----------------------------------------------------------------------------
+# AUTO-SERVE IS OFF FOR THE WHOLE RIG (spec §9.1, S5). Do not remove this.
+# -----------------------------------------------------------------------------
+# A patch that leaves content on the page starts `diagram serve` and opens a
+# browser tab if none is running. That is right for a person drawing their
+# architecture and catastrophic here: twenty runs, four at a time, every one of
+# them patching a fresh sandboxed workspace, is twenty detached servers holding
+# twenty ports and twenty browser tabs — a fork bomb with a UI, on the machine
+# that is supposed to be producing a timing-sensitive benchmark. It is exported
+# once, here, so every child inherits it: the staging pass, `diagram init`, the
+# agent and its MCP server, and the export/score steps afterwards.
+# tests/autoserve.test.ts fails if this line goes away.
+export DIAGRAM_NO_AUTOSERVE=1
+
 SYSTEM=""
 RUNS=3
 JOBS=4
@@ -361,6 +376,10 @@ one_run() {
     (
       cd "$ws" || exit 1
       export PATH="$run/bin:$PATH"
+      # Re-stated inside the agent's own subshell, beside the scrub below: the
+      # unset list runs here, and a future edit that adds DIAGRAM_NO_AUTOSERVE
+      # to it by mistake would silently re-arm twenty viewers (§9.1 S5).
+      export DIAGRAM_NO_AUTOSERVE=1
       unset DIAGRAM_DIR
       unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID \
             CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SSE_PORT \

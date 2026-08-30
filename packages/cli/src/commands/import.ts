@@ -57,6 +57,7 @@ import {
   type GraphDoc,
 } from '../../../core/src/index.js';
 import {
+  autoServe,
   createContext,
   emit,
   ok,
@@ -66,10 +67,11 @@ import {
   type CommandOutput,
   type ContextOptions,
   type DiagramContext,
+  type ServeControl,
 } from './context.js';
 import { readStream } from './patch.js';
 
-export interface ImportOptions extends ContextOptions {
+export interface ImportOptions extends ContextOptions, ServeControl {
   /** Read the document from stdin (the default). */
   stdin?: boolean;
   /** Read the document from this file instead. */
@@ -222,6 +224,26 @@ export function runImportText(
 }
 
 /**
+ * `diagram import` minus the stdin read, plus the auto-serve hook (§9.1).
+ *
+ * An import REPLACES the whole diagram, which makes it the single largest
+ * change any command can make and the one most obviously worth looking at —
+ * "here is a diagram somebody else drew" is a picture, not a diff. So it
+ * auto-serves on exactly the same terms as a patch.
+ */
+export async function runImportTextServing(
+  raw: string,
+  source: string,
+  opts: ImportOptions = {},
+): Promise<CommandOutput> {
+  const ctx = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
+  const out = runImportText(raw, source, opts);
+  return autoServe(out, ctx, out.ok, {
+    ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
+  });
+}
+
+/**
  * `diagram import`: resolve the input source, then replace.
  *
  * --file wins over --stdin when both are given (an explicit path is the more
@@ -237,6 +259,7 @@ export async function runImport(
   const rest: ImportOptions = {
     ...(opts.dir !== undefined ? { dir: opts.dir } : {}),
     ...(opts.confirm !== undefined ? { confirm: opts.confirm } : {}),
+    ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
   };
 
   if (opts.file !== undefined && opts.file !== '') {
@@ -247,10 +270,10 @@ export async function runImport(
     } catch (e) {
       return rejected([`--file ${opts.file}: ${(e as NodeJS.ErrnoException).message}`]);
     }
-    return runImportText(raw, file, rest);
+    return runImportTextServing(raw, file, rest);
   }
 
-  return runImportText(await readStream(stdin), 'stdin', rest);
+  return runImportTextServing(await readStream(stdin), 'stdin', rest);
 }
 
 /** Register `diagram import` on the program. The integrator calls this. */
@@ -262,14 +285,24 @@ export function registerImport(program: Command): void {
     .option('--file <path>', 'read the document from this file instead of stdin')
     .option('--confirm', 'confirm the standing diagram may be replaced (undoable)')
     .option('--dir <path>', 'the .diagram directory (default: $DIAGRAM_DIR or ./.diagram)')
-    .action(async (opts: { stdin?: boolean; file?: string; confirm?: boolean; dir?: string }) => {
-      emit(
-        await runImport({
-          ...(opts.stdin !== undefined ? { stdin: opts.stdin } : {}),
-          ...(opts.file !== undefined ? { file: opts.file } : {}),
-          ...(opts.confirm !== undefined ? { confirm: opts.confirm } : {}),
-          ...(opts.dir !== undefined ? { dir: opts.dir } : {}),
-        }),
-      );
-    });
+    .option('--no-serve', 'do not start the viewer if one is not already running')
+    .action(
+      async (opts: {
+        stdin?: boolean;
+        file?: string;
+        confirm?: boolean;
+        dir?: string;
+        serve?: boolean;
+      }) => {
+        emit(
+          await runImport({
+            ...(opts.stdin !== undefined ? { stdin: opts.stdin } : {}),
+            ...(opts.file !== undefined ? { file: opts.file } : {}),
+            ...(opts.confirm !== undefined ? { confirm: opts.confirm } : {}),
+            ...(opts.dir !== undefined ? { dir: opts.dir } : {}),
+            ...(opts.serve === false ? { noServe: true } : {}),
+          }),
+        );
+      },
+    );
 }

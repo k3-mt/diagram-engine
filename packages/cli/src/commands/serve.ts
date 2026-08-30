@@ -23,6 +23,12 @@ import {
 } from '../../../core/src/index.js';
 import { createContext } from './context.js';
 import { startHttpServer, type StaticServer } from '../serve/http.js';
+import {
+  removeServeRecord,
+  VIEWER_CONTRACT,
+  writeServeRecord,
+  type ServeRecord,
+} from '../serve/autoserve.js';
 import { attachDocSync, type DocSync } from '../serve/watch.js';
 
 export interface ServeOptions {
@@ -66,6 +72,16 @@ export function ensureDiagramDir(dir: string): void {
  * the server down — the URL is already printed to the terminal.
  */
 export function openBrowser(url: string): void {
+  // The headless escape hatch. `--no-open` is the flag for "I already have the
+  // tab"; this is the same answer for a context that has no browser at all and
+  // no command line to pass a flag on — CI, a container, and the suite's own
+  // end-to-end test, which starts a real viewer and must not raise a window on
+  // the developer running it. Auto-serve (§9.1) reaches `serve` through argv it
+  // builds itself, so an environment variable is the only channel there is.
+  const suppressed = (process.env['DIAGRAM_NO_OPEN'] ?? '').trim().toLowerCase();
+  if (suppressed !== '' && suppressed !== '0' && suppressed !== 'false' && suppressed !== 'no') {
+    return;
+  }
   let command: string;
   let args: string[];
   switch (process.platform) {
@@ -107,9 +123,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<ServeHandle> {
   const dir = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) }).dir;
   ensureDiagramDir(dir);
 
+  // The identity this server answers on /__diagram/serve.json (§9.1, S2), and
+  // the body of the pidfile. It is a closure over a mutable holder because the
+  // bound port is not known until listen() has returned, and an identity that
+  // reports the REQUESTED port would defeat its own purpose: the auto-increment
+  // (§9, 4400 → 4410) is precisely the case the probe has to see through.
+  const graphFile = diagramPaths(dir).graphFile;
+  let record: ServeRecord | undefined;
   const httpServer = await startHttpServer({
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.publicDir !== undefined ? { publicDir: opts.publicDir } : {}),
+    identity: () => record ?? { contract: VIEWER_CONTRACT, document: graphFile, dir },
   });
   const sync = attachDocSync(httpServer.server, dir);
   // Do not announce the server before the file watch is live: a patch
@@ -119,6 +143,27 @@ export async function runServe(opts: ServeOptions = {}): Promise<ServeHandle> {
   // localhost (not 127.0.0.1) in the browser URL: same address, friendlier
   // in the address bar. The socket itself is bound to 127.0.0.1 only.
   const url = `http://localhost:${httpServer.port}/`;
+
+  // The pidfile (§9.1, S2). Written only once the socket is bound and the
+  // watcher is live, so anything that reads it and gets a positive probe is
+  // reading about a viewer that can actually repaint. It is a HINT for the
+  // next patch, never state anybody may trust: see serve/autoserve.ts.
+  record = {
+    contract: VIEWER_CONTRACT,
+    pid: process.pid,
+    port: httpServer.port,
+    url,
+    document: graphFile,
+    dir,
+    startedAt: Date.now(),
+    state: 'listening',
+  };
+  writeServeRecord(dir, record);
+  // A crash or a `kill` still leaves the file behind — which is exactly why
+  // every reader re-verifies it — but a clean exit must not.
+  const forget = (): void => removeServeRecord(dir, process.pid);
+  process.once('exit', forget);
+
   if (opts.open !== false) openBrowser(url);
 
   return {
@@ -129,6 +174,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<ServeHandle> {
     http: httpServer,
     sync,
     close: async () => {
+      process.removeListener('exit', forget);
+      forget();
       await sync.close();
       await httpServer.close();
     },

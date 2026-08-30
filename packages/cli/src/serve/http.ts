@@ -20,6 +20,24 @@ export const DEFAULT_PORT = 4400;
 /** How many EADDRINUSE increments to try past the requested port (§9: 4400→4410). */
 export const PORT_ATTEMPTS = 10;
 
+/**
+ * The path a viewer answers its own identity on (spec §9.1, S2).
+ *
+ * It lives here, with the server that answers it, and is re-exported by
+ * serve/autoserve.ts, which is the only thing that asks. Under /__diagram/ so
+ * it can never collide with a viewer asset — the static server refuses
+ * anything without a known extension in any case.
+ */
+export const IDENTITY_PATH = '/__diagram/serve.json';
+
+/**
+ * The identity contract, versioned. The probe is a compatibility check between
+ * two processes that may be different builds: an old viewer left running from
+ * yesterday answers the path but need not answer the shape a newer engine
+ * expects, and reusing it would be worse than starting a fresh one.
+ */
+export const VIEWER_CONTRACT = 'diagram-viewer/1';
+
 /** Extension → Content-Type. Anything not listed here is a 404. */
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -64,6 +82,15 @@ export interface HttpServerOptions {
   port?: number;
   /** Directory of prebuilt static assets. Default: defaultPublicDir(). */
   publicDir?: string;
+  /**
+   * What this server answers on IDENTITY_PATH (spec §9.1, S2).
+   *
+   * A FUNCTION, not an object, because the only interesting field — the bound
+   * port — is not known until listen() has returned, and the identity has to
+   * be the truth rather than what was requested. Omitted in tests that only
+   * exercise static hosting; the path then 404s like any other unknown route.
+   */
+  identity?: () => unknown;
 }
 
 export interface StaticServer {
@@ -76,14 +103,19 @@ export interface StaticServer {
   close(): Promise<void>;
 }
 
+/** The decoded pathname of a request URL, or '' when it cannot be parsed. */
+function pathnameOf(url: string): string {
+  try {
+    return decodeURIComponent(new URL(url, 'http://localhost').pathname);
+  } catch {
+    return '';
+  }
+}
+
 /** Map a request URL to a file inside publicDir, or undefined if it escapes. */
 function resolveStaticFile(publicDir: string, url: string): string | undefined {
-  let pathname: string;
-  try {
-    pathname = decodeURIComponent(new URL(url, 'http://localhost').pathname);
-  } catch {
-    return undefined;
-  }
+  let pathname = pathnameOf(url);
+  if (pathname === '') return undefined;
   if (pathname.endsWith('/')) pathname += 'index.html';
   const resolved = path.resolve(publicDir, '.' + path.posix.normalize(pathname));
   // Containment check: never serve outside publicDir.
@@ -97,10 +129,25 @@ function handleRequest(
   publicDir: string,
   req: http.IncomingMessage,
   res: http.ServerResponse,
+  identity?: () => unknown,
 ): void {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('method not allowed\n');
+    return;
+  }
+  // The identity endpoint (§9.1, S2), answered before any static resolution:
+  // it is how another process asks "is the thing on this port the viewer for
+  // this document?" and gets an answer a bare TCP connect cannot give.
+  if (identity !== undefined && pathnameOf(req.url ?? '/') === IDENTITY_PATH) {
+    const body = Buffer.from(`${JSON.stringify(identity())}\n`, 'utf8');
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': body.length,
+      // Machine-local liveness. A cached answer is a wrong answer.
+      'Cache-Control': 'no-store',
+    });
+    res.end(req.method === 'HEAD' ? undefined : body);
     return;
   }
   const file = resolveStaticFile(publicDir, req.url ?? '/');
@@ -150,7 +197,9 @@ export async function startHttpServer(
 ): Promise<StaticServer> {
   const requested = opts.port ?? DEFAULT_PORT;
   const publicDir = path.resolve(opts.publicDir ?? defaultPublicDir());
-  const server = http.createServer((req, res) => handleRequest(publicDir, req, res));
+  const server = http.createServer((req, res) =>
+    handleRequest(publicDir, req, res, opts.identity),
+  );
 
   const lastPort = requested === 0 ? 0 : requested + PORT_ATTEMPTS;
   for (let port = requested; port <= lastPort; port++) {

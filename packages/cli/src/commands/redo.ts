@@ -13,6 +13,7 @@
 import type { Command } from 'commander';
 import { redoFromHistory } from '../../../core/src/index.js';
 import {
+  autoServe,
   createContext,
   emit,
   loadDoc,
@@ -22,6 +23,7 @@ import {
   renderViewChangeLine,
   type CommandOutput,
   type ContextOptions,
+  type ServeControl,
 } from './context.js';
 
 /** Step the document forward one history snapshot. */
@@ -54,7 +56,36 @@ export function registerRedo(program: Command): void {
     .command('redo')
     .description('step the document forward one history snapshot')
     .option('--dir <path>', 'the .diagram directory (default: $DIAGRAM_DIR or ./.diagram)')
-    .action((opts: { dir?: string }) => {
-      emit(runRedo({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) }));
+    .option('--no-serve', 'do not start the viewer if one is not already running')
+    .action(async (opts: { dir?: string; serve?: boolean }) => {
+      emit(
+        await runRedoServing({
+          ...(opts.dir !== undefined ? { dir: opts.dir } : {}),
+          ...(opts.serve === false ? { noServe: true } : {}),
+        }),
+      );
     });
+}
+
+/**
+ * `diagram redo` plus the auto-serve hook (spec §9.1).
+ *
+ * redo IS a document-changing write, and it is one the user is
+ * actively watching for — "put that back" is a request to SEE the diagram
+ * without the last change. Where a patch that adds nodes is the case §9.1 was
+ * written for, an redo that restores them is the same case running backwards,
+ * so it is treated identically. The content gate in autoServe keeps the
+ * degenerate direction quiet: an redo that lands on the empty document opens
+ * no window, because there is nothing on it to look at.
+ */
+export async function runRedoServing(
+  opts: ContextOptions & ServeControl = {},
+): Promise<CommandOutput> {
+  const ctx = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
+  const out = runRedo({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
+  // A successful step always moved the pointer — core refuses when there is
+  // nowhere to go — so success is the change.
+  return autoServe(out, ctx, out.ok, {
+    ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
+  });
 }

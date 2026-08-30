@@ -32,6 +32,7 @@ import {
   type GraphPatch,
 } from '../../../core/src/index.js';
 import { deriveViewDetail } from '../../../core/src/view/derive.js';
+import { ensureViewer } from '../serve/autoserve.js';
 
 /** Options every command shares. `--dir` is the only one that is universal. */
 export interface ContextOptions {
@@ -68,6 +69,15 @@ export type PatchResult =
       ok: true;
       /** The document as written to disk. */
       doc: GraphDoc;
+      /**
+       * Did the document actually MOVE? A patch whose ops all no-op — setTitle
+       * to the title it already had, addNode coerced to an updateNode that
+       * changes nothing — is a success that changed nothing, and spec §9.1 S1
+       * fires auto-serve only on a change. Compared on the serialised
+       * document rather than inferred from the summary, because the summary
+       * counts elements and a no-op edit moves no count.
+       */
+      changed: boolean;
       /** "+3 nodes, +2 edges" — from core's summarise(). */
       summary: string;
       /** ID-collision coercions (spec §3.5); empty when nothing was coerced. */
@@ -216,6 +226,7 @@ export function applyAndCommit(ctx: DiagramContext, patch: GraphPatch): PatchRes
     return {
       ok: true,
       doc: applied.doc,
+      changed: JSON.stringify(current.doc) !== JSON.stringify(applied.doc),
       summary: applied.summary,
       notes: [...applied.notes, ...fresh],
       history,
@@ -602,4 +613,95 @@ export function emit(out: CommandOutput): void {
  */
 export function renderReadFailure(graphFile: string, errors: string[]): string {
   return [`cannot read ${graphFile}`, ...errors.map((e) => `  ${e}`)].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Auto-serve (spec §9.1)
+// ---------------------------------------------------------------------------
+
+/** `--no-serve`, carried by every mutating command that can auto-serve. */
+export interface ServeControl {
+  /** Suppress auto-serve for this call (S5). `DIAGRAM_NO_AUTOSERVE=1` too. */
+  noServe?: boolean;
+  /** First port to try. Defaults to $DIAGRAM_PORT, else §9's 4400. */
+  basePort?: number;
+}
+
+/**
+ * Is there anything on the page worth opening a window for?
+ *
+ * S1 says auto-serve fires on a patch that CHANGED the document; this adds the
+ * other half of the sentence §9.1 opens with — "a patch that creates CONTENT
+ * starts the viewer". A title-only edit on an empty diagram has nothing to
+ * show, and raising a browser tab over a blank canvas is the intrusion the
+ * judgement call in §9.1 only just survives.
+ *
+ * It is also what keeps `reset` out without a special case: reset's result is
+ * the empty document by definition, so it can never satisfy this.
+ */
+export function hasContent(doc: GraphDoc): boolean {
+  return doc.nodes.length + doc.groups.length + doc.edges.length > 0;
+}
+
+/**
+ * The one line the agent (and the user reading its transcript) gets when a
+ * viewer was started for them. §4.1 voice: lowercase key, one fact, no advice.
+ *
+ * Said ONLY on a start, never on a reuse. A viewer that appears with no
+ * explanation is its own small confusion; a viewer that announces itself on
+ * every patch is worse, and it is the same intrusion S6 forbids the browser.
+ */
+export function renderAutoServeLine(url: string): string {
+  return `viewer: started at ${url}`;
+}
+
+/**
+ * THE HOOK (spec §9.1). Call it after any command that may have written the
+ * document; it decides whether a viewer is owed and appends the one line.
+ *
+ * It lives here, in the spine, and every surface calls this same function, so
+ * `diagram patch` and diagram_patch cannot come to different conclusions about
+ * whether a window should be on screen.
+ *
+ * The four gates, in the order they cost:
+ *
+ *   1. the command failed        — S1: never on a rejected patch, and reads
+ *                                  never call this at all.
+ *   2. nothing actually changed  — S1.
+ *   3. the opt-out               — S5, checked inside ensureViewer before it
+ *                                  touches the disk.
+ *   4. nothing to show           — hasContent, above.
+ *
+ * NON-BLOCKING (S4). The awaits here are an identity probe against localhost,
+ * hard-capped at 250ms and typically ~1ms, and a bind-test port scan. Nothing
+ * waits for the spawned viewer to come up: the browser tab it opens connects
+ * on its own, and the pidfile is the handshake for the next patch.
+ *
+ * Nothing it can hit is allowed to fail a write that has already happened. The
+ * document is on disk by the time this runs, so any throw is swallowed and the
+ * result is returned exactly as it arrived — an agent must never see a
+ * successful patch reported as an error because a convenience misfired.
+ */
+export async function autoServe(
+  out: CommandOutput,
+  ctx: DiagramContext,
+  changed: boolean,
+  opts: ServeControl = {},
+): Promise<CommandOutput> {
+  if (!out.ok || !changed) return out;
+  try {
+    const loaded = loadDoc(ctx);
+    if (!loaded.ok || !hasContent(loaded.doc)) return out;
+    const result = await ensureViewer({
+      dir: ctx.dir,
+      document: ctx.paths.graphFile,
+      ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
+      ...(opts.basePort !== undefined ? { basePort: opts.basePort } : {}),
+    });
+    if (result.action !== 'started') return out;
+    const text = `${out.text}\n${renderAutoServeLine(result.url)}`;
+    return { ...out, stdout: text, text };
+  } catch {
+    return out;
+  }
 }
