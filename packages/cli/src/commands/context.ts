@@ -656,6 +656,29 @@ export function renderAutoServeLine(url: string): string {
 }
 
 /**
+ * The line for a viewer that was NOT started, or null when silence is right.
+ *
+ * The distinction is whether the user can do anything about it.
+ *
+ *   silent — "opt-out" (they asked for this; S5 must cost nothing and say
+ *            nothing) and "a viewer is already starting" (another call is
+ *            raising one this instant, so a window IS coming).
+ *   said   — the two real failures. Auto-serve exists because "the tool
+ *            worked and the user saw a blank terminal" is a bad outcome; a
+ *            port range that is full, or a missing viewer binary, reproduces
+ *            that outcome exactly, and there the user CAN act — free a port,
+ *            set DIAGRAM_PORT, run `diagram serve`, build the package. Saying
+ *            nothing would be the original bug wearing the fix's clothes.
+ *
+ * §4.1 voice: lowercase key, one fact, no advice. The reason string is
+ * already worded as a fact where it is computed.
+ */
+export function renderAutoServeSkip(reason: string): string | null {
+  if (reason === 'opt-out' || reason === 'a viewer is already starting') return null;
+  return `viewer: not started — ${reason}`;
+}
+
+/**
  * THE HOOK (spec §9.1). Call it after any command that may have written the
  * document; it decides whether a viewer is owed and appends the one line.
  *
@@ -698,8 +721,17 @@ export async function autoServe(
       ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
       ...(opts.basePort !== undefined ? { basePort: opts.basePort } : {}),
     });
-    if (result.action !== 'started') return out;
-    const text = `${out.text}\n${renderAutoServeLine(result.url)}`;
+    const line =
+      result.action === 'started'
+        ? renderAutoServeLine(result.url)
+        : result.action === 'skipped'
+          ? renderAutoServeSkip(result.reason)
+          : // 'reused': the window is already on screen and repaints itself.
+            // Announcing it on every patch is the same intrusion S6 forbids
+            // the browser.
+            null;
+    if (line === null) return out;
+    const text = `${out.text}\n${line}`;
     return { ...out, stdout: text, text };
   } catch {
     return out;

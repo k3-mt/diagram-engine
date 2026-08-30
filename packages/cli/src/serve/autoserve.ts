@@ -74,8 +74,18 @@ export interface ServeRecord {
   state: 'starting' | 'listening';
 }
 
-/** How long a "starting" record is believed before it is treated as dead. */
-export const STARTUP_GRACE_MS = 15_000;
+/**
+ * How long a "starting" record is believed once the identity probe has already
+ * said no.
+ *
+ * A viewer binds in ~200ms on this machine, so this is generous by more than
+ * an order of magnitude. It is deliberately not longer: every millisecond of
+ * it is a window in which a child that died during startup is still believed,
+ * and a believed-but-absent viewer is the silent blank terminal §9.1 exists to
+ * abolish. Bounded by a probe on the way in (see isLive) and by this on the
+ * way out.
+ */
+export const STARTUP_GRACE_MS = 5_000;
 
 /** Hard cap on the identity probe. A localhost round trip is ~1ms; this is a
  *  ceiling that keeps G6's 400ms budget intact even when the machine stalls. */
@@ -124,6 +134,44 @@ export function readServeRecord(dir: string): ServeRecord | null {
     startedAt: typeof r.startedAt === 'number' ? r.startedAt : 0,
     state: r.state,
   };
+}
+
+/**
+ * What a claim attempt did.
+ *
+ * `unwritable` is not a failure to act on: a viewer that cannot record itself
+ * still serves, and the cost is only that the next patch may start a second
+ * one. Refusing to draw because a directory is read-only would be worse.
+ */
+export type ClaimOutcome = 'claimed' | 'taken' | 'unwritable';
+
+/**
+ * Claim the right to start a viewer for this directory — atomically.
+ *
+ * This is the whole of S2's mutual exclusion, and it has to be one syscall.
+ * The sequence it replaces (read the record, see nothing, scan for a port,
+ * spawn, THEN write the record) has an await in the middle of it, so two
+ * calls that overlap anywhere in that window both conclude "no viewer here"
+ * and both spawn one. Two viewers for one document is the bug S2 names.
+ *
+ * `wx` is O_EXCL: the file is created only if it does not exist, and the
+ * kernel decides the winner. The loser gets EEXIST, re-reads, and reuses what
+ * the winner is starting. Separate PROCESSES are additionally serialised by
+ * the store lock in applyAndCommit; the case only this closes is two
+ * overlapping calls inside ONE process, which is the MCP server whenever a
+ * client has two diagram_patch calls in flight.
+ */
+export function claimStart(dir: string, record: ServeRecord): ClaimOutcome {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(serveRecordPath(dir), `${JSON.stringify(record, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    return 'claimed';
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EEXIST' ? 'taken' : 'unwritable';
+  }
 }
 
 /** Write the pidfile. tmp+rename so a concurrent reader never sees half of it. */
@@ -254,19 +302,28 @@ export async function probeViewer(
  * case (the machine rebooted, the viewer was killed). The HTTP probe is the
  * authoritative one and only runs when the pid check passed.
  *
- * The one case that skips the probe is a fresh "starting" record: the spawner
- * wrote it microseconds ago and the child has not bound yet, so probing would
- * correctly report "nothing there" and incorrectly conclude "start another".
- * The grace window is bounded, so a child that dies during startup is not
- * believed forever.
+ * The probe runs FIRST in every state, including "starting". An earlier draft
+ * short-circuited a fresh "starting" record on the pid check alone, on the
+ * argument that the child has not bound yet so the probe must fail. The
+ * argument is right about the common case and wrong about the consequence:
+ * pids are recycled, so a child that died during startup whose pid landed on
+ * some unrelated live process was believed for the whole window, and every
+ * patch in it printed nothing and showed nothing. That is the blank terminal
+ * again, in miniature. Asking the port first costs an immediate connection
+ * refusal (~1ms — nothing is listening, so there is nothing to wait for) and
+ * removes the pid as a sole source of truth.
+ *
+ * The grace window is only the fallback AFTER the probe has said no, which is
+ * exactly the "spawned, not bound yet" case it was written for. It also
+ * covers the child that auto-incremented past our requested port: it will
+ * overwrite this record with the port it really bound, and until it does, the
+ * window keeps a second viewer from being started underneath it.
  */
 export async function isLive(record: ServeRecord, document: string): Promise<boolean> {
   if (record.document !== document) return false;
   if (!pidAlive(record.pid)) return false;
-  if (record.state === 'starting') {
-    return Date.now() - record.startedAt < STARTUP_GRACE_MS;
-  }
-  return probeViewer(record.port, document);
+  if (await probeViewer(record.port, document)) return true;
+  return record.state === 'starting' && Date.now() - record.startedAt < STARTUP_GRACE_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,38 +541,74 @@ export async function ensureViewer(opts: EnsureOptions): Promise<EnsureResult> {
   const dir = path.resolve(opts.dir);
   const document = path.resolve(opts.document);
 
-  const record = readServeRecord(dir);
-  if (record !== null && (await isLive(record, document))) {
-    // S2 and S6 in one line: no second viewer, and no second browser tab —
-    // the one that is open repaints from the file watcher.
-    return { action: 'reused', url: record.url, port: record.port, pid: record.pid };
-  }
-  // A stale or foreign entry is replaced in silence. The user did nothing
-  // wrong; reporting it would be noise on a line they cannot act on.
-  if (record !== null) removeServeRecord(dir);
-
   const base = opts.basePort ?? defaultBasePort();
-  const port = await pickPort(base);
-  if (port === null) {
-    return { action: 'skipped', reason: `no free port in ${base}..${base + PORT_ATTEMPTS}` };
+
+  // Two passes, never more. The second exists for one situation: another call
+  // won the claim between our read and our write, so the answer we computed is
+  // out of date and the record now on disk is the truth. Re-reading it turns
+  // us into a reuse. A third pass could only mean something is thrashing the
+  // pidfile, and spinning over that would spend the patch's latency budget on
+  // a convenience.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const record = readServeRecord(dir);
+    if (record !== null && (await isLive(record, document))) {
+      // S2 and S6 in one line: no second viewer, and no second browser tab —
+      // the one that is open repaints from the file watcher.
+      return { action: 'reused', url: record.url, port: record.port, pid: record.pid };
+    }
+    // A stale or foreign entry is replaced in silence. The user did nothing
+    // wrong; reporting it would be noise on a line they cannot act on.
+    //
+    // GUARDED BY THE PID it described, which is what removeServeRecord's whole
+    // signature is for: isLive may have spent up to PROBE_TIMEOUT_MS on the
+    // wire, and a viewer that installed a fresh, valid record during that
+    // window must not have it deleted by our stale conclusion.
+    if (record !== null) removeServeRecord(dir, record.pid);
+
+    const port = await pickPort(base);
+    if (port === null) {
+      return { action: 'skipped', reason: `no free port in ${base}..${base + PORT_ATTEMPTS}` };
+    }
+    const url = `http://localhost:${port}/`;
+
+    // THE CLAIM, taken BEFORE the spawn and atomically (see claimStart). The
+    // pid recorded here is our own: it is the only pid that certainly exists
+    // at this instant, and it makes the record self-verifying if we die
+    // between claiming and spawning. The real child's pid overwrites it a
+    // moment later.
+    const claim = claimStart(dir, {
+      contract: VIEWER_CONTRACT,
+      pid: process.pid,
+      port,
+      url,
+      document,
+      dir,
+      startedAt: Date.now(),
+      state: 'starting',
+    });
+    if (claim === 'taken') continue;
+
+    const pid = launcher({ dir, port });
+    if (pid === undefined) {
+      // Take the claim back, or the next patch would find our record, believe
+      // it for the grace window (our pid IS alive) and start nothing either.
+      removeServeRecord(dir, process.pid);
+      return { action: 'skipped', reason: 'no viewer binary' };
+    }
+
+    // Now the record names the process that will actually be listening.
+    writeServeRecord(dir, {
+      contract: VIEWER_CONTRACT,
+      pid,
+      port,
+      url,
+      document,
+      dir,
+      startedAt: Date.now(),
+      state: 'starting',
+    });
+    return { action: 'started', url, port, pid };
   }
 
-  const pid = launcher({ dir, port });
-  if (pid === undefined) return { action: 'skipped', reason: 'no viewer binary' };
-
-  const url = `http://localhost:${port}/`;
-  // Written HERE, by the spawner, before the child can bind. It is what makes
-  // a second patch arriving in the next millisecond reuse this viewer instead
-  // of starting a rival (S2).
-  writeServeRecord(dir, {
-    contract: VIEWER_CONTRACT,
-    pid,
-    port,
-    url,
-    document,
-    dir,
-    startedAt: Date.now(),
-    state: 'starting',
-  });
-  return { action: 'started', url, port, pid };
+  return { action: 'skipped', reason: 'a viewer is already starting' };
 }

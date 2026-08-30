@@ -56,8 +56,17 @@ npm run build
 
 cd /path/to/your/project
 diagram init          # .mcp.json, .gitignore, agent rules, Claude Code skill
-diagram serve         # viewer on http://localhost:4400
+diagram serve         # viewer on http://localhost:4400 — optional, see below
 ```
+
+`diagram serve` is optional from the first patch onwards: a patch that draws something
+starts the viewer itself if one is not already up, and says so
+(`viewer: started at http://localhost:4400/`). Set `DIAGRAM_NO_AUTOSERVE=1`, or pass
+`--no-serve`, to keep that from happening.
+
+**Upgrading a project initialised before auto-serve existed?** Re-run `diagram init`. It
+is idempotent, and it adds `.diagram/serve.json` — the machine-local pid and port of your
+viewer — to the managed `.gitignore` block, so it does not end up in a commit.
 
 Then start your agent. It picks up the MCP server on next launch and gets ten tools:
 `diagram_get`, `diagram_patch`, `diagram_undo`, `diagram_redo`, `diagram_view`,

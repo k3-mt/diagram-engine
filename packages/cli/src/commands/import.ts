@@ -156,12 +156,31 @@ function isEmpty(doc: GraphDoc): boolean {
  * still needs --confirm, because the bytes are recoverable from history and
  * the user may not have meant to discard them.
  */
-export function importDoc(
+export function importDoc(ctx: DiagramContext, doc: GraphDoc, confirm: boolean): CommandOutput {
+  return importDocIn(ctx, doc, confirm).out;
+}
+
+/**
+ * importDoc, plus whether the document actually MOVED.
+ *
+ * The two halves exist for the same reason patchTextIn reports `changed`
+ * separately from its text: spec §9.1 S1 is "a successful write that CHANGED
+ * the document", and for an import those are not the same event. Re-importing
+ * the document already on disk — the normal shape of an idempotent script —
+ * is a successful write of identical bytes. Reporting `ok` there would let a
+ * no-op raise a window.
+ *
+ * The comparison is the one applyAndCommit uses, over the serialised document,
+ * and it is taken INSIDE the lock against the same read the --confirm decision
+ * is made from, so nothing can slip between the two.
+ */
+export function importDocIn(
   ctx: DiagramContext,
   doc: GraphDoc,
   confirm: boolean,
-): CommandOutput {
-  return withLock(ctx.dir, (): CommandOutput => {
+): { out: CommandOutput; changed: boolean } {
+  let changed = false;
+  const out = withLock(ctx.dir, (): CommandOutput => {
     const current = readDoc(ctx.paths.graphFile);
     const existed = fs.existsSync(ctx.paths.graphFile);
     const standing = current.ok ? current.doc : undefined;
@@ -177,6 +196,10 @@ export function importDoc(
         're-run with --confirm if that is what you want (`diagram undo` restores the old one)',
       ]);
     }
+
+    // Did this import move the document? A standing document that is absent or
+    // unparseable is a change by definition; otherwise compare the bytes.
+    changed = standing === undefined ? true : JSON.stringify(standing) !== JSON.stringify(doc);
 
     // snapshotHistory reads the pre-import graph.json to seed snapshot 0000,
     // so it must run before the write — that seed is what undo restores.
@@ -205,6 +228,7 @@ export function importDoc(
       ].join('\n'),
     );
   });
+  return { out, changed: out.ok && changed };
 }
 
 /**
@@ -216,11 +240,20 @@ export function runImportText(
   source: string,
   opts: ImportOptions = {},
 ): CommandOutput {
+  return runImportTextIn(raw, source, opts).out;
+}
+
+/** runImportText, plus the `changed` flag auto-serve needs (spec §9.1 S1). */
+export function runImportTextIn(
+  raw: string,
+  source: string,
+  opts: ImportOptions = {},
+): { out: CommandOutput; changed: boolean } {
   const parsed = parseDocText(raw, source);
-  if (!parsed.ok) return rejected(parsed.errors);
+  if (!parsed.ok) return { out: rejected(parsed.errors), changed: false };
 
   const ctx = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
-  return importDoc(ctx, parsed.doc, opts.confirm === true);
+  return importDocIn(ctx, parsed.doc, opts.confirm === true);
 }
 
 /**
@@ -237,8 +270,10 @@ export async function runImportTextServing(
   opts: ImportOptions = {},
 ): Promise<CommandOutput> {
   const ctx = createContext({ ...(opts.dir !== undefined ? { dir: opts.dir } : {}) });
-  const out = runImportText(raw, source, opts);
-  return autoServe(out, ctx, out.ok, {
+  // `changed`, not `ok`: re-importing the document already on disk is a
+  // successful write of identical bytes, and S1 is about the document moving.
+  const { out, changed } = runImportTextIn(raw, source, opts);
+  return autoServe(out, ctx, changed, {
     ...(opts.noServe !== undefined ? { noServe: opts.noServe } : {}),
   });
 }

@@ -19,8 +19,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   autoServeSuppressed,
+  claimStart,
   ensureViewer,
   IDENTITY_PATH,
+  isLive,
   NO_AUTOSERVE_ENV,
   pidAlive,
   probeViewer,
@@ -28,27 +30,32 @@ import {
   removeServeRecord,
   serveRecordPath,
   setViewerLauncher,
+  STARTUP_GRACE_MS,
   VIEWER_CONTRACT,
   writeServeRecord,
   type LaunchRequest,
 } from '../src/serve/autoserve.js';
 import { runServe, type ServeHandle } from '../src/commands/serve.js';
-import { createContext } from '../src/commands/context.js';
+import { createContext, renderAutoServeSkip } from '../src/commands/context.js';
 import { runPatchTextServing } from '../src/commands/patch.js';
 import { runGet } from '../src/commands/get.js';
 import { runAnalyse } from '../src/commands/analyse.js';
 import { runReset } from '../src/commands/reset.js';
 import { runUndoServing } from '../src/commands/undo.js';
+import { runImportTextIn, runImportTextServing } from '../src/commands/import.js';
 import { callTool } from '../src/mcp/tools.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+
+/** The built CLI the detached viewer is spawned from. Absent before a build. */
+const BUILT_CLI = path.join(REPO, 'packages/cli/dist/bin/diagram.js');
 
 // ---------------------------------------------------------------------------
 // scaffolding
 // ---------------------------------------------------------------------------
 
 const dirs: string[] = [];
-const servers: http.Server[] = [];
+const servers: (http.Server | net.Server)[] = [];
 const handles: ServeHandle[] = [];
 const children: ChildProcess[] = [];
 /** pids we detached on purpose and must not leave behind. */
@@ -88,6 +95,42 @@ async function stranger(): Promise<{ port: number }> {
       resolve({ port: typeof addr === 'object' && addr !== null ? addr.port : 0 });
     });
   });
+}
+
+/**
+ * Occupy a whole 11-port range (from..from+PORT_ATTEMPTS) and return its base.
+ *
+ * pickPort's answer is "there is nowhere to put a viewer", and the only honest
+ * way to ask that question is to actually hold every port it would try. The
+ * bases are random and high so this never collides with §9's 4400 range or
+ * with another suite; a base whose range is not entirely free is abandoned and
+ * another tried.
+ */
+async function occupyRange(): Promise<number> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const base = 40_000 + Math.floor(Math.random() * 20_000);
+    const bound: net.Server[] = [];
+    let all = true;
+    for (let p = base; p <= base + 10; p += 1) {
+      const s = net.createServer();
+      // eslint-disable-next-line no-await-in-loop -- sequential by design
+      const okBind = await new Promise<boolean>((resolve) => {
+        s.once('error', () => resolve(false));
+        s.listen(p, '127.0.0.1', () => resolve(true));
+      });
+      if (!okBind) {
+        all = false;
+        break;
+      }
+      bound.push(s);
+    }
+    if (all) {
+      servers.push(...bound);
+      return base;
+    }
+    for (const s of bound) s.close();
+  }
+  throw new Error('could not find eleven consecutive free ports');
 }
 
 /** A pid that is certainly gone: spawn something trivial and wait for it. */
@@ -315,6 +358,51 @@ describe('the reuse check', () => {
 // ---------------------------------------------------------------------------
 // 3. the hook: which commands fire it (S1)
 // ---------------------------------------------------------------------------
+
+describe('the "starting" window is probed, not trusted', () => {
+  it('a stale "starting" record is live when the port really answers', async () => {
+    const dir = tmpDiagramDir();
+    const handle = await runServe({ dir, port: 0, open: false });
+    handles.push(handle);
+    const document = path.join(dir, 'graph.json');
+    // Older than the grace window, so the ONLY thing that can make this live
+    // is the identity probe — which is the point: the pid is never the whole
+    // answer, because pids are recycled.
+    const record = {
+      contract: VIEWER_CONTRACT,
+      pid: process.pid,
+      port: handle.port,
+      url: `http://localhost:${handle.port}/`,
+      document,
+      dir,
+      startedAt: Date.now() - STARTUP_GRACE_MS - 1_000,
+      state: 'starting' as const,
+    };
+    expect(await isLive(record, document)).toBe(true);
+  });
+
+  it('a "starting" record with a live pid and no listener dies with the window', async () => {
+    const dir = tmpDiagramDir();
+    const document = path.join(dir, 'graph.json');
+    const port = await freePort();
+    const base = {
+      contract: VIEWER_CONTRACT,
+      // Alive — this very process. Under the old rule that alone was enough.
+      pid: process.pid,
+      port,
+      url: `http://localhost:${port}/`,
+      document,
+      dir,
+      state: 'starting' as const,
+    };
+    // Inside the window: believed, because a child really may not have bound.
+    expect(await isLive({ ...base, startedAt: Date.now() }, document)).toBe(true);
+    // Outside it: not believed, however alive the pid is.
+    expect(
+      await isLive({ ...base, startedAt: Date.now() - STARTUP_GRACE_MS - 1 }, document),
+    ).toBe(false);
+  });
+});
 
 describe('the hook (S1)', () => {
   it('starts a viewer on the patch that first draws something', async () => {
@@ -555,6 +643,198 @@ describe('diagram init', () => {
 // 7. S3 — the child really outlives its parent
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// import: changed, not merely successful (S1)
+// ---------------------------------------------------------------------------
+
+describe('import fires on a change, not on a success (S1)', () => {
+  const docText = JSON.stringify({
+    schemaVersion: 1,
+    title: 'Imported',
+    direction: 'DOWN',
+    nodes: [{ id: 'api', type: 'service', label: 'API', parent: null }],
+    groups: [],
+    edges: [],
+    collapsed: [],
+  });
+
+  it('reports changed for the first import and not for an identical re-import', () => {
+    const dir = tmpDiagramDir();
+    expect(runImportTextIn(docText, 'stdin', { dir }).changed).toBe(true);
+    // The same bytes again: a successful write that moved nothing.
+    expect(runImportTextIn(docText, 'stdin', { dir, confirm: true }).changed).toBe(false);
+    // And a real replacement is a change again.
+    const other = JSON.stringify({ ...JSON.parse(docText), title: 'Other' });
+    expect(runImportTextIn(other, 'stdin', { dir, confirm: true }).changed).toBe(true);
+  });
+
+  it('does not reach for a viewer when the re-import changes nothing', async () => {
+    const dir = tmpDiagramDir();
+    const calls = recordingLauncher();
+
+    await runImportTextServing(docText, 'stdin', { dir });
+    expect(calls).toHaveLength(1);
+
+    // Clear the record, so a second ensureViewer call would be visible as a
+    // second launch rather than hidden behind a reuse.
+    removeServeRecord(dir);
+    await runImportTextServing(docText, 'stdin', { dir, confirm: true });
+    expect(calls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// one viewer per document, under concurrency (S2)
+// ---------------------------------------------------------------------------
+
+describe('one viewer per document under concurrency (S2)', () => {
+  it('the claim is exclusive — the second caller is told it is taken', () => {
+    const dir = tmpDiagramDir();
+    const record = {
+      contract: VIEWER_CONTRACT,
+      pid: process.pid,
+      port: 65_000,
+      url: 'http://localhost:65000/',
+      document: path.join(dir, 'graph.json'),
+      dir,
+      startedAt: Date.now(),
+      state: 'starting' as const,
+    };
+    expect(claimStart(dir, record)).toBe('claimed');
+    expect(claimStart(dir, { ...record, port: 65_001 })).toBe('taken');
+    // The winner's record is the one on disk; the loser wrote nothing.
+    expect(readServeRecord(dir)!.port).toBe(65_000);
+  });
+
+  it('two overlapping calls in one process start exactly ONE viewer', async () => {
+    // The MCP server is a single process whose tool handler is async and is
+    // not serialised, so two diagram_patch calls in flight interleave here.
+    // Separate CLI processes are serialised by the store lock; this is not.
+    const dir = tmpDiagramDir();
+    const document = path.join(dir, 'graph.json');
+    const basePort = await freePort();
+    const calls = recordingLauncher();
+
+    const [a, b] = await Promise.all([
+      ensureViewer({ dir, document, basePort }),
+      ensureViewer({ dir, document, basePort }),
+    ]);
+
+    expect(calls).toHaveLength(1);
+    expect([a.action, b.action].sort()).toEqual(['reused', 'started']);
+    // And both callers name the same window, so neither can print a URL that
+    // nothing is listening on.
+    const urls = [a, b].map((r) => (r.action === 'skipped' ? '' : r.url));
+    expect(urls[0]).toBe(urls[1]);
+  });
+
+  it('six overlapping calls still start exactly ONE viewer', async () => {
+    const dir = tmpDiagramDir();
+    const document = path.join(dir, 'graph.json');
+    const basePort = await freePort();
+    const calls = recordingLauncher();
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => ensureViewer({ dir, document, basePort })),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(results.filter((r) => r.action === 'started')).toHaveLength(1);
+    expect(results.filter((r) => r.action === 'reused')).toHaveLength(5);
+  });
+
+  it('two overlapping patches print the started line exactly once', async () => {
+    const dir = tmpDiagramDir();
+    const calls = recordingLauncher();
+    const outs = await Promise.all([
+      runPatchTextServing(seed, 'test', { dir }),
+      runPatchTextServing(
+        JSON.stringify({
+          summary: 'two',
+          ops: [{ op: 'addNode', node: { id: 'db', type: 'database', label: 'DB', parent: null } }],
+        }),
+        'test',
+        { dir },
+      ),
+    ]);
+    expect(calls).toHaveLength(1);
+    expect(outs.filter((o) => o.text.includes('viewer: started'))).toHaveLength(1);
+  });
+
+  it('does not delete a record another viewer installed while it was probing', async () => {
+    // The stale-replace path used to delete unguarded. isLive can spend up to
+    // PROBE_TIMEOUT_MS on the wire, and a viewer that registers itself inside
+    // that window owns the file by the time we conclude "stale".
+    const dir = tmpDiagramDir();
+    const gone = await deadPid();
+    const document = path.join(dir, 'graph.json');
+    writeServeRecord(dir, {
+      contract: VIEWER_CONTRACT,
+      pid: gone,
+      port: 65_010,
+      url: 'http://localhost:65010/',
+      document,
+      dir,
+      startedAt: Date.now(),
+      state: 'listening',
+    });
+    // Someone else's record lands before we act on our stale read.
+    writeServeRecord(dir, {
+      contract: VIEWER_CONTRACT,
+      pid: process.pid,
+      port: 65_011,
+      url: 'http://localhost:65011/',
+      document,
+      dir,
+      startedAt: Date.now(),
+      state: 'starting',
+    });
+    removeServeRecord(dir, gone);
+    expect(readServeRecord(dir)?.port).toBe(65_011);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// a viewer that could not start says so
+// ---------------------------------------------------------------------------
+
+describe('a viewer that could not start (§9.1, the gap itself)', () => {
+  it('says nothing for the opt-out and for a start already in flight', () => {
+    expect(renderAutoServeSkip('opt-out')).toBeNull();
+    expect(renderAutoServeSkip('a viewer is already starting')).toBeNull();
+  });
+
+  it('says what happened for a real failure', () => {
+    expect(renderAutoServeSkip('no viewer binary')).toBe('viewer: not started — no viewer binary');
+    expect(renderAutoServeSkip('no free port in 4400..4410')).toBe(
+      'viewer: not started — no free port in 4400..4410',
+    );
+  });
+
+  it('tells the agent when there is no viewer binary to spawn', async () => {
+    const dir = tmpDiagramDir();
+    setViewerLauncher(() => undefined);
+    const out = await runPatchTextServing(seed, 'test', { dir });
+    expect(out.ok).toBe(true);
+    // The write still succeeded and is still reported first.
+    expect(out.text).toContain('ok —');
+    expect(out.text).toContain('viewer: not started — no viewer binary');
+    // And it takes its claim back rather than leaving a record no viewer answers.
+    expect(readServeRecord(dir)).toBeNull();
+  });
+
+  it('tells the agent when every port in the range is taken', async () => {
+    const dir = tmpDiagramDir();
+    const held = await occupyRange();
+    process.env['DIAGRAM_PORT'] = String(held);
+    const calls = recordingLauncher();
+    const out = await runPatchTextServing(seed, 'test', { dir });
+    expect(calls).toHaveLength(0);
+    expect(out.ok).toBe(true);
+    expect(out.text).toContain(`viewer: not started — no free port in ${held}..${held + 10}`);
+  });
+});
+
 describe('detachment (S3)', () => {
   it('a child spawned this way survives its parent exiting', async () => {
     const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'autoserve-detach-')), 'pid');
@@ -586,14 +866,16 @@ describe('detachment (S3)', () => {
     expect(pidAlive(pid)).toBe(true);
   });
 
-  it('end to end: a real `diagram patch` leaves a viewer running behind it', async () => {
-    const built = path.join(REPO, 'packages/cli/dist/bin/diagram.js');
-    if (!fs.existsSync(built)) {
-      // `npm run build` has not run in this tree. The mechanism is covered by
-      // the test above; this one needs the binary auto-serve actually spawns.
-      expect(fs.existsSync(built)).toBe(false);
-      return;
-    }
+  // `npm run build` has not run in this tree, so there is no binary for
+  // auto-serve to spawn. skipIf, NOT an early return that asserts something
+  // trivially true: this is the only test that can catch a broken detach, and
+  // a version of it that reports green without running is worse than one that
+  // is honestly absent from the count. The mechanism is still covered by the
+  // test above, which uses the same option triple.
+  it.skipIf(!fs.existsSync(BUILT_CLI))(
+    'end to end: a real `diagram patch` leaves a viewer running behind it',
+    async () => {
+    const built = BUILT_CLI;
     const dir = tmpDiagramDir();
     const port = await freePort();
     const patchFile = path.join(path.dirname(dir), 'patch.json');
@@ -639,5 +921,7 @@ describe('detachment (S3)', () => {
     expect(alive).toBe(true);
     expect(pidAlive(record!.pid)).toBe(true);
     expect(record!.pid).not.toBe(process.pid);
-  }, 30_000);
+    },
+    30_000,
+  );
 });
