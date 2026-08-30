@@ -481,6 +481,86 @@ reveals in a hover panel (§8.6). Owner, SLA, runbook link, the repo path it was
 Metadata is how an agent that has read the codebase records *where a node came from*, which
 is what makes rule 9 of the agent rules (cite what you found) checkable rather than a hope.
 
+## 3.8 Bindings — provenance, and the check that makes it real
+
+**Not built. This is P5-01 to P5-03.**
+
+Agent rule 9 says *cite the file each node and edge came from*. Today that is
+unenforceable, and the benchmark says so: on the held-out reference system the agent finds
+the planted hidden edge in 20 of 20 runs, points it the right way in 20 of 20, and cites it
+to its source file in **2**. The reason is structural, not behavioural — `GEdge` has no
+`note`, no `meta` and no binding, so **there is physically nowhere to put an edge citation.**
+The rule asks for something the schema cannot hold.
+
+```ts
+export type BindingSource =
+  | 'repo' | 'compose' | 'terraform' | 'k8s-manifest' | 'package';
+
+export interface GBinding {
+  source: BindingSource;
+  ref: string;        // repo-relative path or identifier, never a URL
+  line?: number;      // 1-based, when the claim is about one line
+}
+
+export interface GNode { /* ... */ bindings?: GBinding[] }   // max 8
+export interface GEdge { /* ... */ bindings?: GBinding[] }   // max 4
+```
+
+A binding says **where a claim was read**, never anything about a running system (R5).
+`repo=services/orders/`, `compose=orders-api`, `terraform=aws_ecs_service.orders`. It is
+§4.1's `### Meta` idea made checkable.
+
+### Invariants
+
+| # | Rule | Error message |
+|---|---|---|
+| V14 | `source` is on the known list | `binding source "Compose" on node "orders": use lowercase, one of repo, compose, terraform, k8s-manifest, package` |
+| V15 | No duplicate `source` on one element | `node "orders" has two "compose" bindings: one entry per source` |
+| V16 | `ref` is repo-relative, never a URL | `binding ref on "orders" must be a repo-relative path, not a URL` |
+| V17 | ≤ 8 bindings per node, ≤ 4 per edge | `node "orders" has 9 bindings, max 8` |
+
+### The deterministic check
+
+Invariants only prove a binding is well-formed. **A citation to a file that does not exist
+is worse than no citation**, because it reads as evidence. So provenance needs a checker
+that touches the filesystem, and it must be deterministic — no model, no judgement, exit 0
+or exit 1:
+
+```
+diagram check --bindings [--root <path>]
+```
+
+For every binding: does `ref` resolve under `--root`? If `line` is given, does the file have
+that many lines? Report each failure with the element it came from, and exit non-zero if any
+fail. Terse, like everything else (§4.1):
+
+```
+bindings — 14 elements, 22 bindings
+  ok        20
+  missing    1   orders    repo=services/orders/   no such path
+  stale      1   e7        repo=internal/pay.go:412   file has term lines
+```
+
+Three properties make this worth building rather than a nicety:
+
+1. **It runs in CI.** A diagram whose citations no longer resolve is a diagram that has
+   drifted from the code, and that is detectable on every commit without an agent.
+2. **It is the honest half of rule 9.** An agent can invent a citation; it cannot invent one
+   that resolves. Precision becomes measurable rather than asserted — which is what turns
+   acceptance G10 and G11 from claims into tests.
+3. **It is checkable by the eval harness** (P5-02), so binding precision joins direction and
+   invention as a number the benchmark reports.
+
+### The rule this makes enforceable
+
+> **15. CITE WHAT YOU OPENED, NOTHING ELSE.** Record a binding only for a file you actually
+> read the identifier out of. `diagram check --bindings` resolves every one of them against
+> the filesystem, so an invented citation does not survive the next commit — it just makes
+> the diagram look sourced while being wrong, which is worse than leaving it out.
+
+The sanction has to be in the rule text. An agent told merely to cite will cite; an agent
+told the citation is mechanically verified has a reason to cite only what it read.
+
 ---
 
 # Part 4 — The Agent Interface
