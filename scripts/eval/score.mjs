@@ -1,15 +1,17 @@
 // scripts/eval/score.mjs — the scorer for the M8 eval harness (BUILD.md P3-05,
 // spec Part 10 M8, acceptance G9, G12 and G13).
 //
-// NOT G10/G11. G11 is "every node carries a binding whose chip opens the right
-// file", and there is no binding in the schema yet: GNode has no such field
-// (packages/core/src/schema/graph.ts), neither gold file carries one, and
-// BUILD.md P5-01 is where GBinding arrives. P5-02 adds binding precision to
-// this harness. Until then nothing here measures provenance, and the header
-// says so rather than implying coverage.
+// AND G10/G11, since P5-02. `bindings` on a node and on an edge (spec 3.8)
+// gave provenance somewhere to live, so this scorer now resolves every citation
+// an agent produced against the STAGED COPY of the reference system and reports
+// two more numbers. See the BINDINGS block below for what they mean and why
+// they are two numbers rather than one. Runs scored before bindings existed
+// have no `bindings` key; aggregate.mjs reports those metrics as absent rather
+// than as zero.
 //
-// Input: one produced document (whatever `diagram export json` wrote) and one
-// gold document (fixtures/ref-<s>/gold.json). Output: four numbers.
+// Input: one produced document (whatever `diagram export json` wrote), one
+// gold document (fixtures/ref-<s>/gold.json) and, for provenance, the staged
+// tree the agent read. Output: six numbers.
 //
 //   node set    precision and recall of node identity, matched on MEANING
 //   edge set    precision and recall of edges, IGNORING direction
@@ -103,15 +105,23 @@
 // G12 — WHAT "FOUND" MEANS, HONESTLY. Both answer keys say the hidden edge is
 // found only when the citation resolves to the source file the coupling is
 // actually visible in; a citation pointing at docker-compose.yml is a lucky
-// guess. That cannot be measured per-edge in schema v1: GEdge carries
-// id/from/to/label/style/arrow/cardinality and nothing else — no note, no meta,
-// no binding — so an agent has nowhere to hang an edge citation. So `found`
-// stays exactly what it was (the pair is drawn, the number stays comparable)
-// and a SECOND, weaker number is reported beside it: `citedInDocument`, true
-// when the accepted source path appears anywhere the document can carry text —
-// node notes, node meta values, edge labels, the title. It is document-level,
-// not edge-level, and it is scored as evidence rather than as the gate. The
-// real per-edge measurement arrives with GBinding (BUILD.md P5-01/P5-02).
+// guess. Until P5-01 that could not be measured per edge — a GEdge carried
+// id/from/to/label/style/arrow/cardinality and nothing else, so the agent had
+// nowhere to hang an edge citation, and the measured "cited in 2 of 20 runs"
+// was a fact about the SCHEMA, not about the agent. Now:
+//
+//   found                   the pair is drawn. UNCHANGED, so the whole series
+//                           of runs before this one stays comparable.
+//   citedInBinding          the produced edge itself carries a binding whose
+//                           ref matches the accepted source file.
+//   citedInResolvedBinding  ...and that binding resolves on disk. This is the
+//                           one to read: a ref that matches the pattern and
+//                           points at nothing is not evidence of reading.
+//   citedInDocument         the old, weaker document-level signal (the path
+//                           appears in some note, meta value, edge label or
+//                           the title), kept for comparability.
+//
+// All four are reported; `found` is still the gate.
 //
 // Direction is scored only over pairs that are in BOTH documents: of the edges
 // correctly identified, the fraction pointing the right way. A pair drawn more
@@ -121,10 +131,243 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CONFIG_PATH = path.join(HERE, 'config.json');
+
+// ---------------------------------------------------------------------------
+// BINDINGS (P5-02, acceptance G10/G11) — the provenance half
+// ---------------------------------------------------------------------------
+//
+// Two numbers, and they are deliberately NOT one number:
+//
+//   binding precision  of the bindings the agent produced, the fraction that
+//                      RESOLVE against the staged copy of the reference
+//                      system. This is the HONESTY number. G10's bar is 1.0.
+//   binding coverage   the fraction of produced nodes and edges carrying any
+//                      binding at all. This is the EFFORT number.
+//
+// Folding them together would let an agent that cites one node perfectly score
+// the same as one that cites everything perfectly, and they fail for opposite
+// reasons: low coverage is laziness, low precision is invention. Invention is
+// the one this feature exists to catch — "a citation to a file that does not
+// exist is worse than no citation, because it reads as evidence" (spec §3.8) —
+// so it gets the acceptance gate and coverage gets reported beside it.
+//
+// THE RESOLVER IS NOT REIMPLEMENTED HERE. It is imported from the built CLI:
+// packages/core/src/bindings/resolve.ts, the same function `diagram check
+// --bindings` runs. A second implementation in this file could disagree with
+// the checker, and then the benchmark and the commit hook would be grading the
+// same document differently — with the eval, which nobody runs on every
+// commit, being the one that is wrong. So: one resolver, two callers.
+//
+// Consequences of reusing it, all of them wanted:
+//   * an identifier ref (`compose=orders-api`, `terraform=aws_ecs_service.x`)
+//     comes back `unchecked`, not `missing`. It is a legitimate citation form
+//     that names something inside a file, so it is excluded from BOTH sides of
+//     precision and reported separately. Scoring it as a hit would launder an
+//     invented identifier; scoring it as a miss would punish the most precise
+//     citation available for a terraform resource.
+//   * a `..`, absolute or URL ref comes back `malformed` and COUNTS AGAINST
+//     precision. V16 rejects all of them on every write path, so one can only
+//     reach a produced document by hand-editing past validation.
+//   * a symlink out of the staged tree is `escaped`, and also counts against.
+//
+// TWO ROOTS, AND WHY THAT IS NOT LAXITY. The rig runs the agent with its cwd
+// set to the workspace and the prompt pointing at `./system`, so "repo-relative"
+// has two honest readings: `web/nginx.conf` (relative to the repository it was
+// asked to diagram) and `system/web/nginx.conf` (relative to where it was
+// standing). The first smoke run wrote the second spelling for all 25 of its
+// citations, every one of them a real file it had read — and scoring them
+// against the system directory alone reported binding precision 0.0 for a
+// document whose provenance was perfect. That is the exact failure this
+// feature exists to prevent, pointed at the agent instead of by it.
+//
+// So a binding is resolved against the staged system directory and, if that
+// misses, against the workspace above it. BOTH are inside the run's own temp
+// tree, so nothing outside what the agent could read becomes resolvable, and a
+// path that exists in neither is still missing. The split is reported
+// (`counts.viaAltRoot`) so a reader can see which spelling was used rather than
+// discovering it in a comment.
+
+const RESOLVER_PATH = path.resolve(
+  HERE,
+  '..',
+  '..',
+  'packages',
+  'cli',
+  'dist',
+  'core',
+  'src',
+  'bindings',
+  'resolve.js',
+);
+
+/**
+ * The checker's resolver, or null when the CLI has not been built.
+ *
+ * Loaded once, eagerly, and NOT fatal on its own: `--score-only` on a saved
+ * document with no root still works, and a document with no bindings needs no
+ * resolver. It becomes fatal the moment a root is given (see scoreBindings),
+ * because the alternative is reporting "precision: null, all good" for a run
+ * whose provenance was never checked.
+ */
+let resolverModule = null;
+try {
+  resolverModule = await import(pathToFileURL(RESOLVER_PATH).href);
+} catch {
+  resolverModule = null;
+}
+
+/** Statuses that mean the citation is wrong. Mirrors resolve.ts's FAILING. */
+const BINDING_FAILURES = new Set(['missing', 'stale', 'escaped', 'malformed']);
+
+/**
+ * What happened to one specific binding, looked up in an already-scored block:
+ * `ok`, one of the failures, `unchecked`, or null when bindings were not
+ * scored at all. Matched on the checker's own `source=ref[:line]` spelling, so
+ * this cannot disagree with the report it reads.
+ */
+function bindingStatusOf(block, kind, id, binding) {
+  if (!block.scored) return null;
+  const formatted = `${binding.source}=${binding.ref}${
+    binding.line === undefined ? '' : `:${binding.line}`
+  }`;
+  const hit = (block.results ?? []).find(
+    (r) => r.kind === kind && r.id === id && r.binding === formatted,
+  );
+  return hit ? hit.status : null;
+}
+
+/**
+ * Every node and edge in the produced document, with its bindings.
+ * Groups are not elements: they carry no bindings in the schema.
+ */
+function boundElements(produced) {
+  const nodes = Array.isArray(produced.nodes) ? produced.nodes : [];
+  const edges = Array.isArray(produced.edges) ? produced.edges : [];
+  return [
+    ...nodes.map((n) => ({ kind: 'node', id: String(n.id ?? ''), bindings: n.bindings ?? [] })),
+    ...edges.map((e) => ({ kind: 'edge', id: String(e.id ?? ''), bindings: e.bindings ?? [] })),
+  ];
+}
+
+/**
+ * Score the provenance of one produced document against a tree on disk.
+ *
+ * `root` is the STAGED COPY of the reference system — the directory the agent
+ * was actually pointed at, not fixtures/ref-<s>/, which the agent never sees
+ * and which carries the answer key. Passing the fixture would score citations
+ * against files the agent could not have read.
+ *
+ * Returns `scored: false` with null numbers when no root was given, so an
+ * unscored run is visibly unscored rather than silently perfect; aggregate.mjs
+ * counts those as `absent` and flags the mean as describing a subset.
+ */
+export function scoreBindings(produced, root, altRoot = null) {
+  const elements = boundElements(produced);
+  const withBinding = elements.filter((e) => e.bindings.length > 0);
+  const nodes = elements.filter((e) => e.kind === 'node');
+  const edges = elements.filter((e) => e.kind === 'edge');
+  const produce = elements.reduce((n, e) => n + e.bindings.length, 0);
+
+  const coverageBlock = {
+    _coverage:
+      'the fraction of produced nodes and edges carrying any binding (the EFFORT number). ' +
+      'Groups are not counted: the schema gives them no bindings.',
+    elements: elements.length,
+    elementsWithBinding: withBinding.length,
+    coverage: ratio(withBinding.length, elements.length),
+    nodeCoverage: ratio(nodes.filter((e) => e.bindings.length > 0).length, nodes.length),
+    edgeCoverage: ratio(edges.filter((e) => e.bindings.length > 0).length, edges.length),
+  };
+
+  if (!root) {
+    return {
+      _what: 'provenance (acceptance G10/G11). Not scored: no --bindings-root was given.',
+      scored: false,
+      why:
+        'binding precision needs the tree the agent read, and no --bindings-root was passed. ' +
+        'eval.sh passes the staged copy; with --score-only, pass one to check citations.',
+      produced: produce,
+      precision: null,
+      ...coverageBlock,
+    };
+  }
+  if (!resolverModule) {
+    // Loud, not null: a run asked to check provenance and could not.
+    throw new Error(
+      `binding scoring needs the built CLI resolver at ${RESOLVER_PATH} — run 'npm run build'. ` +
+        'Refusing to report a binding score that resolved nothing.',
+    );
+  }
+
+  const doc = {
+    nodes: Array.isArray(produced.nodes) ? produced.nodes : [],
+    edges: Array.isArray(produced.edges) ? produced.edges : [],
+  };
+  const primary = resolverModule.resolveBindings(doc, root);
+  // The second reading of "repo-relative" — see TWO ROOTS above. Same document,
+  // same resolver, so the two result arrays are in the same document order and
+  // index-aligned; a binding takes the better of the two outcomes.
+  const alternate =
+    altRoot && altRoot !== root ? resolverModule.resolveBindings(doc, altRoot) : null;
+
+  let viaAltRoot = 0;
+  const results = primary.results.map((r, i) => {
+    if (r.status === 'ok' || !alternate) return r;
+    const other = alternate.results[i];
+    if (other && other.status === 'ok') {
+      viaAltRoot += 1;
+      return other;
+    }
+    return r;
+  });
+  const counts = { ok: 0, unchecked: 0, missing: 0, stale: 0, escaped: 0, malformed: 0 };
+  for (const r of results) counts[r.status] += 1;
+  const report = { ...primary, results, counts };
+
+  const ok = counts.ok;
+  const unchecked = counts.unchecked;
+  const failed = results.filter((r) => BINDING_FAILURES.has(r.status));
+
+  return {
+    _what:
+      'provenance (acceptance G10/G11): precision is the HONESTY number, coverage the EFFORT ' +
+      'number, and they are separate on purpose. Resolved by the same code as `diagram check ' +
+      '--bindings` (packages/core/src/bindings/resolve.ts), never by a second implementation.',
+    scored: true,
+    root,
+    altRoot: altRoot && altRoot !== root ? altRoot : null,
+    produced: produce,
+    resolved: ok,
+    // `unchecked` (an identifier ref, or a file too large to count lines in) is
+    // in NEITHER side of this ratio: it is not a verified citation and it is
+    // not a wrong one. It is reported so a run that cited everything as
+    // identifiers cannot hide behind a precision computed over three paths.
+    precision: ratio(ok, ok + failed.length),
+    unchecked,
+    counts: { ...report.counts, viaAltRoot },
+    // Every binding with what happened to it, in document order. Small (a
+    // document carries tens, not thousands) and it is what makes a precision
+    // number auditable by eye rather than taken on trust.
+    results: report.results.map((r) => ({
+      kind: r.kind,
+      id: r.id,
+      binding: r.formatted,
+      status: r.status,
+    })),
+    failures: failed.map((r) => ({
+      kind: r.kind,
+      id: r.id,
+      binding: r.formatted,
+      status: r.status,
+      why: r.reason,
+    })),
+    ...coverageBlock,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // normalisation
@@ -314,10 +557,17 @@ function hitsPattern(pattern, node) {
 /**
  * Score one produced document against gold.
  * `sys` is "a" or "b"; it selects the per-system block of config.json.
+ * `opts.bindingsRoot` is the staged copy of the reference system — the tree the
+ * agent actually read. Without it the binding numbers come back unscored.
  */
-export function score(produced, gold, sys, cfg) {
+export function score(produced, gold, sys, cfg, opts = {}) {
   const sysCfg = cfg[sys];
   if (!sysCfg) throw new Error(`no scoring config for system "${sys}"`);
+  const bindings = scoreBindings(
+    produced,
+    opts.bindingsRoot ?? null,
+    opts.bindingsAltRoot ?? null,
+  );
 
   const prodNodes = Array.isArray(produced.nodes) ? produced.nodes : [];
   const { pairs, prod, toGold } = matchNodes(gold.nodes, prodNodes, sysCfg, cfg);
@@ -439,6 +689,28 @@ export function score(produced, gold, sys, cfg) {
     ...(produced.edges || []).map((e) => String(e.label ?? '')),
   ];
   const citationHit = citationRe ? documentText.find((t) => citationRe.test(t)) : undefined;
+
+  // Per-EDGE provenance, which is what both answer keys actually asked for and
+  // what nothing could measure before P5-01: of the produced edges that ARE the
+  // hidden pair, do any carry a binding naming the accepted source file — and
+  // did that binding resolve? A ref that matches the pattern but points at
+  // nothing is not evidence, so `resolved` is reported beside `cited` and is
+  // the number to read. Left as evidence, not a gate: `found` is unchanged, so
+  // the G12 series stays comparable with every run before this one.
+  const hiddenEdgeBindings = [];
+  for (const e of produced.edges || []) {
+    const from = resolve(e.from);
+    const to = resolve(e.to);
+    if (!from || !to || key(from, to) !== heKey) continue;
+    for (const b of e.bindings ?? []) hiddenEdgeBindings.push({ edgeId: String(e.id ?? ''), b });
+  }
+  const heCited = hiddenEdgeBindings.filter(
+    ({ b }) => citationRe && citationRe.test(String(b.ref ?? '')),
+  );
+  const heCitedResolved = heCited.filter(
+    ({ edgeId, b }) => bindingStatusOf(bindings, 'edge', edgeId, b) === 'ok',
+  );
+
   const hiddenEdge = {
     expected: `${he.from} -> ${he.to}`,
     what: he.label,
@@ -448,10 +720,21 @@ export function score(produced, gold, sys, cfg) {
     ),
     citation: {
       _what:
-        'document-level evidence that the accepted source file was read (rule 9). GEdge has no note/meta/binding in schema v1, so this is not per-edge; per-edge provenance arrives with GBinding (BUILD.md P5-01/P5-02).',
+        'evidence that the accepted source file was read (rules 9 and 15). `citedInBinding` is the per-EDGE measurement P5-01 made possible; `citedInDocument` is the older, weaker document-level signal, kept so the series stays comparable with every run before bindings existed.',
       accepted: he.citation ?? null,
       citedInDocument: Boolean(citationHit),
       where: citationHit ?? null,
+      // A binding on the hidden edge itself, naming the accepted source file.
+      citedInBinding: heCited.length > 0,
+      // ...and that binding RESOLVED. A ref matching the pattern but pointing
+      // at nothing is not evidence of reading anything; this is the number to
+      // read. Null when bindings were not scored (no --bindings-root).
+      citedInResolvedBinding: bindings.scored ? heCitedResolved.length > 0 : null,
+      bindings: hiddenEdgeBindings.map(({ edgeId, b }) => ({
+        edge: edgeId,
+        binding: `${b.source}=${b.ref}${b.line === undefined ? '' : `:${b.line}`}`,
+        status: bindingStatusOf(bindings, 'edge', edgeId, b),
+      })),
     },
   };
 
@@ -467,6 +750,7 @@ export function score(produced, gold, sys, cfg) {
 
   return {
     system: sys,
+    bindings,
     nodes: {
       goldCount: gold.nodes.length,
       producedCount: prod.length,
@@ -530,12 +814,18 @@ export function score(produced, gold, sys, cfg) {
   };
 }
 
-/** Read both documents from disk and score them. */
-export function scoreFiles(producedPath, goldPath, sys, configPath = CONFIG_PATH) {
+/**
+ * Read both documents from disk and score them.
+ *
+ * `opts.bindingsRoot` is the tree the agent read — eval.sh passes the staged
+ * copy of the reference system, never fixtures/ref-<s>/ (which the agent has
+ * never seen, and which holds the answer key).
+ */
+export function scoreFiles(producedPath, goldPath, sys, configPath = CONFIG_PATH, opts = {}) {
   const cfg = loadConfig(configPath);
   const gold = loadGold(goldPath, sys, cfg);
   const produced = JSON.parse(fs.readFileSync(producedPath, 'utf8'));
-  return score(produced, gold, sys, cfg);
+  return score(produced, gold, sys, cfg, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -548,12 +838,26 @@ function main(argv) {
   for (const k of ['doc', 'gold', 'system']) {
     if (!args[k]) {
       process.stderr.write(
-        'usage: node scripts/eval/score.mjs --doc <produced.json> --gold <gold.json> --system a|b [--run <n>]\n',
+        'usage: node scripts/eval/score.mjs --doc <produced.json> --gold <gold.json> --system a|b\n' +
+          '                                 [--run <n>] [--bindings-root <staged system dir>]\n' +
+          '                                 [--bindings-alt-root <the workspace above it>]\n',
       );
       process.exit(2);
     }
   }
-  const out = scoreFiles(args.doc, args.gold, args.system);
+  const bindingsRoot = args['bindings-root'];
+  const bindingsAltRoot = args['bindings-alt-root'];
+  if (bindingsRoot && !fs.existsSync(bindingsRoot)) {
+    // A root that is not there would resolve every citation as missing and
+    // report precision 0.0 for a document that may be perfect. That is the one
+    // direction of error this feature must never make, so it is fatal.
+    process.stderr.write(`score.mjs: --bindings-root does not exist: ${bindingsRoot}\n`);
+    process.exit(2);
+  }
+  const out = scoreFiles(args.doc, args.gold, args.system, CONFIG_PATH, {
+    ...(bindingsRoot ? { bindingsRoot } : {}),
+    ...(bindingsAltRoot ? { bindingsAltRoot } : {}),
+  });
   if (args.run) out.run = Number(args.run);
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
 }

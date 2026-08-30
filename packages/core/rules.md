@@ -62,15 +62,13 @@ Every node and group needs "parent": a group id, or null for top level.
    node it fronts, do not draw it. A browser, app or device the
    system serves is still a node, though no file deploys it.
 
-9. IF READING A CODEBASE, cite the file each node and edge came from.
-   Do not guess at connections.
+9. IF READING A CODEBASE, cite in `bindings` the file each node and
+   edge came from. Do not guess at connections.
 
 10. DELETION. "Remove the cache" means removeNode plus removeEdge for
     every edge touching it, in one patch.
 
 11. IF A PATCH IS REJECTED, read the errors, fix them, and retry once.
-    They list the valid ids, so do not call diagram_get for an id the
-    error already gave you.
 
 12. AFTER A LARGE CHANGE, tell the user what changed in one line; the
     viewer already shows the picture, do not describe it back.
@@ -81,13 +79,41 @@ Every node and group needs "parent": a group id, or null for top level.
     or leave `alt` off — a guessed `alt` hides a real single point of
     failure, and over-reporting is survivable.
 
+15. CITE WHAT YOU OPENED, NOTHING ELSE. Record a `bindings` entry only
+    for a file you read the identifier out of. `diagram check
+    --bindings` resolves every one, so an invented citation does not
+    survive the next commit.
+
 ---
 
 ## Addendum — node metadata, redundancy and ERD mode
 
 The rules above are unchanged. What follows is additional capability,
-not a revision. (Rule 13, bindings, is not built yet; the numbering
-leaves its place open.)
+not a revision. (There is no rule 13; the number was reserved for
+bindings while they were unbuilt and they arrived as rule 15, so the
+gap is left rather than renumbering rules the benchmark was tuned on.)
+
+### Bindings (`bindings`) — where a claim was read
+
+Any node and any edge may carry `bindings`: the files you read it out
+of. Nothing else in the document can hold an edge citation, so this is
+how rule 9 is kept.
+
+    bindings: [{ "source": "repo", "ref": "internal/pay.go", "line": 412 }]
+
+- `source` is one of `repo`, `compose`, `terraform`, `k8s-manifest`,
+  `package`, lowercase, at most one entry per source per element.
+- `ref` is a repo-relative path (`services/orders/`, `internal/pay.go`)
+  or an identifier inside a file (`orders-api`,
+  `aws_ecs_service.orders`). Never a URL, never absolute, never `..`.
+- `line` is 1-based and only for a ref that names a file.
+- At most 8 bindings on a node, 4 on an edge.
+- A BINDING IS PROVENANCE, NOT STATUS. It says where you read the
+  claim. It never says anything about a running system — no health, no
+  timestamps, no "last checked".
+- `diagram check --bindings` resolves every path ref against the
+  filesystem. See rule 15: a citation that does not resolve is worse
+  than no citation, because it reads as evidence.
 
 ### Redundancy (`alt`)
 

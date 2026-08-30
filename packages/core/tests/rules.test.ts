@@ -86,28 +86,59 @@ describe('compactRules', () => {
     // Schema in the same tool listing, so restating it in prose charges the
     // agent twice for one fact. This text is paid for on every turn: do not
     // raise this number — find the room, or leave the text out.
+    //
+    // P5-02 added rule 15 (bindings) and again found the room rather than
+    // borrowing it. Three places, all of them text the agent was holding
+    // twice or text that was not quite true:
+    //   * "## Group kinds" — five bare words with no gloss, identical to the
+    //     `kind` enum in diagram_patch's generated inputSchema. Rule 7 still
+    //     says what a group MEANS.
+    //   * the product lists on database/queue/cache/storage — the type NAMES
+    //     survive as one line; kafka -> queue and redis -> cache are general
+    //     knowledge, not this project's convention. The two glosses that ARE
+    //     convention (service/external ownership, and client's examples) stay.
+    //   * rule 11's second sentence, which said the errors "list the valid
+    //     ids". Only the unknown-parent error does; the rest offer a single
+    //     "Did you mean". An instruction resting on that is worth less than
+    //     the room it takes.
+    // The full table and the group kinds are still in rules.md, which
+    // `diagram rules` prints and `diagram init` installs as the skill.
     expect(compact.length).toBeLessThan(3000);
   });
 
   it('keeps the no-coordinates preamble and the element types', () => {
     expect(compact).toContain('NEVER produce coordinates');
-    expect(compact).toContain('service');
-    expect(compact).toContain('external');
-    expect(compact).toContain('vpc, region, cluster, account, generic');
+    // Every one of the eight type names still reaches the agent...
+    for (const type of ['service', 'database', 'queue', 'cache', 'storage', 'client', 'external'])
+      expect(compact, type).toContain(type);
+    // ...and so do the two glosses that are this project's convention rather
+    // than general knowledge: who owns a service, and what a client is.
+    expect(compact).toContain('service an application the user owns and deploys');
+    expect(compact).toContain('external a third-party system the user does not control');
+    expect(compact).toContain('client browser app, mobile app, cli');
+  });
+
+  it('leaves the group-kind list to the generated schema', () => {
+    // Deliberate, not an accident of trimming: the same five words ship as the
+    // `kind` enum in diagram_patch's inputSchema, in the same tool listing as
+    // this text. They stay in the canonical file for a human reader.
+    expect(compact).not.toContain('vpc, region, cluster, account, generic');
+    expect(loadRules()).toContain('vpc, region, cluster, account, generic');
   });
 
   it('keeps the headline of every numbered rule, and no others', () => {
     // The rule NUMBERS present, as a set — not a loop to a hard-coded upper
     // bound, which is how rule 14 arrived unpinned while this test still
-    // looped to 12 and passed. The 13 gap is deliberate: BUILD.md P5-02
-    // reserves it for bindings, so asserting the set documents the gap
-    // instead of inviting a renumbering.
+    // looped to 12 and passed. The 13 gap is deliberate and now permanent:
+    // 13 was reserved for bindings while they were unbuilt, and bindings
+    // arrived as rule 15 (spec §3.8), so the gap stays rather than
+    // renumbering rules the M8 benchmark was tuned against.
     const numbers = compact
       .split('\n')
       .map((line) => /^(\d+)\. /.exec(line)?.[1])
       .filter((n): n is string => n !== undefined)
       .map(Number);
-    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14]);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15]);
     expect(compact).toContain('CALL diagram_get FIRST');
     expect(compact).toContain('DO NOT INVENT');
     // Rule 9's edge-level prohibition. Rule 8 is entirely about BOXES ("a
@@ -122,6 +153,19 @@ describe('compactRules', () => {
     // the cap could have dropped the rule this milestone added.
     expect(compact).toContain('14. REDUNDANCY IS TOLD, NEVER DEDUCED.');
     expect(compact).toContain('hides a real single point of failure');
+    // Rule 15 (spec §3.8), and specifically the SANCTION. An agent told merely
+    // to cite will cite; an agent told the citation is mechanically resolved
+    // has a reason to cite only what it read, and the benchmark measured the
+    // difference (the planted hidden edge was cited to its source file in 2 of
+    // 20 runs under rule 9 alone). Pinning the headline alone would let the
+    // half that does the work be trimmed against the cap.
+    expect(compact).toContain('15. CITE WHAT YOU OPENED, NOTHING ELSE.');
+    expect(compact).toContain('`diagram check --bindings` resolves every one');
+    expect(compact).toContain('an invented citation does not survive the next commit');
+    // Rule 9 names the mechanism. Until P5-01 there was nowhere on a GEdge to
+    // put a citation, so the rule asked for something the schema could not
+    // hold; the word `bindings` is what closes that.
+    expect(compact).toContain('cite in `bindings` the file each node and edge came from');
     // The preamble line dropped by COMPACT_SKIP_LINES really is dropped —
     // asserted, not left to fail incidentally on the character budget.
     expect(compact).not.toContain('You edit a structured diagram document');

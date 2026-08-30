@@ -93,15 +93,13 @@ Every node and group needs "parent": a group id, or null for top level.
    node it fronts, do not draw it. A browser, app or device the
    system serves is still a node, though no file deploys it.
 
-9. IF READING A CODEBASE, cite the file each node and edge came from.
-   Do not guess at connections.
+9. IF READING A CODEBASE, cite in \`bindings\` the file each node and
+   edge came from. Do not guess at connections.
 
 10. DELETION. "Remove the cache" means removeNode plus removeEdge for
     every edge touching it, in one patch.
 
 11. IF A PATCH IS REJECTED, read the errors, fix them, and retry once.
-    They list the valid ids, so do not call diagram_get for an id the
-    error already gave you.
 
 12. AFTER A LARGE CHANGE, tell the user what changed in one line; the
     viewer already shows the picture, do not describe it back.
@@ -112,13 +110,41 @@ Every node and group needs "parent": a group id, or null for top level.
     or leave \`alt\` off — a guessed \`alt\` hides a real single point of
     failure, and over-reporting is survivable.
 
+15. CITE WHAT YOU OPENED, NOTHING ELSE. Record a \`bindings\` entry only
+    for a file you read the identifier out of. \`diagram check
+    --bindings\` resolves every one, so an invented citation does not
+    survive the next commit.
+
 ---
 
 ## Addendum — node metadata, redundancy and ERD mode
 
 The rules above are unchanged. What follows is additional capability,
-not a revision. (Rule 13, bindings, is not built yet; the numbering
-leaves its place open.)
+not a revision. (There is no rule 13; the number was reserved for
+bindings while they were unbuilt and they arrived as rule 15, so the
+gap is left rather than renumbering rules the benchmark was tuned on.)
+
+### Bindings (\`bindings\`) — where a claim was read
+
+Any node and any edge may carry \`bindings\`: the files you read it out
+of. Nothing else in the document can hold an edge citation, so this is
+how rule 9 is kept.
+
+    bindings: [{ "source": "repo", "ref": "internal/pay.go", "line": 412 }]
+
+- \`source\` is one of \`repo\`, \`compose\`, \`terraform\`, \`k8s-manifest\`,
+  \`package\`, lowercase, at most one entry per source per element.
+- \`ref\` is a repo-relative path (\`services/orders/\`, \`internal/pay.go\`)
+  or an identifier inside a file (\`orders-api\`,
+  \`aws_ecs_service.orders\`). Never a URL, never absolute, never \`..\`.
+- \`line\` is 1-based and only for a ref that names a file.
+- At most 8 bindings on a node, 4 on an edge.
+- A BINDING IS PROVENANCE, NOT STATUS. It says where you read the
+  claim. It never says anything about a running system — no health, no
+  timestamps, no "last checked".
+- \`diagram check --bindings\` resolves every path ref against the
+  filesystem. See rule 15: a citation that does not resolve is worse
+  than no citation, because it reads as evidence.
 
 ### Redundancy (\`alt\`)
 
@@ -344,8 +370,15 @@ let compactCache: string | undefined;
  * and it is the kind of growth that quietly consumes a size budget that
  * exists to protect a per-turn cost. It stays in the full text, which
  * `diagram rules` prints and a human reads.
+ *
+ * "Group kinds" is the same case with nothing left over: five bare words,
+ * `vpc, region, cluster, account, generic`, with no gloss on any of them —
+ * and the identical five ship as the `kind` enum inside the same generated
+ * inputSchema, where an agent choosing a kind is already looking. What a
+ * group MEANS is rule 7, which is untouched. So the list is a second copy of
+ * an enum, charged on every turn; it stays in rules.md for the reader.
  */
-const COMPACT_SKIP_SECTIONS = new Set(['Patch shape']);
+const COMPACT_SKIP_SECTIONS = new Set(['Patch shape', 'Group kinds']);
 
 /**
  * Preamble LINES left out of the compact form, for the same reason as the
@@ -360,6 +393,39 @@ const COMPACT_SKIP_SECTIONS = new Set(['Patch shape']);
  */
 const COMPACT_SKIP_LINES = new Set([
   'You edit a structured diagram document through the diagram tools.',
+]);
+
+/**
+ * Preamble lines the compact form REPLACES with a shorter one — matched whole,
+ * like COMPACT_SKIP_LINES, so a reworded line fails loudly (the long form
+ * reappears in the output) rather than silently rewriting the wrong text. An
+ * empty replacement drops the line.
+ *
+ * Only the element-type table is rewritten, and only for the four types whose
+ * gloss the agent is already holding twice over:
+ *
+ *   - "database  a relational or document store" restates the word.
+ *   - "queue kafka, sqs, rabbitmq, pubsub", "cache redis, memcached" and
+ *     "storage s3, gcs, blob storage" map product names onto a category. That
+ *     mapping is general knowledge, not this project's convention, and the
+ *     eight type NAMES themselves ship beside this text as the `type` enum in
+ *     diagram_patch's generated inputSchema.
+ *
+ * The three glosses that ARE this project's convention stay in full: service
+ * ("the user owns and deploys"), external ("a third-party system the user does
+ * not control") — the ownership axis rule 8 leans on — and client, whose
+ * examples are the carve-out rule 8 ends with. The whole table stays in
+ * rules.md, which `diagram rules` prints and `diagram init` installs as the
+ * skill body, so nothing is lost, only moved off the per-turn budget.
+ *
+ * This is where the room for rule 15 came from. See the note on the size
+ * assertion in tests/rules.test.ts: the cap is not raised, the room is found.
+ */
+const COMPACT_LINE_REWRITES = new Map<string, string>([
+  ['database  a relational or document store', 'database, queue, cache, storage'],
+  ['queue     kafka, sqs, rabbitmq, pubsub', ''],
+  ['cache     redis, memcached', ''],
+  ['storage   s3, gcs, blob storage', ''],
 ]);
 
 export function compactRules(): string {
@@ -388,6 +454,11 @@ export function compactRules(): string {
     if (skipping) continue;
     if (!inRules) {
       if (COMPACT_SKIP_LINES.has(line)) continue;
+      const rewritten = COMPACT_LINE_REWRITES.get(line);
+      if (rewritten !== undefined) {
+        if (rewritten !== '') preamble.push(rewritten);
+        continue;
+      }
       // Headings become labels: "## Element types" -> "Element types:". The
       // column padding that aligns the type table for a human reader is
       // scaffolding like the markdown around it, so runs of spaces collapse:

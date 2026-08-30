@@ -33,6 +33,16 @@ const METRICS = [
   ['direction.accuracy', (r) => r.direction.accuracy],
   ['invention.count', (r) => r.invention.count],
   ['type.accuracy', (r) => r.types.accuracy],
+  // Provenance (P5-02). Two metrics, never one: precision is the HONESTY
+  // number (of the citations produced, how many resolve) and coverage the
+  // EFFORT number (how much of the diagram is cited at all). An agent that
+  // cites one node perfectly must not score like one that cites everything
+  // perfectly, and folding them would let it. `?.` throughout: a run scored
+  // before bindings existed has no `bindings` key and must come through as
+  // absent, not as zero — a zero would read as "it cited nothing", which is a
+  // claim about the agent, not about the harness that could not ask.
+  ['binding.precision', (r) => r.bindings?.precision ?? null],
+  ['binding.coverage', (r) => r.bindings?.coverage ?? null],
 ];
 
 const round = (n) => (n === null ? null : Number(n.toFixed(4)));
@@ -61,6 +71,10 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
   const hiddenRight = runs.filter((r) => r.hiddenEdge.found && r.hiddenEdge.directionCorrect).length;
   const absenceDrawn = runs.filter((r) => r.invention.plantedAbsenceDrawn).length;
   const hiddenCited = runs.filter((r) => r.hiddenEdge.found && r.hiddenEdge.citation?.citedInDocument).length;
+  const hiddenBound = runs.filter(
+    (r) => r.hiddenEdge.found && r.hiddenEdge.citation?.citedInResolvedBinding === true,
+  ).length;
+  const bindingRuns = runs.filter((r) => r.bindings?.scored === true);
 
   const flags = [];
   const failed = Math.max(0, attempted - runs.length);
@@ -77,9 +91,17 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
       flags.push(`${name}: spread ${s.spread} across ${s.n} runs (min ${s.min}, max ${s.max}) — the mean describes no run; read runs[] before changing rules.md`);
     }
     if (s.absent > 0) {
+      // Two different causes, and telling them apart matters: a node metric is
+      // absent because the document was empty (a real, bad result), a binding
+      // metric because nobody gave the scorer a root to resolve against (a
+      // harness gap). Sending a reader to look at the agent for the second is
+      // how an afternoon gets wasted.
+      const why = name.startsWith('binding.')
+        ? 'were scored without a --bindings-root, so their provenance was never resolved'
+        : 'had no denominator (an empty or wholly-invented document)';
       flags.push(
-        `${name}: scored in only ${s.n}/${attempted} run(s) — ${s.absent} had no denominator ` +
-          `(an empty or wholly-invented document) and are excluded, so the mean describes a subset`,
+        `${name}: scored in only ${s.n}/${attempted} run(s) — ${s.absent} of them ${why} ` +
+          `and are excluded, so the mean describes a subset`,
       );
     }
   }
@@ -104,10 +126,47 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
   // Rule 9 evidence. Both answer keys say a hidden edge nobody can point at a
   // source file for is a lucky guess; this is the only signal available until
   // GBinding lands, so it is a flag rather than a gate.
-  if (hiddenFound > 0 && hiddenCited < hiddenFound) {
+  // Only when the STRONGER per-edge signal has also failed. Once an agent cites
+  // the hidden edge with a binding that resolves, rule 9 is satisfied and
+  // repeating a weaker complaint about the document's prose is noise — and a
+  // flag that fires on a clean set is a flag people learn to skip.
+  if (hiddenFound > 0 && hiddenCited < hiddenFound && hiddenBound < hiddenFound) {
     flags.push(
-      `planted hidden edge drawn in ${hiddenFound}/${runs.length} runs but cited to its source file in only ${hiddenCited} (rule 9; evidence, not a gate — see score.mjs on G12)`,
+      `planted hidden edge drawn in ${hiddenFound}/${runs.length} runs but named in the document TEXT ` +
+        `(a note, a meta value, a label) in only ${hiddenCited} — the weak, pre-bindings signal; ` +
+        `the per-edge one is citedByResolvingBindingRuns`,
     );
+  }
+  // Provenance flags (acceptance G10, G11).
+  if (bindingRuns.length === 0) {
+    flags.push(
+      'bindings were NOT resolved in any run — no --bindings-root reached the scorer, so ' +
+        'G10/G11 say nothing about this set. eval.sh passes the staged system automatically; ' +
+        'with --score-only, pass --bindings-root <dir>.',
+    );
+  } else {
+    const bp = summary['binding.precision'];
+    if (bp.mean !== null && bp.mean < 1) {
+      flags.push(
+        `binding.precision mean ${bp.mean} (min ${bp.min}) is below the 1.0 bar (acceptance G10): ` +
+          'a citation that does not resolve is worse than no citation, because it reads as ' +
+          'evidence. Read detail[].bindings.failures — each line is the exact string in the document.',
+      );
+    }
+    const bc = summary['binding.coverage'];
+    if (bc.mean !== null && bc.mean < 1) {
+      flags.push(
+        `binding.coverage mean ${bc.mean} — ${Math.round((1 - bc.mean) * 100)}% of produced nodes ` +
+          'and edges carry no citation at all (acceptance G11 wants every one of them cited)',
+      );
+    }
+    if (hiddenFound > hiddenBound) {
+      flags.push(
+        `planted hidden edge cited to its source file by a RESOLVING binding in only ` +
+          `${hiddenBound}/${hiddenFound} of the runs that found it (rules 9 and 15) — ` +
+          'an edge nobody can point at a source file for is a lucky guess',
+      );
+    }
   }
   // types.accuracy raises no gate anywhere, and on system B it is the residue
   // left by a mistyped node, so a dip must at least be visible.
@@ -133,6 +192,7 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
         foundRuns: hiddenFound,
         foundAndCorrectDirectionRuns: hiddenRight,
         citedToSourceRuns: hiddenCited,
+        citedByResolvingBindingRuns: hiddenBound,
         rate: runs.length ? round(hiddenFound / runs.length) : null,
       },
       absence: {
@@ -140,6 +200,17 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
         drawnRuns: absenceDrawn,
         rate: runs.length ? round(absenceDrawn / runs.length) : null,
       },
+    },
+    bindings: {
+      _what:
+        'provenance across the set (G10/G11). precision is the honesty number, coverage the ' +
+        'effort number; the means are in summary. Resolved by the same code as ' +
+        '`diagram check --bindings`.',
+      scoredRuns: bindingRuns.length,
+      producedTotal: bindingRuns.reduce((n, r) => n + (r.bindings.produced ?? 0), 0),
+      resolvedTotal: bindingRuns.reduce((n, r) => n + (r.bindings.resolved ?? 0), 0),
+      uncheckedTotal: bindingRuns.reduce((n, r) => n + (r.bindings.unchecked ?? 0), 0),
+      failuresTotal: bindingRuns.reduce((n, r) => n + (r.bindings.failures?.length ?? 0), 0),
     },
     flags,
     detail: runs,

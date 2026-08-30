@@ -5,6 +5,7 @@
 #   bash scripts/eval.sh --system b --runs 20 --jobs 4
 #   bash scripts/eval.sh --system a --agent "codex exec"     P3-06 / acceptance G2
 #   bash scripts/eval.sh --system a --score-only <doc.json>  score a saved document, no agent
+#   bash scripts/eval.sh --system a --score-only <doc.json> --bindings-root <dir>
 #   bash scripts/eval.sh --system a --keep                   keep the temp workspaces
 #   bash scripts/eval.sh --system a --force                  overwrite an existing eval-a.json
 #
@@ -20,7 +21,13 @@
 #   invention  components drawn that are in no gold and are not a documented
 #              accepted variant (acceptance G13)
 #
-# plus, per run, whether the planted hidden edge was found (acceptance G12).
+#   bindings   precision (of the citations produced, how many RESOLVE against
+#              the staged system — acceptance G10, bar 1.0) and coverage (how
+#              many produced nodes and edges carry any citation — G11). Two
+#              numbers on purpose: precision is honesty, coverage is effort.
+#
+# plus, per run, whether the planted hidden edge was found (acceptance G12) and
+# whether it is cited by a binding that resolves (rules 9 and 15).
 #
 # -----------------------------------------------------------------------------
 # THE ONE PROPERTY THIS SCRIPT EXISTS TO PROTECT: no gold reaches the agent.
@@ -73,10 +80,13 @@
 # -----------------------------------------------------------------------------
 # WHAT THIS RIG DOES NOT MEASURE — read this next to any score it produces.
 # -----------------------------------------------------------------------------
-#   * PROVENANCE. G10/G11 want every node to carry a binding whose chip opens
-#     the right file. There is no binding in the schema yet (BUILD.md P5-01), so
-#     nothing here scores one. G12's `citedInDocument` is document-level
-#     evidence that the right source file was read, not per-edge provenance.
+#   * WHETHER A CITATION SAYS WHAT THE DOCUMENT CLAIMS. Binding precision (new
+#     in P5-02) proves a cited file EXISTS and is long enough for the line
+#     cited. It cannot prove the file says what the node or edge claims — that
+#     needs a reader. So precision is a floor on honesty, not a ceiling: an
+#     agent that cites a real file at random scores 1.0. What it does catch is
+#     the invented path, which is the failure mode measured at 2/20 before
+#     bindings existed.
 #   * GENERALISATION ACROSS FAILURE KIND. A and B are genuinely different
 #     systems — different language, different infrastructure statement,
 #     different topology, no shared node name — so B tests generalisation across
@@ -106,9 +116,13 @@ KEEP=0
 FORCE=0
 UNCONFINED=0
 SCORE_ONLY=""
+# Only for --score-only: a normal run resolves citations against its own staged
+# copy and needs no flag.
+BINDINGS_ROOT=""
+BINDINGS_ALT_ROOT=""
 TIMEOUT_S=900
 
-usage() { sed -n '2,9p' "$0"; }
+usage() { sed -n '2,10p' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -118,6 +132,8 @@ while [ $# -gt 0 ]; do
     --agent)      AGENT="${2:-}"; shift 2 ;;
     --out)        OUT="${2:-}"; shift 2 ;;
     --score-only) SCORE_ONLY="${2:-}"; shift 2 ;;
+    --bindings-root) BINDINGS_ROOT="${2:-}"; shift 2 ;;
+    --bindings-alt-root) BINDINGS_ALT_ROOT="${2:-}"; shift 2 ;;
     --timeout)    TIMEOUT_S="${2:-}"; shift 2 ;;
     --keep)       KEEP=1; shift ;;
     --force)      FORCE=1; shift ;;
@@ -191,8 +207,11 @@ refuse_clobber() {
 if [ -n "$SCORE_ONLY" ]; then
   [ -f "$SCORE_ONLY" ] || { echo "eval.sh: --score-only: no such file: $SCORE_ONLY" >&2; exit 1; }
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/diagram-eval-score.XXXXXX")"
+  BR_ARGS=()
+  [ -n "$BINDINGS_ROOT" ] && BR_ARGS=(--bindings-root "$BINDINGS_ROOT")
+  [ -n "$BINDINGS_ALT_ROOT" ] && BR_ARGS+=(--bindings-alt-root "$BINDINGS_ALT_ROOT")
   node "$REPO/scripts/eval/score.mjs" --doc "$SCORE_ONLY" --gold "$GOLD" \
-       --system "$SYSTEM" --run 1 > "$WORK/run-1.json" || {
+       --system "$SYSTEM" --run 1 "${BR_ARGS[@]+"${BR_ARGS[@]}"}" > "$WORK/run-1.json" || {
     echo "eval.sh: scoring failed" >&2; rm -rf "$WORK"; exit 1; }
   if [ -z "$OUT" ]; then
     # No file is touched at all unless the operator names one.
@@ -405,8 +424,23 @@ one_run() {
     fi
 
     # 8. score. Gold is read HERE, in the harness, after the agent has exited.
+    #    --bindings-root is the STAGED COPY, $ws/system: the tree the agent was
+    #    actually pointed at. Never $REF — the fixture holds the answer key and
+    #    the agent has never seen it, so citations resolved against it would be
+    #    scored against files that were not there to read. The workspace still
+    #    exists at this point; it is removed after every run has been scored.
+    #
+    #    --bindings-alt-root is $ws, the agent's cwd, because "repo-relative"
+    #    has two honest readings here: the prompt says `./system`, so an agent
+    #    may write `web/nginx.conf` or `system/web/nginx.conf` and both name
+    #    the same real file it read. The first smoke run wrote the second
+    #    spelling for all 25 of its citations; scoring against the system
+    #    directory alone reported precision 0.0 for perfect provenance. Both
+    #    roots are inside this run's own temp tree, so nothing the agent could
+    #    not read becomes resolvable. See score.mjs, TWO ROOTS.
     node "$REPO/scripts/eval/score.mjs" --doc "$run/produced.json" --gold "$GOLD" \
-         --system "$SYSTEM" --run "$n" > "$run/score.json" || exit 1
+         --system "$SYSTEM" --run "$n" --bindings-root "$ws/system" \
+         --bindings-alt-root "$ws" > "$run/score.json" || exit 1
     echo "  scored -> $run/score.json"
   ) > "$log" 2>&1
   local status=$?

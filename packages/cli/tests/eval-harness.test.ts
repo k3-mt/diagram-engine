@@ -602,6 +602,204 @@ describe('harness — the agent can never reach gold', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. provenance — binding precision and coverage (P5-02, acceptance G10/G11)
+// ---------------------------------------------------------------------------
+
+describe('scorer — bindings (acceptance G10/G11)', () => {
+  // A tiny tree standing in for the staged reference system. The scorer resolves
+  // citations against the tree THE AGENT READ, so these tests build one rather
+  // than pointing at fixtures/, which the agent never sees.
+  function tree(): string {
+    const root = tmpdir();
+    fs.mkdirSync(path.join(root, 'services', 'orders'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'docker-compose.yml'), 'services:\n  orders:\n');
+    fs.writeFileSync(path.join(root, 'services', 'orders', 'main.go'), 'a\nb\nc\n');
+    return root;
+  }
+
+  const doc = (nodes: any[], edges: any[] = []) => ({
+    schemaVersion: 1,
+    title: 'T',
+    direction: 'RIGHT',
+    nodes,
+    groups: [],
+    edges,
+    collapsed: [],
+  });
+
+  it('precision is the fraction of citations that resolve, and it is not coverage', () => {
+    const root = tree();
+    const produced = doc(
+      [
+        { id: 'orders', type: 'service', label: 'Orders', parent: null, bindings: [{ source: 'repo', ref: 'services/orders/main.go', line: 2 }] },
+        { id: 'ghost', type: 'service', label: 'Ghost', parent: null, bindings: [{ source: 'repo', ref: 'services/ghost/main.go' }] },
+        { id: 'bare', type: 'service', label: 'Bare', parent: null },
+      ],
+      [],
+    );
+    const b = scorer.scoreBindings(produced, root);
+    expect(b.scored).toBe(true);
+    // One of two citations resolves...
+    expect(b.precision).toBe(0.5);
+    expect(b.failures).toHaveLength(1);
+    expect(b.failures[0].binding).toBe('repo=services/ghost/main.go');
+    expect(b.failures[0].status).toBe('missing');
+    // ...while two of three elements are cited at all. Two different facts.
+    expect(b.coverage).toBeCloseTo(2 / 3, 4);
+  });
+
+  it('a line past the end of the file is stale, not ok', () => {
+    const root = tree();
+    const b = scorer.scoreBindings(
+      doc([{ id: 'orders', type: 'service', label: 'O', parent: null, bindings: [{ source: 'repo', ref: 'services/orders/main.go', line: 99 }] }]),
+      root,
+    );
+    expect(b.precision).toBe(0);
+    expect(b.failures[0].status).toBe('stale');
+  });
+
+  it('an identifier ref is unchecked — in neither half of precision', () => {
+    // `terraform=aws_ecs_service.orders` names a resource inside a file, not a
+    // file. Scoring it as a hit would launder an invented identifier; scoring
+    // it as a miss would report the most precise citation available for a
+    // terraform resource as a failure. It is honestly unchecked.
+    const root = tree();
+    const b = scorer.scoreBindings(
+      doc([
+        { id: 'orders', type: 'service', label: 'O', parent: null, bindings: [
+          { source: 'terraform', ref: 'aws_ecs_service.orders' },
+          { source: 'compose', ref: 'docker-compose.yml' },
+        ] },
+      ]),
+      root,
+    );
+    expect(b.unchecked).toBe(1);
+    expect(b.precision).toBe(1); // one path binding, and it resolves
+    expect(b.produced).toBe(2);
+  });
+
+  it('counts edges as elements — the half that had nowhere to put a citation', () => {
+    const root = tree();
+    const produced = doc(
+      [
+        { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'compose', ref: 'docker-compose.yml' }] },
+        { id: 'b', type: 'service', label: 'B', parent: null, bindings: [{ source: 'compose', ref: 'docker-compose.yml' }] },
+      ],
+      [{ id: 'e1', from: 'a', to: 'b', bindings: [{ source: 'repo', ref: 'services/orders/main.go' }] }, { id: 'e2', from: 'b', to: 'a' }],
+    );
+    const b = scorer.scoreBindings(produced, root);
+    expect(b.elements).toBe(4);
+    expect(b.nodeCoverage).toBe(1);
+    expect(b.edgeCoverage).toBe(0.5);
+    expect(b.coverage).toBe(0.75);
+  });
+
+  it('reports unscored rather than perfect when no root is given', () => {
+    const b = scorer.scoreBindings(
+      doc([{ id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'repo', ref: 'nope.go' }] }]),
+      null,
+    );
+    expect(b.scored).toBe(false);
+    expect(b.precision).toBeNull();
+    // Coverage needs no filesystem, so it is still reported.
+    expect(b.coverage).toBe(1);
+    expect(b.why).toMatch(/--bindings-root/);
+  });
+
+  it('a ref that escapes the root fails, it does not resolve', () => {
+    // V16 rejects ".." on every write path, so this document was hand-edited
+    // past validation. The scorer reports it rather than reading outside the
+    // tree it was pointed at.
+    const root = tree();
+    const b = scorer.scoreBindings(
+      doc([{ id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'repo', ref: '../../etc/passwd' }] }]),
+      root,
+    );
+    expect(b.precision).toBe(0);
+    expect(b.failures[0].status).toBe('malformed');
+  });
+
+  it('scores the hidden edge as cited only when the binding resolves (G12 + rule 15)', () => {
+    // The measurement that could not exist before P5-01. Both answer keys say
+    // the hidden edge counts as found only when the citation resolves to the
+    // file the coupling is visible in.
+    const gold = readGoldDoc('a');
+    const root = tmpdir();
+    fs.mkdirSync(path.join(root, 'fulfilment-worker', 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'fulfilment-worker', 'src', 'auth-client.js'), '1\n2\n3\n4\n5\n6\n7\n');
+
+    const withBinding = JSON.parse(JSON.stringify(gold));
+    const he = withBinding.edges.find((e: any) => e.from === 'fulfilment-worker' && e.to === 'auth');
+    he.bindings = [{ source: 'repo', ref: 'fulfilment-worker/src/auth-client.js', line: 6 }];
+    const cited = scorer.score(withBinding, scorer.loadGold(goldPath('a'), 'a', cfg), 'a', cfg, { bindingsRoot: root });
+    expect(cited.hiddenEdge.found).toBe(true);
+    expect(cited.hiddenEdge.citation.citedInBinding).toBe(true);
+    expect(cited.hiddenEdge.citation.citedInResolvedBinding).toBe(true);
+
+    // The same citation, one character wrong: it names the right kind of file
+    // and points at nothing. Cited, but not evidence.
+    const invented = JSON.parse(JSON.stringify(gold));
+    const he2 = invented.edges.find((e: any) => e.from === 'fulfilment-worker' && e.to === 'auth');
+    he2.bindings = [{ source: 'repo', ref: 'fulfilment-worker/src/auth-client.js', line: 4000 }];
+    const guessed = scorer.score(invented, scorer.loadGold(goldPath('a'), 'a', cfg), 'a', cfg, { bindingsRoot: root });
+    expect(guessed.hiddenEdge.citation.citedInBinding).toBe(true);
+    expect(guessed.hiddenEdge.citation.citedInResolvedBinding).toBe(false);
+  });
+
+  it('accepts either honest reading of "repo-relative": the system dir or the workspace', () => {
+    // Found by the first real smoke run, and it is the failure this whole
+    // feature exists to prevent, pointed the wrong way. The rig runs the agent
+    // with cwd = the workspace and the prompt pointing at ./system, so an agent
+    // may write `services/orders/main.go` or `system/services/orders/main.go`
+    // and both name the same file it actually opened. Resolving only against
+    // the system directory reported 25 of 25 correct citations as missing —
+    // binding precision 0.0 for perfect provenance. Both roots are inside the
+    // run's own temp tree, so nothing the agent could not read becomes
+    // resolvable, and a path in neither root is still missing.
+    const ws = tmpdir();
+    const root = path.join(ws, 'system');
+    fs.mkdirSync(path.join(root, 'services', 'orders'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'services', 'orders', 'main.go'), 'a\nb\n');
+
+    const prefixed = doc([
+      { id: 'orders', type: 'service', label: 'O', parent: null, bindings: [{ source: 'repo', ref: 'system/services/orders/main.go' }] },
+    ]);
+    // One root: a correct citation scored as an invention.
+    expect(scorer.scoreBindings(prefixed, root).precision).toBe(0);
+    // Two roots: resolved, and the report says which spelling was used.
+    const b = scorer.scoreBindings(prefixed, root, ws);
+    expect(b.precision).toBe(1);
+    expect(b.counts.viaAltRoot).toBe(1);
+
+    // The unprefixed spelling still resolves against the system dir...
+    const plain = doc([
+      { id: 'orders', type: 'service', label: 'O', parent: null, bindings: [{ source: 'repo', ref: 'services/orders/main.go' }] },
+    ]);
+    const b2 = scorer.scoreBindings(plain, root, ws);
+    expect(b2.precision).toBe(1);
+    expect(b2.counts.viaAltRoot).toBe(0);
+
+    // ...and a path in NEITHER root is still missing. The second root widens
+    // the reading of a ref, it does not forgive an invented one.
+    const invented = doc([
+      { id: 'orders', type: 'service', label: 'O', parent: null, bindings: [{ source: 'repo', ref: 'services/orders/nope.go' }] },
+    ]);
+    expect(scorer.scoreBindings(invented, root, ws).precision).toBe(0);
+  });
+
+  it('gold itself carries no bindings, so a gold-against-gold run is uncited, not wrong', () => {
+    // The gold files predate P5-01 and are out of bounds for this milestone
+    // (they are a signed-off M8 artefact). So coverage 0 against gold is the
+    // correct answer, and precision is null rather than 0: nothing was claimed.
+    const root = tmpdir();
+    const b = scorer.scoreBindings(readGoldDoc('b'), root);
+    expect(b.produced).toBe(0);
+    expect(b.coverage).toBe(0);
+    expect(b.precision).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. aggregation — a mean alone hides a bimodal result
 // ---------------------------------------------------------------------------
 
@@ -620,9 +818,19 @@ describe('harness — aggregation', () => {
       directionCorrect: hidden,
       // A clean run is one that found the edge AND can point at the source
       // file it read it out of (rule 9). See the G12 note in score.mjs.
-      citation: { citedInDocument: hidden, accepted: 'internal/maintenance/forecast\\.go' },
+      citation: {
+        citedInDocument: hidden,
+        accepted: 'internal/maintenance/forecast\\.go',
+        // P5-02: the per-edge signal. A clean run cites the hidden edge with a
+        // binding that actually resolves; `citedInDocument` is the older,
+        // weaker document-text signal kept beside it.
+        citedInBinding: hidden,
+        citedInResolvedBinding: hidden,
+      },
     },
     types: { accuracy: 1 },
+    // A clean run cites what it read and every citation resolves (G10/G11).
+    bindings: { scored: true, precision: 1, coverage: 1, produced: 8, resolved: 8, unchecked: 0, failures: [] },
   });
 
   it('flags a bimodal result rather than reporting a comfortable mean', () => {
@@ -687,6 +895,74 @@ describe('harness — aggregation', () => {
     const uncited = { ...runOf(1, 2), hiddenEdge: { ...runOf(1, 2).hiddenEdge, citation: { citedInDocument: false } } };
     const out = aggregator.aggregate([runOf(1, 1), uncited], 'b');
     expect(out.planted.hiddenEdge.citedToSourceRuns).toBe(1);
-    expect(out.flags.join('\n')).toMatch(/cited to its source file in only 1/);
+    expect(out.flags.join('\n')).toMatch(/named in the document TEXT .* in only 1/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Provenance (P5-02, acceptance G10/G11)
+  // -------------------------------------------------------------------------
+
+  it('flags binding precision below 1.0 — the G10 bar (acceptance)', () => {
+    // The honesty number. One invented citation in a run is a fail, because a
+    // citation that does not resolve is worse than no citation: it reads as
+    // evidence. 0.875 is seven of eight resolving.
+    const sloppy = {
+      ...runOf(1, 2),
+      bindings: { scored: true, precision: 0.875, coverage: 1, produced: 8, resolved: 7, unchecked: 0, failures: [{ id: 'orders', binding: 'repo=services/orders/main.go', status: 'missing' }] },
+    };
+    const out = aggregator.aggregate([runOf(1, 1), sloppy], 'b');
+    expect(out.summary['binding.precision'].mean).toBeCloseTo(0.9375, 4);
+    expect(out.summary['binding.precision'].min).toBeCloseTo(0.875, 4);
+    expect(out.flags.join('\n')).toMatch(/binding\.precision mean .* below the 1\.0 bar \(acceptance G10\)/);
+    expect(out.bindings.failuresTotal).toBe(1);
+  });
+
+  it('keeps precision and coverage as separate numbers', () => {
+    // The whole point of two numbers: an agent that cites ONE element and cites
+    // it correctly is perfectly honest and almost entirely uncited. A single
+    // combined score would call that a pass or call it a failure; both readings
+    // are wrong, and the pair says exactly what happened.
+    const oneCitedNode = {
+      ...runOf(1, 2),
+      bindings: { scored: true, precision: 1, coverage: 0.05, produced: 1, resolved: 1, unchecked: 0, failures: [] },
+    };
+    const out = aggregator.aggregate([oneCitedNode], 'b');
+    expect(out.summary['binding.precision'].mean).toBe(1);
+    expect(out.summary['binding.coverage'].mean).toBeCloseTo(0.05, 4);
+    // No G10 flag: nothing it said was untrue.
+    expect(out.flags.join('\n')).not.toMatch(/below the 1\.0 bar/);
+    // But the effort is flagged, so nobody reads precision 1.0 as "fully cited".
+    expect(out.flags.join('\n')).toMatch(/binding\.coverage mean 0\.05/);
+  });
+
+  it('says provenance was not measured rather than reporting it as perfect', () => {
+    // A run scored without a --bindings-root (or by a harness older than
+    // P5-02) has no binding numbers at all. Reporting those as 0 would be a
+    // claim about the agent; reporting them as 1 would be a lie. They are
+    // absent, and the flag says so.
+    const unscored = { ...runOf(1, 1) } as Record<string, unknown>;
+    delete unscored['bindings'];
+    const out = aggregator.aggregate([unscored], 'b');
+    expect(out.summary['binding.precision'].n).toBe(0);
+    expect(out.summary['binding.precision'].mean).toBeNull();
+    expect(out.bindings.scoredRuns).toBe(0);
+    expect(out.flags.join('\n')).toMatch(/bindings were NOT resolved in any run/);
+  });
+
+  it('flags the hidden edge found but not cited by a binding that resolves', () => {
+    // The measurement that could not exist before P5-01: an edge drawn but
+    // pointing at no file it was read from is a lucky guess, and the benchmark
+    // measured exactly that (found 20/20, cited 2/20) when GEdge had nowhere
+    // to put a citation.
+    const guessed = {
+      ...runOf(1, 2),
+      hiddenEdge: {
+        ...runOf(1, 2).hiddenEdge,
+        citation: { ...runOf(1, 2).hiddenEdge.citation, citedInBinding: false, citedInResolvedBinding: false },
+      },
+    };
+    const out = aggregator.aggregate([runOf(1, 1), guessed], 'b');
+    expect(out.planted.hiddenEdge.citedByResolvingBindingRuns).toBe(1);
+    expect(out.flags.join('\n')).toMatch(/RESOLVING binding in only 1\/2/);
   });
 });
