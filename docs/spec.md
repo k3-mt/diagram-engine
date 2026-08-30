@@ -2094,9 +2094,29 @@ experiment backlog
 The assumptions line is not padding. It is C3 and Part 15's A5 doing their job: an analysis
 that hides its own blind spots is worse than none.
 
-**In the viewer**, an analysis-style view mode (§15.5): pick a node, ring it, tint the
-at-risk set, and draw the contained boundary at the dashed edges. Still a viewport control,
-never a document edit (§7, §1.6).
+**In the viewer**, an analysis-style view mode (§15.5): ring the target, tint the at-risk
+set, and draw the contained boundary at the dashed edges.
+
+Two ways to choose the target, because they answer different questions:
+
+- **Click a node.** *"What happens if THIS dies"* — the question you have while looking at
+  the diagram. Clicking again clears it.
+- **Cycle the button.** *"What should I break first"* — walks the ranked backlog (§18.4) in
+  order, Shift for previous. This is the only mechanism when nothing is worth clicking yet.
+
+**Multi-select.** Toggling several nodes off at once answers *"can we survive losing an
+availability zone"*, and it is the strongest argument for having this in a viewer at all: it
+turns a static answer into a model you can interrogate. The at-risk set for a set of targets
+is the **union** of their individual sets — a node is at risk if any synchronous dependency
+dies — and each blast radius is O(n+e), so toggling is free.
+
+**Read §18.11 before trusting a multi-select result.** The union is correct only because the
+document cannot express redundancy, which is precisely what multi-select is usually used to
+investigate.
+
+Selecting, toggling and clearing are all viewport state. Nothing here writes the document
+(§7, §1.6); there is no schema field for "which overlay am I looking at" and there must
+never be one — it is a lens, not a design decision.
 
 ## 18.8 Verification (needs Part 17)
 
@@ -2142,3 +2162,70 @@ M18a–M18b is **one day for the whole prediction half**, reusing Part 15's trav
 3. **For verification only:** does Part 17 exist, and can chaos experiments actually be run
    safely in your environment? If not, build the prediction half and stop — it stands on its
    own.
+
+## 18.11 Redundancy — the one thing the model cannot express
+
+**Not built. Read this before extending blast radius, because it bounds what every number
+in Part 18 means.**
+
+Every edge in the document asserts a **hard dependency**. There is no way to say *X depends
+on A **or** B* — two replicas, two availability zones, a primary and a standby. So blast
+radius treats losing one replica exactly as it treats losing a sole database.
+
+The consequence is quiet and one-directional: **blast radius over-reports wherever
+redundancy exists.** A single-target prediction is already slightly pessimistic. Multi-select
+(§18.7) sharpens the error rather than revealing it — you toggle off two replicas, see a
+large at-risk set, and get no signal that losing the first one alone was survivable. The
+tool answers confidently, and it answers a question you did not ask.
+
+### The minimal model
+
+```ts
+export interface GEdge {
+  // ...existing fields
+  alt?: string;   // edges FROM ONE SOURCE sharing an `alt` tag are alternatives,
+                  // not independent hard dependencies
+}
+```
+
+Semantics, and they are the whole of it: **failure propagates to the source only when every
+edge in an `alt` set is killed.** An edge with no `alt` is a hard dependency, exactly as
+today, so every existing document keeps its current meaning. The change is additive and
+nothing needs migrating.
+
+The tag is scoped **per source node**. `orders → pg-primary` and `orders → pg-replica` both
+tagged `db` are alternatives; an edge from a different node tagged `db` is unrelated. Scoping
+it globally would silently link services that merely chose the same word.
+
+### Invariants
+
+| # | Rule | Error message |
+|---|---|---|
+| V18 | An `alt` tag on a single edge from one source is meaningless | `edge "e7" has alt "db" but it is the only edge from "orders" with that tag: alternatives need at least two` |
+| V19 | `alt` requires a synchronous edge — an async path already stops propagation (§18.3) | `edge "e9" is dashed and carries alt "db": asynchronous edges already contain failure; drop one` |
+
+### The agent rule
+
+> **14. RECORD REDUNDANCY WHEN YOU SEE IT.** Two edges to two replicas of the same thing are
+> alternatives, not two dependencies: tag both with the same `alt`. If you cannot tell from
+> the code whether a second endpoint is a replica or a separate system, leave `alt` off — a
+> wrongly-claimed redundancy hides a real single point of failure, which is the most
+> expensive mistake this document can make.
+
+That last clause is the whole risk. Over-reporting blast radius is conservative and
+survivable. **Under-reporting it because an agent guessed at redundancy is not**, and the
+asymmetry has to be in the rule text or the agent will optimise for a tidier diagram.
+
+### What it unlocks
+
+With redundancy modelled, the **pairwise backlog** becomes meaningful: which two simultaneous
+failures are worst. At the 200-element cap that is ~20,000 blast-radius computations, each
+O(n+e) — milliseconds. It is the question chaos engineering actually wants ranked, and
+nothing else in this document answers it.
+
+### Cost
+
+| Milestone | Work | Cost |
+|---|---|---|
+| **M18f** | `alt` on the schema, V18–V19, rule 14, and blast radius honouring alternatives | 1 day |
+| **M18g** | Pairwise backlog ranking | 0.5 day |
