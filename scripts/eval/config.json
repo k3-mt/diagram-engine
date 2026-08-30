@@ -73,7 +73,7 @@
     "system": "Northwind Fleet — fixtures/ref-b",
     "aliases": {
       "_why": "gold-citations.md 'Nodes'.",
-      "vehicle-units": ["telematics-unit", "telematics-units", "vehicle", "vehicles", "device", "devices", "telematics-device", "nf1-unit"],
+      "vehicle-units": ["telematics-unit", "telematics-units", "vehicle", "vehicles", "device", "devices", "telematics-device", "nf1-unit", "in-vehicle-unit", "in-vehicle-units"],
       "fleet-console": ["console", "operator-console", "web-console", "fleet-ui", "operator-ui"],
       "ingest-gateway": ["ingest", "frame-ingest", "ingestion-gateway", "nf1-gateway"],
       "trip-builder": ["trips", "trip-service", "trip-stitcher"],

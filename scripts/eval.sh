@@ -380,10 +380,25 @@ one_run() {
     #    diagram, but an agent that drew nothing is a run that scored zero, not
     #    a crash — dropping it would quietly delete the worst results from the
     #    mean, which is the one direction of bias a rig must not have. So the
-    #    empty document is written by hand and scored like any other. A run
-    #    that dies BEFORE this point still cannot be silently dropped: the
-    #    aggregator is told how many runs were attempted and flags the gap.
+    #    empty document is written by hand and scored like any other.
+    #
+    #    THE EXCEPTION, and it is the opposite bias: if the agent process
+    #    itself failed AND produced nothing, the model never answered. Scoring
+    #    that as an empty document converts an infrastructure failure into a
+    #    measured zero — which is exactly what a broken sandbox profile did,
+    #    reporting node.recall 0 across twenty runs of the held-out system and
+    #    reading as a total collapse of the score. Such a run is FAILED: it
+    #    leaves the means alone and is counted in runsFailed, which the
+    #    aggregator already flags against the attempted count.
+    #
+    #    A non-zero exit WITH a document is still scored. An agent that hit a
+    #    turn limit after drawing a good diagram did real work, and discarding
+    #    it would be the first bias again, wearing the other hat.
     if ! node "$CLI" export json --dir "$ws/.diagram" --out "$run/produced.json"; then
+      if [ "$rc" -ne 0 ]; then
+        echo "  agent exited $rc and produced no diagram — FAILED, not scored as zero" >&2
+        exit 71
+      fi
       echo "  no diagram was produced — scoring an empty document"
       printf '{"schemaVersion":1,"title":"Untitled","direction":"RIGHT","nodes":[],"groups":[],"edges":[],"collapsed":[]}\n' \
         > "$run/produced.json"
