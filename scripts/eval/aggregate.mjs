@@ -42,6 +42,12 @@ const METRICS = [
   // absent, not as zero — a zero would read as "it cited nothing", which is a
   // claim about the agent, not about the harness that could not ask.
   ['binding.precision', (r) => r.bindings?.precision ?? null],
+  // The same numerator as precision over EVERY produced citation, so an
+  // unchecked one costs what an unresolved one does. Precision is the gate;
+  // this is what stops the gate being passed by citing in forms nothing can
+  // check, and what makes a regression that moves citations out of `resolved`
+  // and into `unchecked` show up as a fall rather than as no change at all.
+  ['binding.verified', (r) => r.bindings?.verifiedShare ?? null],
   ['binding.coverage', (r) => r.bindings?.coverage ?? null],
 ];
 
@@ -173,17 +179,36 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
     // Precision is computed over the citations that COULD be resolved. A
     // citation the checker could not answer either way — a file too large to
     // read, a compose file written in flow style — is in neither side of it,
-    // which is right, but it also means a set of such citations is
-    // unfalsifiable while reading as fully sourced. Nothing in the numbers
-    // says so on its own, so this does. Identifier refs are resolved now, so
-    // this should fire rarely; when it does, the residue is the story.
+    // which is right for an invention detector, but it also means a set of
+    // such citations is unfalsifiable while reading as fully sourced.
+    //
+    // Identifier refs are searched for now, so this residue should be near
+    // zero on a real repository — §3.8 calls it "a residue, not a category the
+    // tool is comfortable with". The threshold is therefore 5%, not the half
+    // it was when a whole class of refs was uncheckable: at the old bar this
+    // could go from a quarter of every corpus to a quarter still, silently.
     const producedTotal = bindingRuns.reduce((n, r) => n + (r.bindings.produced ?? 0), 0);
     const uncheckedTotal = bindingRuns.reduce((n, r) => n + (r.bindings.unchecked ?? 0), 0);
-    if (producedTotal > 0 && uncheckedTotal / producedTotal > 0.5) {
+    if (producedTotal > 0 && uncheckedTotal / producedTotal > 0.05) {
       flags.push(
         `${uncheckedTotal}/${producedTotal} citations across the set could not be checked either ` +
-          'way — precision is computed over the rest, so most of this set is unfalsifiable. ' +
-          'A citation the checker can resolve is the one that carries weight (rule 15).',
+          'way — precision is computed over the rest, so that share of this set is ' +
+          'unfalsifiable. §3.8 wants the residue near zero; read detail[].bindings.results for ' +
+          'the unchecked rows and why each one landed there.',
+      );
+    }
+    // The exploit precision's denominator leaves open, named out loud: a set
+    // can score the 1.0 bar while most of its citations were never verified,
+    // because precision excludes them and coverage only counts that a citation
+    // was WRITTEN. This is the flag that makes the difference between the two
+    // numbers say it, rather than leaving it to whoever reads both columns.
+    const bv = summary['binding.verified'];
+    if (bp.mean !== null && bv.mean !== null && bp.mean >= 1 && bv.mean < 1) {
+      flags.push(
+        `binding.precision is ${bp.mean} but binding.verified is ${bv.mean} — the bar is met ` +
+          'only because unchecked citations are outside precision\'s denominator. ' +
+          `${uncheckedTotal}/${producedTotal} citations were never verified against the tree; ` +
+          'an unfalsifiable citation is not evidence of having read anything (rule 15).',
       );
     }
     if (hiddenFound > hiddenBound) {
@@ -229,9 +254,12 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
     },
     bindings: {
       _what:
-        'provenance across the set (G10/G11). precision is the honesty number, coverage the ' +
-        'effort number; the means are in summary. Resolved by the same code as ' +
-        '`diagram check --bindings`.',
+        'provenance across the set (G10/G11). precision is the honesty number (over the ' +
+        'citations that could be checked), verified is the same numerator over ALL of them, ' +
+        'and coverage is the effort number; the means are in summary. The three totals below ' +
+        'are disjoint — resolved + unchecked + failures = produced — so a regression that ' +
+        'moves citations from resolved into unchecked is visible rather than absorbed. ' +
+        'Resolved by the same code as `diagram check --bindings`.',
       scoredRuns: bindingRuns.length,
       producedTotal: bindingRuns.reduce((n, r) => n + (r.bindings.produced ?? 0), 0),
       resolvedTotal: bindingRuns.reduce((n, r) => n + (r.bindings.resolved ?? 0), 0),

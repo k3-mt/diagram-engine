@@ -50,6 +50,42 @@
 // `--root` implies `--bindings`: naming a root and not resolving anything is
 // not a thing anyone means.
 //
+// ---------------------------------------------------------------------------
+// Does `unchecked` block exit 0? No — and here is the argument
+// ---------------------------------------------------------------------------
+//
+// Exit 1 for missing, stale, escaped, malformed. Exit 0 with `unchecked`
+// present. The three reasons, in order of how much they weigh:
+//
+// 1. THE AUTHOR CANNOT FIX IT BY EDITING THE DIAGRAM. Every remaining
+//    unchecked reason is a fact about a file this checker cannot read
+//    precisely without a YAML parser it is not allowed to depend on:
+//    flow-style `services: {orders-api: {}}`, a `<<:` merge key, tab indents,
+//    a file over the size ceiling. The citation may be perfectly true. The
+//    only edit a red build leaves its author is to DELETE it — so a checker
+//    that failed here would make diagrams less cited, which is the exact
+//    opposite of what rule 15 is for. A gate whose only remedy is "claim less"
+//    is not a gate, it is a deterrent.
+//
+// 2. IT WOULD MAKE THE FLAG UNADOPTABLE, AND AN UNRUN CHECK VERIFIES NOTHING.
+//    One flow-style compose file anywhere under `--root` would pin a repo's CI
+//    red forever with no action available. §3.8's first property is that this
+//    runs in CI on every commit; a check teams turn off because it cannot go
+//    green does not.
+//
+// 3. THE PRESSURE BELONGS ON THE NUMBER, NOT THE EXIT CODE. The obvious worry
+//    is an agent scoring a clean run by citing only in forms nothing can
+//    verify. What stops that is the headline — `verified 14 of 22 citations`,
+//    whose denominator is every binding — and the eval's `verifiedShare`,
+//    which counts unchecked against the agent. Citing unverifiably lowers the
+//    number it is graded on; it does not buy a green tick for free.
+//
+// And the loophole that WOULD have made this indefensible is already shut by
+// §3.8's rule 1: citing `terraform=...` in a repository holding no `.tf` file
+// is `missing`, not `unchecked`, and fails. What is left in `unchecked` is
+// only ever "there are files of the right kind, and this one could not be read
+// precisely" — a limit of the tool, reported as one.
+//
 // Runtime import of core by relative path — see commands/get.ts for why.
 
 import * as path from 'node:path';
@@ -169,7 +205,13 @@ const GAP = '    ';
  * spelling the get-table's `### Bindings` section prints.
  */
 export function renderBindingReport(report: BindingReport): string {
-  const rows = STATUS_ORDER.filter((s) => report.counts[s] > 0);
+  // A status with nothing in it is not printed — except `unchecked`, which is
+  // printed at zero too. §3.8: "the count of unchecked bindings is always
+  // reported, so the gap is visible rather than absorbed into a passing
+  // number." A row that appears only when the news is bad teaches a reader to
+  // skim for it, and a reader who does not see it assumes zero rather than
+  // knowing it. `unchecked  0` is the shape of the promise being kept.
+  const rows = STATUS_ORDER.filter((s) => report.counts[s] > 0 || s === 'unchecked');
   const listed = report.results.filter(isListed);
 
   const countWidth = Math.max(
@@ -202,17 +244,52 @@ export function renderBindingReport(report: BindingReport): string {
     for (const r of items.slice(1)) lines.push(`${hang}${detail(r)}`);
   }
 
-  // The verdict, on failure only. CI reads exit codes, people read the last
-  // line, and an agent needs to be told which of the two claims it can act on:
-  // an unchecked identifier is not a defect, a missing file is.
-  if (!report.ok) {
-    const bad =
-      report.counts.missing +
-      report.counts.stale +
-      report.counts.escaped +
-      report.counts.malformed;
+  // -------------------------------------------------------------------------
+  // The verdict
+  // -------------------------------------------------------------------------
+  //
+  // ALWAYS one headline, and its denominator is every binding in the document
+  // — not every binding the checker managed to answer. That is the whole
+  // point of the line. A ratio computed over the answerable ones is the shape
+  // of number that let a quarter of a corpus's citations sit unverified behind
+  // a precision of 1.0, and "22 of 22 checkable" reads exactly like "22 of 22"
+  // to anyone not squinting at the word. `verified 14 of 22 citations` cannot
+  // be misread: the eight that are not verified are in the sentence, and a
+  // large residue drags the headline down instead of hiding under it.
+  //
+  // Then one advisory per category that needs an action, because the two
+  // categories need OPPOSITE actions: an unresolved citation is a wrong claim
+  // and the fix is in the document; an unchecked one is a claim written in a
+  // form this checker cannot read, and the fix is either a more precise ref or
+  // nothing at all.
+  const bad =
+    report.counts.missing +
+    report.counts.stale +
+    report.counts.escaped +
+    report.counts.malformed;
+  const unchecked = report.counts.unchecked;
+  const qualifiers = [
+    ...(unchecked > 0 ? [`${unchecked} unchecked`] : []),
+    ...(bad > 0 ? [`${bad} not resolving`] : []),
+  ];
+  lines.push(
+    `verified ${report.counts.ok} of ${plural(report.bindings, 'citation')}` +
+      (qualifiers.length > 0 ? ` — ${qualifiers.join(', ')}` : ''),
+  );
+  if (unchecked > 0) {
+    // Said out loud because the silence is what it would otherwise be mistaken
+    // for. `unchecked` is not a pass: the checker looked and could not answer,
+    // and a citation nobody can falsify is not evidence of having read
+    // anything. §3.8 calls it a residue, not a category the tool is
+    // comfortable with, and the row above says why each one landed there.
     lines.push(
-      `${plural(bad, 'citation')} ${bad === 1 ? 'does' : 'do'} not resolve — ` +
+      `  ${unchecked === 1 ? 'that one is' : 'those are'} neither verified nor wrong — ` +
+        'the checker could not answer; cite a form it can read (§3.8: the residue should be 0)',
+    );
+  }
+  if (bad > 0) {
+    lines.push(
+      `  ${plural(bad, 'citation')} ${bad === 1 ? 'does' : 'do'} not resolve — ` +
         'fix the ref or remove the binding (rule 15: cite what you opened, nothing else)',
     );
   }

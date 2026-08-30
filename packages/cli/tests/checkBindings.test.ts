@@ -147,6 +147,14 @@ describe('`diagram check --bindings`', () => {
       'bindings — 1 element, 2 bindings',
       `root: ${root}`,
       '  ok         2',
+      // Printed at ZERO, on a run where everything passed. §3.8 says the
+      // unchecked count is always reported; a row that shows up only when the
+      // news is bad is a row readers learn to skim past, and its absence then
+      // reads as "nothing to report" rather than as a measured zero.
+      '  unchecked  0',
+      // The headline's denominator is every binding in the document, so a
+      // clean run says 2 of 2 and a run with a residue cannot round up to it.
+      'verified 2 of 2 citations',
     ]);
   });
 
@@ -186,9 +194,11 @@ describe('`diagram check --bindings`', () => {
       'bindings — 3 elements, 3 bindings',
       `root: ${root}`,
       '  ok         1',
+      '  unchecked  0',
       '  missing    1   billing    repo=services/billing/      no such path',
       '  stale      1   e7         repo=internal/pay.go:412    file has 5 lines',
-      '2 citations do not resolve — fix the ref or remove the binding (rule 15: cite what you opened, nothing else)',
+      'verified 1 of 3 citations — 2 not resolving',
+      '  2 citations do not resolve — fix the ref or remove the binding (rule 15: cite what you opened, nothing else)',
     ]);
   });
 
@@ -230,6 +240,44 @@ describe('`diagram check --bindings`', () => {
       'orders    compose=orders-api                  not defined in the 1 ' +
         'docker-compose*.y*ml / compose*.y*ml file under the root',
     );
+  });
+
+  it('does not fail for an unchecked citation, and refuses to let it read as a pass', () => {
+    // The exit-code decision, argued in check.ts: `unchecked` is a fact about
+    // a file this checker cannot read precisely without a YAML parser it is
+    // not allowed to depend on, not about the citation. The only edit a red
+    // build would leave the author is deleting a citation that may be true, so
+    // it exits 0 — and then has to earn that by saying so loudly.
+    const { dir, root } = project();
+    // Flow style. There IS a compose file, so §3.8 rule 1 does not apply; the
+    // service key just cannot be read line by line.
+    fs.writeFileSync(path.join(root, 'docker-compose.yml'), 'services: {orders-api: {}}\n');
+    patch(dir, [
+      {
+        ...ORDERS,
+        node: {
+          ...ORDERS.node,
+          bindings: [
+            { source: 'repo', ref: 'internal/pay.go' },
+            { source: 'compose', ref: 'orders-api' },
+          ],
+        },
+      },
+    ]);
+    const out = runCheck({ dir, bindings: true });
+    expect(out.code).toBe(0);
+    expect(out.stderr).toBe('');
+    const lines = out.stdout.split('\n');
+    // The row names the ONE citation and why it landed there, so a reader can
+    // tell a residue apart from a failure without reading the exit code.
+    expect(lines.some((l) => l.startsWith('  unchecked  1   orders    compose=orders-api'))).toBe(
+      true,
+    );
+    // The headline counts it against the run. Its denominator is every
+    // binding, so an agent cannot reach "verified 2 of 2" by citing in a form
+    // nothing can check — the number it is graded on is the one that drops.
+    expect(lines).toContain('verified 1 of 2 citations — 1 unchecked');
+    expect(out.stdout).toContain('neither verified nor wrong');
   });
 
   it('fails on a symlink that leaves the tree', () => {

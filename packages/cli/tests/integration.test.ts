@@ -338,6 +338,15 @@ describe('the CLI and the MCP tools are one implementation', () => {
     expect(viaTool.text).toContain('  unchecked  1');
     expect(viaTool.text).toContain('  missing    1');
     expect(viaTool.text).toContain('no such path');
+    // The verdict block is part of the seam, not decoration around it. An
+    // agent over MCP acts on the last lines — the headline whose denominator
+    // is every binding, and the two advisories, which ask for opposite things:
+    // fix the ref that does not resolve, cite a readable form for the one
+    // nothing could answer. If those diverged between the surfaces the two
+    // agents would be told to do different things about the same document.
+    expect(viaTool.text).toContain('verified 1 of 3 citations — 1 unchecked, 1 not resolving');
+    expect(viaTool.text).toContain('neither verified nor wrong');
+    expect(viaTool.text).toContain('rule 15: cite what you opened, nothing else');
 
     // And plain check — which does NOT resolve — agrees on both surfaces too.
     const plainTool = await callTool('diagram_check', {}, ctx);

@@ -837,6 +837,42 @@ describe('scorer — bindings (acceptance G10/G11)', () => {
     expect(b.precision).toBeNull();
     expect(b.coverage).toBe(1);
     expect(b.uncheckedShare).toBe(1);
+    // And the number that refuses to let this read as success. Coverage is
+    // 1.0 (everything is cited) and precision is null (nothing was proved
+    // wrong); only verifiedShare says that not one citation was verified.
+    expect(b.verifiedShare).toBe(0);
+  });
+
+  it('verifiedShare closes precision\'s denominator: 1.0 over two citations is not 1.0 over four', () => {
+    // The exploit precision alone leaves open. Both documents below score
+    // precision 1.0 — nothing they cited was proved wrong — but one verified
+    // every citation and the other verified half and wrote the rest in a form
+    // the checker cannot read. Coverage cannot tell them apart either: it
+    // counts citations WRITTEN. verifiedShare is the only number that does,
+    // which is why aggregate.mjs flags a set where the two diverge.
+    const root = tmpdir();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'x\n');
+    fs.writeFileSync(path.join(root, 'b.txt'), 'x\n');
+    // Flow style: there IS a compose file, so this is the honest residue
+    // rather than §3.8 rule 1's missing-candidate case.
+    fs.writeFileSync(path.join(root, 'docker-compose.yml'), 'services: {a-api: {}, b-api: {}}\n');
+
+    const honest = doc([
+      { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'repo', ref: 'a.txt' }] },
+      { id: 'b', type: 'service', label: 'B', parent: null, bindings: [{ source: 'repo', ref: 'b.txt' }] },
+    ]);
+    const hedged = doc([
+      { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'repo', ref: 'a.txt' }] },
+      { id: 'b', type: 'service', label: 'B', parent: null, bindings: [{ source: 'compose', ref: 'a-api' }] },
+    ]);
+    const h = scorer.scoreBindings(honest, root);
+    const g = scorer.scoreBindings(hedged, root);
+
+    expect(h.precision).toBe(1);
+    expect(g.precision).toBe(1); // indistinguishable on the gate...
+    expect(h.coverage).toBe(g.coverage); // ...and on the effort number
+    expect(h.verifiedShare).toBe(1);
+    expect(g.verifiedShare).toBe(0.5); // ...but not here
   });
 
   it('gold itself carries no bindings, so a gold-against-gold run is uncited, not wrong', () => {
@@ -882,7 +918,10 @@ describe('harness — aggregation', () => {
     },
     types: { accuracy: 1 },
     // A clean run cites what it read and every citation resolves (G10/G11).
-    bindings: { scored: true, precision: 1, coverage: 1, produced: 8, resolved: 8, unchecked: 0, failures: [] },
+    // `verifiedShare` is precision's numerator over ALL eight citations, so a
+    // clean run has it at 1.0 too — the two only diverge when something went
+    // unchecked, which is exactly when the reader needs to be told.
+    bindings: { scored: true, precision: 1, verifiedShare: 1, coverage: 1, produced: 8, resolved: 8, unchecked: 0, failures: [] },
   });
 
   it('flags a bimodal result rather than reporting a comfortable mean', () => {
@@ -905,6 +944,36 @@ describe('harness — aggregation', () => {
   it('a clean set of runs raises no flag', () => {
     const out = aggregator.aggregate([runOf(1, 1), runOf(1, 2), runOf(1, 3)], 'b');
     expect(out.flags).toEqual([]);
+  });
+
+  it('refuses to let a 1.0 precision stand on citations that were never verified', () => {
+    // The set below meets G10's bar exactly: nothing it cited was proved
+    // wrong, so precision is 1.0 in every run, and coverage is 1.0 because
+    // every element carries a citation. Six of eight citations per run were
+    // never checked either way. Two flags have to fire — the residue is far
+    // over §3.8's "approaching zero", and the bar was only met because those
+    // six sit outside precision's denominator.
+    const hedged = (run: number) => ({
+      ...runOf(1, run),
+      bindings: {
+        scored: true,
+        precision: 1,
+        verifiedShare: 0.25,
+        coverage: 1,
+        produced: 8,
+        resolved: 2,
+        unchecked: 6,
+        failures: [],
+      },
+    });
+    const out = aggregator.aggregate([hedged(1), hedged(2), hedged(3)], 'b');
+    expect(out.summary['binding.precision'].mean).toBe(1);
+    expect(out.summary['binding.verified'].mean).toBe(0.25);
+    expect(out.flags.join('\n')).toMatch(/18\/24 citations across the set could not be checked/);
+    expect(out.flags.join('\n')).toMatch(
+      /binding\.precision is 1 but binding\.verified is 0\.25/,
+    );
+    expect(out.bindings.uncheckedTotal).toBe(18);
   });
 
   it('a null metric is excluded from the mean AND flagged, never silently dropped', () => {

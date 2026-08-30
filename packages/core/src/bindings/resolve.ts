@@ -95,10 +95,14 @@ export interface BindingReport {
   /**
    * True when no binding is missing, stale, escaped or malformed.
    *
-   * `unchecked` does NOT fail. An identifier is not a broken citation, it is a
-   * citation of a kind this checker cannot resolve, and failing CI for it would
-   * teach agents to stop writing `terraform=aws_ecs_service.orders` — the most
-   * precise citation available for a terraform resource.
+   * `unchecked` does NOT fail, and that is a decision rather than an oversight.
+   * See the "does unchecked block exit 0" section in commands/check.ts for the
+   * whole argument; the short of it is that an unchecked binding is a fact
+   * about a FILE FORMAT this checker cannot read precisely (flow-style YAML, a
+   * merge key, a file over the size ceiling), not about the citation, and the
+   * only edit it leaves the author is to delete a citation that may well be
+   * correct. Rule 1 of §3.8 is where the teeth are instead: a source with no
+   * candidate file of its kind is `missing`, and that does fail.
    */
   ok: boolean;
 }

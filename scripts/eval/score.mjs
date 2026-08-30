@@ -378,6 +378,32 @@ export function scoreBindings(produced, root, altRoot = null) {
     // checker could not read cannot hide behind a precision computed over the
     // three it could.
     precision: ratio(ok, ok + failed.length),
+    // PRECISION'S DENOMINATOR, AND THE ONE THAT CLOSES IT.
+    //
+    // `precision` above answers "of the citations that could be checked, how
+    // many were true" — the invention detector, and the right shape for the
+    // G10 gate, because a citation the checker cannot read is not evidence the
+    // agent invented anything and convicting it would be a false accusation.
+    //
+    // But that denominator has an obvious exploit, and now that identifiers
+    // are checkable it is worth naming precisely: cite ONLY in forms nothing
+    // can verify and precision is 1.0 over an empty-ish set. `verifiedShare`
+    // is the same numerator over EVERY produced binding, so an unchecked
+    // citation costs exactly what an unresolved one does. Read together they
+    // separate the two failures — precision 1.0 with a low verifiedShare is an
+    // agent citing unfalsifiably, and precision below 1.0 is an agent
+    // inventing.
+    //
+    // Is the exploit reachable? Barely, and not by accident. Reaching
+    // `unchecked` on purpose means citing every node against a compose file
+    // written in flow style, a YAML with a merge key, or a file over 4 MB —
+    // all properties of the repository being diagrammed, none of them
+    // something the agent can create, and §3.8 rule 1 sends a source with no
+    // candidate file of its kind to `missing` rather than `unchecked`. So the
+    // route is "the repo happens to be unreadable", which is the honest
+    // residue, not a strategy. What stops it from being free anyway is this
+    // number: it is reported per run, meaned across the set, and flagged.
+    verifiedShare: ratio(ok, produce),
     unchecked,
     // The share of citations the checker could not answer either way.
     // Precision is computed over the rest, so a document whose citations are
