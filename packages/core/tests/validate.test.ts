@@ -458,3 +458,207 @@ describe('V18/V19 — additive: an untagged document is unaffected', () => {
     expect(validate(d)).toEqual({ ok: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// V14–V17 — bindings (spec §3.8). String-exact, like every other invariant:
+// the agent reads these and self-corrects. A citation to a file that does not
+// exist is worse than no citation, so these messages exist to stop a wrong one
+// being written at all — the checker only catches what got past them.
+// ---------------------------------------------------------------------------
+
+const ORDERS_PAY = {
+  nodes: [node('orders'), node('pay')],
+};
+
+describe('V14 — binding source is on the known list', () => {
+  it('names the five sources, lowercase', () => {
+    const d = doc({
+      nodes: [node('orders', { bindings: [{ source: 'Compose' as never, ref: 'orders-api' }] })],
+    });
+    expect(errorsOf(d)).toContain(
+      'binding source "Compose" on node "orders": use lowercase, one of repo, compose, terraform, k8s-manifest, package',
+    );
+  });
+
+  it('says "edge" for an edge', () => {
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [
+        edge('e7', 'orders', 'pay', {
+          bindings: [{ source: 'github' as never, ref: 'a.go' }],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toContain(
+      'binding source "github" on edge "e7": use lowercase, one of repo, compose, terraform, k8s-manifest, package',
+    );
+  });
+});
+
+describe('V15 — one entry per source', () => {
+  it('flags two bindings with the same source on one node', () => {
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: [
+            { source: 'compose', ref: 'orders-api' },
+            { source: 'compose', ref: 'orders-worker' },
+          ],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'node "orders" has two "compose" bindings: one entry per source',
+    ]);
+  });
+
+  it('allows five different sources on one node', () => {
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: [
+            { source: 'repo', ref: 'services/orders/' },
+            { source: 'compose', ref: 'orders-api' },
+            { source: 'terraform', ref: 'aws_ecs_service.orders' },
+            { source: 'k8s-manifest', ref: 'deploy/orders.yaml' },
+            { source: 'package', ref: 'go.mod' },
+          ],
+        }),
+      ],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+
+  it('stays quiet when V14 already rejected the source', () => {
+    // The V13 precedent. "Compose" and "compose" are not a duplicate pair —
+    // the fix is one lowercase letter, and telling the agent to delete a
+    // binding sends it to fix the wrong thing.
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: [
+            { source: 'compose', ref: 'orders-api' },
+            { source: 'Compose' as never, ref: 'orders-api' },
+          ],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'binding source "Compose" on node "orders": use lowercase, one of repo, compose, terraform, k8s-manifest, package',
+    ]);
+  });
+});
+
+describe('V16 — ref is repo-relative, never a URL', () => {
+  it('rejects a URL with the §3.8 message', () => {
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: [{ source: 'repo', ref: 'https://github.com/org/repo/blob/main/a.go' }],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toContain(
+      'binding ref on "orders" must be a repo-relative path, not a URL',
+    );
+  });
+
+  it('rejects git@ and ssh:// too — a scheme is a scheme', () => {
+    for (const ref of ['git@github.com:org/repo.git', 'ssh://git@host/org/repo']) {
+      const d = doc({ nodes: [node('orders', { bindings: [{ source: 'repo', ref }] })] });
+      expect(errorsOf(d)).toContain(
+        'binding ref on "orders" must be a repo-relative path, not a URL',
+      );
+    }
+  });
+
+  it('rejects an absolute path', () => {
+    const d = doc({
+      nodes: [node('orders', { bindings: [{ source: 'repo', ref: '/etc/passwd' }] })],
+    });
+    expect(errorsOf(d)).toContain(
+      'binding ref "/etc/passwd" on "orders" must be repo-relative, not an absolute path',
+    );
+  });
+
+  it('rejects a ref that escapes the root, because the checker resolves it', () => {
+    const d = doc({
+      nodes: [
+        node('orders', { bindings: [{ source: 'repo', ref: '../../etc/passwd' }] }),
+      ],
+    });
+    expect(errorsOf(d)).toContain(
+      'binding ref "../../etc/passwd" on "orders" escapes the repository root: cite a path inside the repo',
+    );
+  });
+
+  it('rejects a line on a directory and on an identifier', () => {
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: [{ source: 'repo', ref: 'services/orders/', line: 12 }],
+        }),
+        node('pay', {
+          bindings: [{ source: 'compose', ref: 'orders-api', line: 3 }],
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'binding ref "services/orders/" on "orders" names a directory but carries line 12: drop the line or cite the file',
+      'binding ref "orders-api" on "pay" is an identifier, not a file, but carries line 3: drop the line',
+    ]);
+  });
+
+  it('accepts a directory, a file with a line, and an identifier', () => {
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [
+        edge('e7', 'orders', 'pay', {
+          bindings: [{ source: 'repo', ref: './internal/pay.go', line: 412 }],
+        }),
+      ],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+});
+
+describe('V17 — the cap that applies, not the other one', () => {
+  it('reports 9 bindings on a node against max 8', () => {
+    const d = doc({
+      nodes: [
+        node('orders', {
+          bindings: Array.from({ length: 9 }, (_, i) => ({
+            source: 'repo' as const,
+            ref: `s/${i}.ts`,
+          })),
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toContain('node "orders" has 9 bindings, max 8');
+  });
+
+  it('reports 5 bindings on an edge against max 4', () => {
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [
+        edge('e7', 'orders', 'pay', {
+          bindings: Array.from({ length: 5 }, (_, i) => ({
+            source: 'repo' as const,
+            ref: `s/${i}.ts`,
+          })),
+        }),
+      ],
+    });
+    expect(errorsOf(d)).toContain('edge "e7" has 5 bindings, max 4');
+  });
+});
+
+describe('V14–V17 — additive: an uncited document is unaffected', () => {
+  it('validates a document with no bindings anywhere exactly as before', () => {
+    const d = doc({
+      ...ORDERS_PAY,
+      edges: [edge('e7', 'orders', 'pay')],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+});

@@ -135,3 +135,60 @@ describe('summarise', () => {
     expect(summarise(base, structuredClone(base))).toBe('no changes');
   });
 });
+
+// ---------------------------------------------------------------------------
+// §3.8 — the ### Bindings section. Byte-exact, like the §4.1 pin above: this
+// table is in the agent's context on every turn, so its cost is part of the
+// contract.
+// ---------------------------------------------------------------------------
+
+describe('toTable — bindings (spec §3.8)', () => {
+  const cited = doc({
+    title: 'Checkout platform',
+    nodes: [
+      node('orders', {
+        label: 'Orders',
+        bindings: [
+          { source: 'repo', ref: 'services/orders/' },
+          { source: 'compose', ref: 'orders-api' },
+        ],
+      }),
+      node('pay', { label: 'Payments' }),
+    ],
+    edges: [
+      edge('e7', 'orders', 'pay', {
+        label: 'charges',
+        bindings: [{ source: 'repo', ref: 'internal/pay.go', line: 412 }],
+      }),
+    ],
+  });
+
+  it('renders the whole table, section and all, byte for byte', () => {
+    expect(toTable(cited)).toBe(
+      [
+        '## "Checkout platform"  (direction: DOWN)',
+        '',
+        '### Groups (id | kind | label | parent)',
+        '',
+        '### Nodes (id | type | label | parent)',
+        'orders | service | Orders   | -',
+        'pay    | service | Payments | -',
+        '',
+        '### Edges (id | from -> to | label | style)',
+        'e7 | orders -> pay | charges | solid',
+        '',
+        '### Bindings (kind | id | source=ref)',
+        'node | orders | repo=services/orders/, compose=orders-api',
+        'edge | e7     | repo=internal/pay.go:412',
+      ].join('\n'),
+    );
+  });
+
+  it('costs an uncited document nothing', () => {
+    const bare = doc({
+      nodes: [node('a'), node('b')],
+      edges: [edge('e1', 'a', 'b')],
+    });
+    expect(toTable(bare)).not.toContain('Bindings');
+  });
+});

@@ -121,6 +121,70 @@ export const GMetaSchema = z
 export type GMeta = z.infer<typeof GMetaSchema>;
 
 /**
+ * BindingSource (spec §3.8) — the KIND of artefact a claim was read out of.
+ * Lowercase and closed: an agent that writes "Compose" is corrected by V14
+ * rather than inventing a sixth source nobody checks.
+ */
+export const BindingSourceSchema = z.enum([
+  'repo', // a path in the repository: a directory or a source file
+  'compose', // a service name in a docker-compose file
+  'terraform', // a terraform address, e.g. "aws_ecs_service.orders"
+  'k8s-manifest', // a kubernetes manifest, by path or by kind/name
+  'package', // a package name in a manifest (package.json, go.mod, ...)
+]);
+export type BindingSource = z.infer<typeof BindingSourceSchema>;
+
+/** Upper bound on the length of a binding `ref`, matching a meta value. */
+export const BINDING_REF_MAX = 200;
+
+/**
+ * Upper bound on a binding `line`. A citation past a million lines is a typo
+ * or a byte offset, and the checker would have to read the whole file to say
+ * so; the schema says it first and for free.
+ */
+export const MAX_BINDING_LINE = 1_000_000;
+
+/** Upper bound on bindings per node (spec §3.8). */
+export const MAX_NODE_BINDINGS = 8;
+
+/** Upper bound on bindings per edge (spec §3.8). Fewer: an edge is one claim. */
+export const MAX_EDGE_BINDINGS = 4;
+
+/**
+ * GBinding (spec §3.8) — WHERE A CLAIM WAS READ, and nothing else.
+ *
+ * A binding is provenance, never observation: it says which file or identifier
+ * the agent opened to learn that this node or this edge exists. It says
+ * nothing about a running system — no health, no timestamp, no "last checked"
+ * (ground rule R5). `diagram check --bindings` resolves every ref against the
+ * filesystem, which is what makes agent rule 15 mechanical rather than
+ * aspirational: a citation to a file that does not exist is worse than no
+ * citation, because it reads as evidence.
+ *
+ *   repo=services/orders/            a directory in the repository
+ *   repo=internal/pay.go with line   one line of one file
+ *   compose=orders-api               a service name, not a path
+ *   terraform=aws_ecs_service.orders a terraform address
+ */
+export const GBindingSchema = z.object({
+  source: BindingSourceSchema,
+  /**
+   * Repo-relative path or identifier, 1–200 chars. NEVER a URL, never
+   * absolute, never escaping the root — V16 says so with a message, because
+   * the checker resolves this string against a directory on disk.
+   */
+  ref: z.string().min(1).max(BINDING_REF_MAX),
+  /**
+   * 1-BASED line number, for when the claim is about one line. Only meaningful
+   * when `ref` names a FILE: a line on a directory (`services/orders/`) or on
+   * an identifier (`compose=orders-api`) points at nothing the checker could
+   * open, so V16 rejects it.
+   */
+  line: z.number().int().min(1).max(MAX_BINDING_LINE).optional(),
+});
+export type GBinding = z.infer<typeof GBindingSchema>;
+
+/**
  * `parent` on a node or a group: the containing group id, or null for top
  * level. The key is REQUIRED — omitting it is the most common first mistake a
  * CLI-path agent makes, and the default zod message ("expected string,
@@ -153,6 +217,14 @@ export const GNodeSchema = z.object({
     .optional(),
   /** free-form detail for the viewer's hover panel, at most 16 keys */
   meta: GMetaSchema.optional(),
+  /** where this node was read from (spec §3.8), at most 8 entries */
+  bindings: z
+    .array(GBindingSchema)
+    .max(
+      MAX_NODE_BINDINGS,
+      `too many bindings: keep at most ${MAX_NODE_BINDINGS} per node; cite the files you actually read`,
+    )
+    .optional(),
 });
 export type GNode = z.infer<typeof GNodeSchema>;
 
@@ -197,6 +269,22 @@ export const GEdgeSchema = z.object({
    * existing document keeps its current meaning.
    */
   alt: z.string().min(1).max(24).optional(),
+  /**
+   * Where this edge was read from (spec §3.8), at most 4 entries. This field
+   * is the whole point of §3.8: before it existed an edge had no `note`, no
+   * `meta` and no binding, so a coupling found by reading the code could be
+   * drawn but could not be CITED — the schema could not hold the answer rule 9
+   * asks for. Four, not eight: a node is a component and can legitimately
+   * appear in a repo, a compose file and a terraform module at once; an edge
+   * is one call site.
+   */
+  bindings: z
+    .array(GBindingSchema)
+    .max(
+      MAX_EDGE_BINDINGS,
+      `too many bindings: keep at most ${MAX_EDGE_BINDINGS} per edge; cite the call site you actually read`,
+    )
+    .optional(),
 });
 export type GEdge = z.infer<typeof GEdgeSchema>;
 

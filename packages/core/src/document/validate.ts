@@ -6,7 +6,14 @@
 // to do. V3 and V5 append the valid options — that one detail turns a
 // two-turn correction into a one-turn one.
 
-import type { GraphDoc } from '../schema/graph.js';
+import { parseBindingRef } from '../bindings/ref.js';
+import type { BindingRefProblem } from '../bindings/ref.js';
+import type { GBinding, GraphDoc } from '../schema/graph.js';
+import {
+  BindingSourceSchema,
+  MAX_EDGE_BINDINGS,
+  MAX_NODE_BINDINGS,
+} from '../schema/graph.js';
 import { elementIds, isValidId, nearestId, slugify } from './ids.js';
 
 export type ValidationResult = { ok: true } | { ok: false; errors: string[] };
@@ -70,9 +77,110 @@ function nestedPair(doc: GraphDoc, targets: string[]): [string, string] | null {
   return null;
 }
 
+/** The V14 suffix, built from the schema so the list can never go stale. */
+const BINDING_SOURCES = BindingSourceSchema.options.join(', ');
+
 /**
- * Validate a document against invariants V1–V13 (spec §3.3) and V18–V19
- * (spec §18.11).
+ * V16's messages. The URL one is spec §3.8 verbatim; the rest are the same
+ * sentence for the other five ways a ref cannot be resolved, in the same
+ * say-what-to-do voice.
+ *
+ * All six are rejected HERE rather than left to the checker, and traversal is
+ * the reason why. The checker resolves `ref` against `--root`, so
+ * `../../etc/passwd` is not merely a citation that will fail to resolve — it
+ * is a citation that resolves to somewhere it was never allowed to look, and
+ * on a document an agent wrote from a prompt it read. A rule that only the
+ * checker enforces protects only the people who run the checker; a validation
+ * rule protects every path into the document, because every one of them goes
+ * through applyPatch. It is also decidable from the string alone, which is the
+ * test for whether a rule belongs in validate at all: no filesystem, no root,
+ * no ambiguity. The checker still resolves and still refuses to escape — two
+ * locks on a door that opens onto the developer's home directory is the right
+ * number.
+ */
+function refProblemError(problem: BindingRefProblem, id: string, ref: string): string {
+  switch (problem) {
+    case 'url':
+      return `binding ref on "${id}" must be a repo-relative path, not a URL`;
+    case 'absolute':
+      return `binding ref "${ref}" on "${id}" must be repo-relative, not an absolute path`;
+    case 'traversal':
+      return `binding ref "${ref}" on "${id}" escapes the repository root: cite a path inside the repo`;
+    case 'backslash':
+      return `binding ref "${ref}" on "${id}" must use "/" separators, not "\\"`;
+    case 'blank':
+      return `binding ref on "${id}" is blank: cite a path like "services/orders/" or an identifier like "orders-api"`;
+    case 'control-char':
+      return `binding ref on "${id}" contains a control character: cite a plain repo-relative path`;
+  }
+}
+
+/**
+ * V14–V17 for one element's bindings (spec §3.8). Nodes and edges run the
+ * same four rules; only V17's cap and the noun differ.
+ *
+ * V15 SKIPS a binding whose source V14 already rejected — "Compose" and
+ * "compose" would otherwise read as a duplicate pair, and the agent would be
+ * told to delete one of two bindings when the fix is to lowercase one letter.
+ * That is the V13 precedent: two errors for one mistake makes the agent fix
+ * the wrong thing. V16 does NOT skip it, because a ref is wrong independently
+ * of its source and reporting both saves a round trip.
+ */
+function checkBindings(
+  kind: 'node' | 'edge',
+  id: string,
+  bindings: GBinding[] | undefined,
+  errors: string[],
+): void {
+  if (bindings === undefined || bindings.length === 0) return;
+
+  // V17 — ≤ 8 bindings per node, ≤ 4 per edge. Reported once, naming the cap
+  // that actually applies: an edge told "max 8" would trim to seven and fail
+  // again.
+  const max = kind === 'node' ? MAX_NODE_BINDINGS : MAX_EDGE_BINDINGS;
+  if (bindings.length > max) {
+    errors.push(`${kind} "${id}" has ${bindings.length} bindings, max ${max}`);
+  }
+
+  const seenSource = new Set<string>();
+  for (const b of bindings) {
+    // V14 — source is on the known list. The schema enum rejects this too, but
+    // validate() also runs on documents built in memory and on the file
+    // protocol's hand-edited graph.json, and this message says what to type.
+    const knownSource = BindingSourceSchema.safeParse(b.source).success;
+    if (!knownSource) {
+      errors.push(
+        `binding source "${String(b.source)}" on ${kind} "${id}": use lowercase, one of ${BINDING_SOURCES}`,
+      );
+    } else if (seenSource.has(b.source)) {
+      // V15 — no duplicate source on one element. A component read out of two
+      // files under one source is one binding with the directory, not two.
+      errors.push(`${kind} "${id}" has two "${b.source}" bindings: one entry per source`);
+    } else {
+      seenSource.add(b.source);
+    }
+
+    // V16 — ref is repo-relative, never a URL, and `line` only where a line
+    // exists. The parse is the same one the checker uses (bindings/ref.ts), so
+    // what validates is exactly what the checker will try to open.
+    const parsed = parseBindingRef(b.ref);
+    if (!parsed.ok) {
+      errors.push(refProblemError(parsed.problem, id, b.ref));
+      continue;
+    }
+    if (b.line !== undefined && !parsed.acceptsLine) {
+      errors.push(
+        parsed.kind === 'identifier'
+          ? `binding ref "${b.ref}" on "${id}" is an identifier, not a file, but carries line ${b.line}: drop the line`
+          : `binding ref "${b.ref}" on "${id}" names a directory but carries line ${b.line}: drop the line or cite the file`,
+      );
+    }
+  }
+}
+
+/**
+ * Validate a document against invariants V1–V13 (spec §3.3), V14–V17
+ * (bindings, spec §3.8) and V18–V19
  * Collects every violation; the exact message formats are the contract.
  */
 export function validate(doc: GraphDoc): ValidationResult {
@@ -243,6 +351,15 @@ export function validate(doc: GraphDoc): ValidationResult {
       );
     }
   }
+
+  // ---------------------------------------------------------------------
+  // Binding invariants (V14–V17, spec §3.8). Provenance: where a claim was
+  // READ, never anything about a running system (ground rule R5). Nodes and
+  // edges alike — an edge with no binding is the exact gap §3.8 exists to
+  // close.
+  // ---------------------------------------------------------------------
+  for (const n of doc.nodes) checkBindings('node', n.id, n.bindings, errors);
+  for (const e of doc.edges) checkBindings('edge', e.id, e.bindings, errors);
 
   // ---------------------------------------------------------------------
   // Redundancy invariants (V18–V19, spec §18.11). `alt` says two edges FROM

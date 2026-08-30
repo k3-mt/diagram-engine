@@ -9,14 +9,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  BindingSourceSchema,
   CardinalitySchema,
   formatIssues,
   GEdgeSchema,
   GGroupSchema,
   GNodeSchema,
   GraphDocSchema,
+  MAX_EDGE_BINDINGS,
   MAX_FIELDS,
   MAX_META_KEYS,
+  MAX_NODE_BINDINGS,
   NodeTypeSchema,
   graphDocJsonSchema,
   graphPatchJsonSchema,
@@ -357,5 +360,57 @@ describe('meta may never carry geometry (spec §1.3, §3.1)', () => {
       node('api', { meta: { owner: 'payments', region: 'us-east-1' } }),
     );
     expect(r.success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P5-01 — bindings (spec §3.8). The shape lives here; the behaviour is in
+// bindings.test.ts. What matters in THIS file is that the addition is
+// additive on both halves of the document and visible in the JSON Schema the
+// agent is actually shown.
+// ---------------------------------------------------------------------------
+
+describe('bindings (spec §3.8)', () => {
+  it('adds an optional bindings array to BOTH nodes and edges', () => {
+    // The structural fix §3.8 exists for: before it, an edge had no note, no
+    // meta and no binding, so an edge citation had nowhere to live.
+    expect(GNodeSchema.safeParse(node('orders')).success).toBe(true);
+    expect(
+      GEdgeSchema.safeParse({ id: 'e7', from: 'orders', to: 'pay' }).success,
+    ).toBe(true);
+    expect(
+      GEdgeSchema.safeParse({
+        id: 'e7',
+        from: 'orders',
+        to: 'pay',
+        bindings: [{ source: 'repo', ref: 'internal/pay.go', line: 412 }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('lists the five sources, closed and lowercase', () => {
+    expect(BindingSourceSchema.options).toEqual([
+      'repo',
+      'compose',
+      'terraform',
+      'k8s-manifest',
+      'package',
+    ]);
+  });
+
+  it('states both caps declaratively in the JSON Schema', () => {
+    // The MCP tool schema is the only place an agent sees the cap before it
+    // trips over it, so a refine-only bound would be invisible where it counts.
+    const schema = graphDocJsonSchema() as any;
+    expect(schema.properties.nodes.items.properties.bindings.maxItems).toBe(
+      MAX_NODE_BINDINGS,
+    );
+    expect(schema.properties.edges.items.properties.bindings.maxItems).toBe(
+      MAX_EDGE_BINDINGS,
+    );
+    const text = JSON.stringify(schema);
+    for (const s of ['repo', 'compose', 'terraform', 'k8s-manifest', 'package']) {
+      expect(text).toContain(`"${s}"`);
+    }
   });
 });

@@ -2,7 +2,28 @@
 // The same table diagram_get returns: cheaper than JSON and models read it
 // more reliably. Columns are padded within each section for scanability.
 
-import type { GField, GraphDoc } from '../schema/graph.js';
+import { formatBinding } from '../bindings/ref.js';
+import type { GBinding, GField, GraphDoc } from '../schema/graph.js';
+
+/**
+ * How many bindings of one element the table prints before it stops.
+ *
+ * This table sits in the agent's context on EVERY turn, so a node with eight
+ * bindings must not push the architecture off the screen — three is enough to
+ * show that the node is sourced and where from, which is what the agent reads
+ * this section for. The rest are counted, not hidden: the row ends
+ * `(+5 more)`, so the agent can see they exist and read them out of graph.json
+ * if it needs them. Adding a binding it cannot see is not a trap either — V15
+ * rejects a duplicate source by name and says why.
+ */
+export const TABLE_BINDINGS_SHOWN = 3;
+
+/** `repo=services/orders/, compose=orders-api (+5 more)` */
+function formatBindings(bindings: GBinding[]): string {
+  const shown = bindings.slice(0, TABLE_BINDINGS_SHOWN).map(formatBinding).join(', ');
+  const hidden = bindings.length - TABLE_BINDINGS_SHOWN;
+  return hidden > 0 ? `${shown} (+${hidden} more)` : shown;
+}
 
 /**
  * One column, as compactly as it can still be read:
@@ -56,6 +77,8 @@ function alignRows(rows: string[][]): string[] {
  *     and an `alt` column when any edge carries an alternative tag (§18.11)
  *   - ### Entities (id | fields) — one line per entity, columns comma-joined
  *   - ### Meta (id | key=value)  — only nodes that actually have meta
+ *   - ### Bindings (kind | id | source=ref) — provenance (§3.8), nodes and
+ *     edges, only the elements that carry one
  */
 export function toTable(doc: GraphDoc): string {
   const lines: string[] = [];
@@ -124,6 +147,30 @@ export function toTable(doc: GraphDoc): string {
         ]),
       ),
     );
+  }
+
+  // §3.8 — provenance. Nodes first, then edges, in document order, with a kind
+  // column so "which of these is the edge citation" is never a guess: node ids
+  // and edge ids come from two different namespaces and an agent skimming
+  // `e7 | repo=internal/pay.go:412` has no other way to tell. Present only
+  // when the document actually uses bindings, exactly like ### Entities and
+  // ### Meta — an architecture-only diagram pays nothing for a feature it
+  // never touched.
+  const bound: string[][] = [];
+  for (const n of doc.nodes) {
+    if (n.bindings !== undefined && n.bindings.length > 0) {
+      bound.push(['node', n.id, formatBindings(n.bindings)]);
+    }
+  }
+  for (const e of doc.edges) {
+    if (e.bindings !== undefined && e.bindings.length > 0) {
+      bound.push(['edge', e.id, formatBindings(e.bindings)]);
+    }
+  }
+  if (bound.length > 0) {
+    lines.push('');
+    lines.push('### Bindings (kind | id | source=ref)');
+    lines.push(...alignRows(bound));
   }
 
   return lines.join('\n');

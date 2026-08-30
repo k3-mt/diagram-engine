@@ -12,6 +12,10 @@ export * from './document/ids.js';
 export * from './document/validate.js';
 export * from './document/apply.js';
 export * from './document/history.js';
+// P5-01: the pure half of provenance (spec §3.8) — parsing, classifying and
+// normalising a binding ref, and walking the document's bindings. No node:fs,
+// so `diagram check --bindings` is the IO half and nothing else.
+export * from './bindings/index.js';
 export * from './format/summary.js';
 export * from './format/table.js';
 
