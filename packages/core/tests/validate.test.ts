@@ -261,3 +261,142 @@ describe('nearestId — a suggestion has to be plausible', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// M18f — the redundancy invariants (V18–V19, spec §18.11).
+//
+// `alt` says two edges FROM ONE SOURCE are alternatives, so both rules are
+// about a set and not an edge. The error strings are the contract an agent
+// self-corrects from, so these assertions are string-exact.
+// ---------------------------------------------------------------------------
+
+describe('V18 — an alt tag needs at least two alternatives', () => {
+  it('flags a tag carried by only one edge from that source', () => {
+    const d = doc({
+      nodes: [node('orders'), node('pg-primary')],
+      edges: [edge('e7', 'orders', 'pg-primary', { alt: 'db' })],
+    });
+    expect(errorsOf(d)).toContain(
+      'edge "e7" has alt "db" but it is the only edge from "orders" with that tag: alternatives need at least two',
+    );
+  });
+
+  it('accepts two edges from one source sharing a tag', () => {
+    const d = doc({
+      nodes: [node('orders'), node('pg-primary'), node('pg-replica')],
+      edges: [
+        edge('e1', 'orders', 'pg-primary', { alt: 'db' }),
+        edge('e2', 'orders', 'pg-replica', { alt: 'db' }),
+      ],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+
+  it('scopes the tag per source: the same word from another node is unrelated', () => {
+    // orders has a real pair; billing has a lone "db" edge. Only billing is
+    // wrong, and a global scope would have silently accepted it (§18.11).
+    const d = doc({
+      nodes: [node('orders'), node('billing'), node('pg-primary'), node('pg-replica')],
+      edges: [
+        edge('e1', 'orders', 'pg-primary', { alt: 'db' }),
+        edge('e2', 'orders', 'pg-replica', { alt: 'db' }),
+        edge('e3', 'billing', 'pg-primary', { alt: 'db' }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'edge "e3" has alt "db" but it is the only edge from "billing" with that tag: alternatives need at least two',
+    ]);
+  });
+
+  it('flags a set whose edges all point at the SAME target', () => {
+    // Two edges, one target: losing pg-primary takes both out, so the tag
+    // claims a redundancy the document does not describe. Reported once, on
+    // the first edge of the set, so a three-edge mistake is one correction.
+    const d = doc({
+      nodes: [node('orders'), node('pg-primary')],
+      edges: [
+        edge('e1', 'orders', 'pg-primary', { alt: 'db', label: 'reads' }),
+        edge('e2', 'orders', 'pg-primary', { alt: 'db', label: 'writes' }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'edge "e1" has alt "db" but every edge from "orders" with that tag points at "pg-primary": alternatives need at least two distinct targets',
+    ]);
+  });
+
+  it('accepts three alternatives, and two independent tags on one source', () => {
+    const d = doc({
+      nodes: [
+        node('consumer'),
+        node('broker-a'),
+        node('broker-b'),
+        node('broker-c'),
+        node('cache-a'),
+        node('cache-b'),
+      ],
+      edges: [
+        edge('e1', 'consumer', 'broker-a', { alt: 'kafka' }),
+        edge('e2', 'consumer', 'broker-b', { alt: 'kafka' }),
+        edge('e3', 'consumer', 'broker-c', { alt: 'kafka' }),
+        edge('e4', 'consumer', 'cache-a', { alt: 'redis' }),
+        edge('e5', 'consumer', 'cache-b', { alt: 'redis' }),
+      ],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+
+  it('stays quiet when an endpoint is unknown — V5 already said so', () => {
+    // The V13 precedent: two errors for one mistake makes the agent fix the
+    // wrong thing.
+    const d = doc({
+      nodes: [node('orders')],
+      edges: [edge('e7', 'orders', 'ghost', { alt: 'db' })],
+    });
+    const errors = errorsOf(d);
+    expect(errors).toEqual(['edge "e7" references unknown node "ghost".']);
+  });
+});
+
+describe('V19 — alt requires a synchronous edge', () => {
+  it('flags a dashed edge carrying alt', () => {
+    const d = doc({
+      nodes: [node('orders'), node('kafka'), node('pg-primary')],
+      edges: [
+        edge('e9', 'orders', 'kafka', { alt: 'db', style: 'dashed' }),
+        edge('e10', 'orders', 'pg-primary', { alt: 'db' }),
+      ],
+    });
+    expect(errorsOf(d)).toEqual([
+      'edge "e9" is dashed and carries alt "db": asynchronous edges already contain failure; drop one',
+    ]);
+  });
+
+  it('accepts an explicitly solid alt edge', () => {
+    const d = doc({
+      nodes: [node('orders'), node('pg-primary'), node('pg-replica')],
+      edges: [
+        edge('e1', 'orders', 'pg-primary', { alt: 'db', style: 'solid' }),
+        edge('e2', 'orders', 'pg-replica', { alt: 'db', style: 'solid' }),
+      ],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+
+  it('leaves a dashed edge with no alt alone', () => {
+    const d = doc({
+      nodes: [node('orders'), node('kafka')],
+      edges: [edge('e9', 'orders', 'kafka', { style: 'dashed' })],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+});
+
+describe('V18/V19 — additive: an untagged document is unaffected', () => {
+  it('validates a document with no alt anywhere exactly as before', () => {
+    const d = doc({
+      nodes: [node('web'), node('api'), node('postgres')],
+      edges: [edge('e1', 'web', 'api'), edge('e2', 'api', 'postgres')],
+    });
+    expect(validate(d)).toEqual({ ok: true });
+  });
+});

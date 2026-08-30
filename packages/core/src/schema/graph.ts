@@ -187,6 +187,16 @@ export const GEdgeSchema = z.object({
    * to reverse the edge's from/to.
    */
   cardinality: CardinalitySchema.optional(),
+  /**
+   * Redundancy tag, 1–24 chars (spec §18.11). Edges FROM ONE SOURCE sharing an
+   * `alt` tag are ALTERNATIVES, not independent hard dependencies: failure
+   * propagates to the source only when every edge in the set is unavailable.
+   * Scoped per source node — `orders → pg-primary` and `orders → pg-replica`
+   * both tagged "db" are alternatives; an edge from another source tagged "db"
+   * is unrelated. Absent means a hard dependency, exactly as before, so every
+   * existing document keeps its current meaning.
+   */
+  alt: z.string().min(1).max(24).optional(),
 });
 export type GEdge = z.infer<typeof GEdgeSchema>;
 

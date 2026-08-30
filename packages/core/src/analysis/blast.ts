@@ -34,6 +34,15 @@
 //      is derived from the other, and no field on this type lets a surface
 //      merge them.
 //
+//   4. AN `alt` SET IS ONE DEPENDENCY, NOT SEVERAL (§18.11). Edges from one
+//      source sharing an `alt` tag are ALTERNATIVES: failure reaches the
+//      source only when every one of them is unavailable. That turns
+//      propagation from a walk into a FIXPOINT, because whether a node is at
+//      risk depends on whether its siblings are — see propagate() for the
+//      rule, the case that proves it and the termination argument. An edge
+//      with no `alt` is a hard dependency exactly as before, so a document
+//      written before §18.11 gets bit-identical answers.
+//
 // C1 — the engine NEVER executes an experiment. There is no runner in this
 // package and no place to add one: every export here is a pure function of a
 // document. It is the map and the scoreboard, never the hand on the switch.
@@ -202,14 +211,95 @@ function inboundOf(g: RuntimeGraph, id: string): RuntimeEdge[] {
   return [...own, ...ancestors.flatMap((gid) => g.in.get(gid) ?? [])];
 }
 
-/** The at-risk / contained sets for an already-killed set of vertices. */
+/**
+ * The edge of an exhausted alt set to blame: the LAST alternative to fall.
+ *
+ * There is no single edge behind an alt-set failure — that is the point of a
+ * set — so `via` names the alternative that was still holding the source up,
+ * which is the one whose loss actually cost it. Ties inside one wave go to the
+ * earliest edge in document order, so the answer does not depend on the order
+ * the traversal happened to visit the wave in.
+ */
+function lastToFall(set: readonly RuntimeEdge[], wave: ReadonlyMap<string, number>): string {
+  let best = set[0]!;
+  let bestWave = -1;
+  for (const e of set) {
+    const w = wave.get(e.id) ?? -1;
+    if (w > bestWave) {
+      bestWave = w;
+      best = e;
+    }
+  }
+  return best.id;
+}
+
+/**
+ * The at-risk / contained sets for an already-killed set of vertices.
+ *
+ * ------------------------------------------------------------------------
+ * WHY THIS IS A FIXPOINT AND NOT A WALK (§18.11)
+ * ------------------------------------------------------------------------
+ * With `alt`, a node is at risk when EITHER
+ *
+ *   (a) any synchronous NON-alt (hard) dependency is unavailable, or
+ *   (b) for some alt tag on its outgoing edges, EVERY edge carrying that tag
+ *       is unavailable,
+ *
+ * where UNAVAILABLE means killed OR at risk — a node presumed to be failing
+ * cannot serve as a live alternative.
+ *
+ * Clause (b) makes the answer depend on siblings, which a single reverse walk
+ * cannot see. The case that proves it:
+ *
+ *     X → A  (alt "db")      A → C
+ *     X → B  (alt "db")      B → C
+ *
+ * Kill C. A is at risk; B is at risk; so every edge in X's "db" set is
+ * unavailable and X is at risk too. A plain reverse-BFS reaches A, tries X,
+ * finds B not yet marked and spares X — the answer would depend on visit
+ * order, which is the signature of a missing fixpoint.
+ *
+ * So this computes the LEAST FIXPOINT of that rule, by monotone propagation
+ * with a counter per alt set: each set starts with `set.length` live
+ * alternatives and its source becomes at risk on the decrement that reaches
+ * zero. Counters are the linear-time form of the fixpoint; re-scanning the
+ * whole graph until nothing changes would compute the identical set.
+ *
+ * TERMINATION. The down set (killed ∪ at-risk) only ever GROWS — nothing is
+ * ever unmarked, because both clauses are monotone in it: an unavailable
+ * dependency never becomes available again. It is bounded by the number of
+ * vertices, |V| = g.vertices.length, so at most |V| − |killed| vertices can
+ * ever be added and the outer loop runs at most that many waves before the
+ * frontier is empty. Each edge is marked down AT MOST ONCE (`edgeDown`), so
+ * each edge contributes at most one counter decrement and one at-risk test:
+ * the whole computation is O(V + E), the same order as the walk it replaces,
+ * with no re-scan and no quadratic blow-up inside backlog().
+ *
+ * DEPTH AND VIA under clause (b): `depth` is the wave in which the LAST
+ * alternative of the set fell — the number of propagation steps before the
+ * source was actually endangered, which is still the shortest such distance —
+ * and `via` is that last-falling edge (see lastToFall). A surface printing
+ * "depth 2 via e9" for an alt-exhausted node is naming the alternative that
+ * was still holding, not an arbitrary member of the set.
+ */
 function propagate(
   g: RuntimeGraph,
   killed: readonly string[],
 ): { atRisk: AtRiskNode[]; contained: ContainedNode[] } {
   const dead = new Set(killed);
+  // `seen` is the down set: killed OR at risk — exactly "unavailable".
   const seen = new Set(killed);
   const atRisk: AtRiskNode[] = [];
+
+  // Edges whose target is already unavailable, so no edge is ever counted
+  // twice against its alt set. It also matters for a plain hard edge reached
+  // through a boundary: two dead components inside one VPC are two reasons
+  // the same edge is down, not two edges.
+  const edgeDown = new Set<string>();
+  /** edge id -> the wave it went down in, for `via` on an exhausted set */
+  const downWave = new Map<string, number>();
+  /** `${source}\x00${tag}` -> alternatives still available. Lazily seeded. */
+  const remaining = new Map<string, number>();
 
   // Breadth-first BACKWARDS over synchronous edges only. Breadth-first, not
   // depth-first, so `depth` really is the shortest dependency distance — the
@@ -219,26 +309,55 @@ function propagate(
   while (frontier.length > 0) {
     depth += 1;
     const next: string[] = [];
+    const markAtRisk = (id: string, via: string): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      next.push(id);
+      atRisk.push({
+        id,
+        label: labelOf(g, id),
+        type: g.nodeById.get(id)?.type ?? null,
+        depth,
+        via,
+      });
+    };
+
     for (const cur of frontier) {
       for (const e of inboundOf(g, cur)) {
         if (!e.sync) continue; // detail 1: a dashed edge is not traversed
-        if (seen.has(e.from)) continue;
-        seen.add(e.from);
-        next.push(e.from);
-        atRisk.push({
-          id: e.from,
-          label: labelOf(g, e.from),
-          type: g.nodeById.get(e.from)?.type ?? null,
-          depth,
-          via: e.id,
-        });
+        if (edgeDown.has(e.id)) continue;
+        edgeDown.add(e.id);
+        downWave.set(e.id, depth);
+        if (seen.has(e.from)) continue; // already unavailable: nothing to decide
+
+        if (e.alt === null) {
+          // Clause (a): a hard dependency. Unchanged from the pre-§18.11
+          // walk, which is why an untagged document behaves exactly as before
+          // — and why an alt set never rescues a node that also has a failed
+          // hard dependency.
+          markAtRisk(e.from, e.id);
+          continue;
+        }
+
+        // Clause (b): one alternative fell. The source survives until the set
+        // is exhausted. `?? [e]` cannot normally fire — altSets is built from
+        // the same projection — and if it ever did, a lone alternative is a
+        // hard dependency, which is the conservative reading (V18 says the
+        // tag was meaningless anyway).
+        const set = g.altSets.get(e.from)?.get(e.alt) ?? [e];
+        const key = `${e.from}\x00${e.alt}`;
+        const live = (remaining.get(key) ?? set.length) - 1;
+        remaining.set(key, live);
+        if (live <= 0) markAtRisk(e.from, lastToFall(set, downWave));
       }
     }
     // Deterministic within a ring: nearest first, then document order.
     next.sort((a, b) => documentRank(g, a) - documentRank(g, b));
-    atRisk.sort((a, b) => a.depth - b.depth || documentRank(g, a.id) - documentRank(g, b.id));
     frontier = next;
   }
+  // One sort at the end rather than one per wave: `depth` is fixed when a node
+  // is marked, so the order is the same and the cost is not paid |V| times.
+  atRisk.sort((a, b) => a.depth - b.depth || documentRank(g, a.id) - documentRank(g, b.id));
 
   // Containment is computed AFTER the at-risk set is closed, deliberately. A
   // node reachable both by a dashed edge and by some solid path is AT RISK,
@@ -363,19 +482,63 @@ export function blastRadius(doc: GraphDoc, id: string): BlastRadius {
 // ---------------------------------------------------------------------------
 
 /**
- * §18.11, in the one sentence a multi-target surface must print.
+ * §18.11, in the one sentence a multi-target surface must print over a
+ * document that states NO redundancy — which is every document that carries no
+ * `alt` tag.
  *
- * Every edge in the document asserts a HARD dependency. There is no way to
- * write "X depends on A OR B", so there is no way to say that two of the
- * selected targets are replicas of each other and that losing one alone was
- * survivable. The union is arithmetically right and the model underneath it
- * cannot express the thing multi-select is usually used to investigate, which
- * makes this the one result in Part 18 that is more confident than the
- * document deserves. It is data on the result, not prose in a surface,
- * because three surfaces would otherwise each decide whether to mention it.
+ * An untagged edge asserts a HARD dependency. With no `alt` anywhere there is
+ * no way to say that two of the selected targets are replicas of each other
+ * and that losing one alone was survivable. The union is arithmetically right
+ * and the model underneath it cannot express the thing multi-select is usually
+ * used to investigate, which makes this the one result in Part 18 that is more
+ * confident than the document deserves. It is data on the result, not prose in
+ * a surface, because three surfaces would otherwise each decide whether to
+ * mention it.
+ *
+ * Once the document DOES express redundancy, this sentence is no longer true
+ * of it — see ASSUMPTION_PARTIAL_REDUNDANCY, which replaces it.
  */
 export const ASSUMPTION_NO_REDUNDANCY =
   'every edge is a hard dependency: the document cannot say two targets are replicas, so a combined radius over-reports wherever redundancy exists (§18.11)';
+
+/**
+ * The same caveat, for a document that DOES express redundancy (§18.11).
+ *
+ * This is the one place where building the feature changed an existing claim.
+ * `ASSUMPTION_NO_REDUNDANCY` says the model cannot express redundancy at all;
+ * once a single edge carries `alt`, that sentence is false for the edges that
+ * carry it and still true for every edge that does not. Printing the old
+ * wording over a document with alt sets would understate the tool and,
+ * worse, invite the reader to discount a number that is now partly exact.
+ *
+ * So the caveat stays a caveat and narrows to what is actually unknown: the
+ * untagged edges. It is deliberately NOT "redundancy is modelled, this result
+ * is exact" — rule 14 says redundancy is told, not deduced, so an untagged
+ * edge means nobody said, not that nothing is redundant. Over-reporting stays
+ * the conservative direction (§18.11).
+ */
+export const ASSUMPTION_PARTIAL_REDUNDANCY =
+  'alternatives are honoured where `alt` is set; every untagged edge is still a hard dependency, so a combined radius over-reports wherever redundancy exists but was never stated (§18.11)';
+
+/** True when the projection contains at least one usable alternative set (§18.11). */
+export function hasAlternatives(g: RuntimeGraph): boolean {
+  for (const byTag of g.altSets.values()) {
+    for (const set of byTag.values()) if (set.length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * The §18.11 caveat that fits THIS document, or null when it does not apply.
+ *
+ * It applies to a multi-target result with two or more resolved targets — the
+ * union is the shape §18.7 warns about — and its wording depends on whether
+ * the document expresses any redundancy at all.
+ */
+export function redundancyCaveatFor(g: RuntimeGraph, resolvedTargets: number): string | null {
+  if (resolvedTargets < 2) return null;
+  return hasAlternatives(g) ? ASSUMPTION_PARTIAL_REDUNDANCY : ASSUMPTION_NO_REDUNDANCY;
+}
 
 /** A target that named nothing killable, and the reason (kind mirrors BlastTargetKind). */
 export type UnresolvedTarget = {
@@ -441,7 +604,11 @@ export type MultiBlastResult = {
   excluded: Exclusions;
   /** blind spots, C2, C3, and — for two or more resolved targets — §18.11 */
   assumptions: string[];
-  /** ASSUMPTION_NO_REDUNDANCY when it applies, else null; also last in `assumptions` */
+  /**
+   * The §18.11 caveat when it applies, else null; also last in `assumptions`.
+   * ASSUMPTION_NO_REDUNDANCY for a document with no alt sets,
+   * ASSUMPTION_PARTIAL_REDUNDANCY for one that expresses some.
+   */
   redundancyCaveat: string | null;
   /** set when the selection was empty or lost a target; null when all is well */
   note: string | null;
@@ -493,7 +660,7 @@ export function blastRadiusMultiOn(
   const killed = [...new Set(per.flatMap((r) => r.killed))];
   const { atRisk, contained } = propagate(g, killed);
 
-  const redundancyCaveat = resolved.length > 1 ? ASSUMPTION_NO_REDUNDANCY : null;
+  const redundancyCaveat = redundancyCaveatFor(g, resolved.length);
 
   return {
     targets,

@@ -1,5 +1,5 @@
 // document/validate.ts — invariants V1–V13 (spec §3.3; V11–V13 cover ERD mode,
-// spec Part 13 item 2).
+// spec Part 13 item 2) plus V18–V19 (redundancy, spec §18.11).
 //
 // Run after every patch, before committing. Error strings are part of the
 // contract: the agent reads them and self-corrects, so they must say what
@@ -54,7 +54,8 @@ function isDescendantOf(doc: GraphDoc, id: string, gid: string): boolean {
 }
 
 /**
- * Validate a document against invariants V1–V13 (spec §3.3).
+ * Validate a document against invariants V1–V13 (spec §3.3) and V18–V19
+ * (spec §18.11).
  * Collects every violation; the exact message formats are the contract.
  */
 export function validate(doc: GraphDoc): ValidationResult {
@@ -224,6 +225,57 @@ export function validate(doc: GraphDoc): ValidationResult {
         `edge "${e.id}" has cardinality but neither "${e.from}" nor "${e.to}" is an entity: drop the cardinality or change an endpoint to type "entity"`,
       );
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Redundancy invariants (V18–V19, spec §18.11). `alt` says two edges FROM
+  // ONE SOURCE are alternatives, so both rules are about a set, not an edge:
+  // a tag scoped per source, on synchronous edges only. Edges whose endpoints
+  // are unknown are skipped — V5 already reports those, and two errors for one
+  // mistake makes the agent fix the wrong thing (the V13 precedent).
+  // ---------------------------------------------------------------------
+
+  // Group the alt-carrying edges by (source, tag) in document order.
+  const altSets = new Map<string, { tag: string; from: string; edges: typeof doc.edges }>();
+  for (const e of doc.edges) {
+    if (e.alt === undefined) continue;
+    if (!allIdSet.has(e.from) || !allIdSet.has(e.to)) continue;
+    const key = `${e.from}\x00${e.alt}`;
+    const set = altSets.get(key);
+    if (set) set.edges.push(e);
+    else altSets.set(key, { tag: e.alt, from: e.from, edges: [e] });
+  }
+
+  // V18 — an alt tag needs at least two alternatives from the same source.
+  // Two edges to the SAME target are not alternatives either: losing that
+  // target takes both out, so the tag claims a redundancy the document does
+  // not describe. Reported once per offending set, naming its first edge, so
+  // a three-edge mistake is one correction and not three.
+  for (const set of altSets.values()) {
+    const first = set.edges[0]!;
+    if (set.edges.length < 2) {
+      errors.push(
+        `edge "${first.id}" has alt "${set.tag}" but it is the only edge from "${set.from}" with that tag: alternatives need at least two`,
+      );
+      continue;
+    }
+    const targets = new Set(set.edges.map((e) => e.to));
+    if (targets.size < 2) {
+      errors.push(
+        `edge "${first.id}" has alt "${set.tag}" but every edge from "${set.from}" with that tag points at "${first.to}": alternatives need at least two distinct targets`,
+      );
+    }
+  }
+
+  // V19 — alt requires a synchronous edge: an async path already stops
+  // propagation (§18.3), so tagging one as an alternative claims a redundancy
+  // that changes nothing.
+  for (const e of doc.edges) {
+    if (e.alt === undefined || e.style !== 'dashed') continue;
+    if (!allIdSet.has(e.from) || !allIdSet.has(e.to)) continue;
+    errors.push(
+      `edge "${e.id}" is dashed and carries alt "${e.alt}": asynchronous edges already contain failure; drop one`,
+    );
   }
 
   return errors.length ? { ok: false, errors } : { ok: true };

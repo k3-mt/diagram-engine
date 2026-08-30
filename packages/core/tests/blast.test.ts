@@ -16,10 +16,12 @@ import { describe, expect, it } from 'vitest';
 import {
   ASSUMPTION_AT_RISK,
   ASSUMPTION_NO_REDUNDANCY,
+  ASSUMPTION_PARTIAL_REDUNDANCY,
   ASSUMPTION_SYNC_ONLY,
   backlog,
   blastRadius,
   blastRadiusMulti,
+  hasAlternatives,
   runtimeGraph,
 } from '../src/analysis/index.js';
 import { GraphDocSchema, type GraphDoc } from '../src/schema/graph.js';
@@ -668,7 +670,10 @@ describe('§18.11: a multi-target result says what it cannot know', () => {
     expect(JSON.stringify({ atRisk: r.atRisk, contained: r.contained })).not.toContain('fail');
   });
 
-  it('does not invent an alt field — §18.11 is specified, not built', () => {
+  it('reports nodes and edge ids, never an edge tag (M18f kept it that way)', () => {
+    // §18.11 is built now, and the RESULT surface still carries no `alt`
+    // field: an alt set is an input to propagation, and a caller that could
+    // read a tag off a result would start re-deriving redundancy from it.
     expect(JSON.stringify(blastRadiusMulti(d(), ['pg-primary']))).not.toContain('"alt"');
   });
 });
@@ -732,5 +737,371 @@ describe('C1/A1 hold for the multi path too', () => {
     const r = blastRadiusMulti(d, ['postgres', 'kafka']);
     expect(r.atRisk.length).toBeGreaterThan(0);
     expect(JSON.stringify(d)).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M18f — redundancy (§18.11). Edges from ONE source sharing an `alt` tag are
+// ALTERNATIVES: failure reaches the source only when every one of them is
+// unavailable, where unavailable means killed OR at risk.
+//
+// Every expectation below is hand-computed, because the interesting cases are
+// exactly the ones a plausible implementation gets wrong quietly.
+// ---------------------------------------------------------------------------
+
+describe('§18.11: an alt set is one dependency, not several', () => {
+  /**
+   *   x → a  (alt "db")     a → c
+   *   x → b  (alt "db")     b → c
+   */
+  const fixpointDoc = () =>
+    doc({
+      nodes: [node('x'), node('a'), node('b'), node('c')],
+      edges: [
+        edge('e1', 'x', 'a', { alt: 'db' }),
+        edge('e2', 'x', 'b', { alt: 'db' }),
+        edge('e3', 'a', 'c'),
+        edge('e4', 'b', 'c'),
+      ],
+    });
+
+  it('THE FIXPOINT CASE: both alternatives fail through a shared dependency', () => {
+    // Kill c. a is at risk (hard, depth 1); b is at risk (hard, depth 1);
+    // so EVERY edge in x's "db" set is unavailable and x is at risk too
+    // (depth 2). A single reverse-BFS reaches a, tries x, finds b not yet
+    // marked and spares x — the answer would depend on visit order.
+    const r = blastRadius(fixpointDoc(), 'c');
+    expect(r.atRisk.map((n) => [n.id, n.depth, n.via])).toEqual([
+      ['a', 1, 'e3'],
+      ['b', 1, 'e4'],
+      ['x', 2, 'e1'],
+    ]);
+  });
+
+  it('gives the same answer whichever alternative the walk happens to meet first', () => {
+    // The same document with the two alt edges written in the other order.
+    // A visit-order-dependent implementation flips its answer here.
+    const flipped = doc({
+      nodes: [node('x'), node('a'), node('b'), node('c')],
+      edges: [
+        edge('e2', 'x', 'b', { alt: 'db' }),
+        edge('e1', 'x', 'a', { alt: 'db' }),
+        edge('e4', 'b', 'c'),
+        edge('e3', 'a', 'c'),
+      ],
+    });
+    expect(ids(blastRadius(flipped, 'c').atRisk)).toEqual(['a', 'b', 'x']);
+  });
+
+  it('ONE LIVE ALTERNATIVE SPARES THE SOURCE: killing a leaves x alone', () => {
+    const r = blastRadius(fixpointDoc(), 'a');
+    expect(r.killed).toEqual(['a']);
+    expect(r.atRisk).toEqual([]);
+    // ...and b is not reported as anything odd: it is neither at risk nor
+    // contained. It is simply the alternative that is still up.
+    expect(r.contained).toEqual([]);
+    expect(r.atRisk.concat(r.contained as never[]).map((n) => n.id)).not.toContain('b');
+  });
+
+  it('propagates onward once the set IS exhausted', () => {
+    // y depends on x hard, so y follows x into the radius at depth 3.
+    const d = doc({
+      nodes: [node('y'), node('x'), node('a'), node('b'), node('c')],
+      edges: [
+        edge('e0', 'y', 'x'),
+        edge('e1', 'x', 'a', { alt: 'db' }),
+        edge('e2', 'x', 'b', { alt: 'db' }),
+        edge('e3', 'a', 'c'),
+        edge('e4', 'b', 'c'),
+      ],
+    });
+    expect(blastRadius(d, 'c').atRisk.map((n) => [n.id, n.depth])).toEqual([
+      ['a', 1],
+      ['b', 1],
+      ['x', 2],
+      ['y', 3],
+    ]);
+  });
+
+  it('a hard dependency still kills the source whatever the alt set is doing', () => {
+    // x has BOTH an alt set (a, b — untouched, both up) and an ordinary hard
+    // dependency on h. Redundancy elsewhere is not a licence to survive h.
+    const d = doc({
+      nodes: [node('x'), node('h'), node('a'), node('b')],
+      edges: [
+        edge('e1', 'x', 'h'),
+        edge('e2', 'x', 'a', { alt: 'db' }),
+        edge('e3', 'x', 'b', { alt: 'db' }),
+      ],
+    });
+    const r = blastRadius(d, 'h');
+    expect(r.atRisk.map((n) => [n.id, n.depth, n.via])).toEqual([['x', 1, 'e1']]);
+    // and the alt set is genuinely independent of that: losing one of the two
+    // alternatives still spares x.
+    expect(blastRadius(d, 'a').atRisk).toEqual([]);
+  });
+
+  it('satisfies two independent alt tags on one source separately', () => {
+    const d = doc({
+      nodes: [node('src'), node('a1'), node('a2'), node('b1'), node('b2')],
+      edges: [
+        edge('e1', 'src', 'a1', { alt: 'p' }),
+        edge('e2', 'src', 'a2', { alt: 'p' }),
+        edge('e3', 'src', 'b1', { alt: 'q' }),
+        edge('e4', 'src', 'b2', { alt: 'q' }),
+      ],
+    });
+    // One from each set: both sets still have a live member. src survives.
+    expect(blastRadiusMulti(d, ['a1', 'b1']).atRisk).toEqual([]);
+    // Both of one set: THAT set is exhausted, and one exhausted set is enough.
+    expect(ids(blastRadiusMulti(d, ['a1', 'a2']).atRisk)).toEqual(['src']);
+    expect(ids(blastRadiusMulti(d, ['b1', 'b2']).atRisk)).toEqual(['src']);
+    // Three alternatives, one alt tag: two deaths are survivable.
+    const three = doc({
+      nodes: [node('src'), node('k1'), node('k2'), node('k3')],
+      edges: [
+        edge('e1', 'src', 'k1', { alt: 'kafka' }),
+        edge('e2', 'src', 'k2', { alt: 'kafka' }),
+        edge('e3', 'src', 'k3', { alt: 'kafka' }),
+      ],
+    });
+    expect(blastRadiusMulti(three, ['k1', 'k2']).atRisk).toEqual([]);
+    expect(ids(blastRadiusMulti(three, ['k1', 'k2', 'k3']).atRisk)).toEqual(['src']);
+  });
+
+  it('names the LAST alternative to fall as `via`, at the depth it fell', () => {
+    // x's "db" set is {a, b}. a is already gone at depth 1 (killed target's
+    // direct dependent), b only at depth 2 — so x is endangered at depth 3,
+    // and the edge to blame is the one that was still holding it up.
+    //
+    //   x → a (alt db)   x → b (alt db)   a → dead   b → mid   mid → dead
+    const d = doc({
+      nodes: [node('x'), node('a'), node('b'), node('mid'), node('dead')],
+      edges: [
+        edge('e1', 'x', 'a', { alt: 'db' }),
+        edge('e2', 'x', 'b', { alt: 'db' }),
+        edge('e3', 'a', 'dead'),
+        edge('e4', 'b', 'mid'),
+        edge('e5', 'mid', 'dead'),
+      ],
+    });
+    const r = blastRadius(d, 'dead');
+    expect(r.atRisk.map((n) => [n.id, n.depth, n.via])).toEqual([
+      ['a', 1, 'e3'],
+      ['mid', 1, 'e5'],
+      ['b', 2, 'e4'],
+      ['x', 3, 'e2'],
+    ]);
+  });
+
+  it('counts an alternative that is a BOUNDARY once, however much it contains', () => {
+    // x depends on either availability zone. Each zone holds two components,
+    // and an edge into a boundary reaches everything inside it — so killing
+    // one zone marks that ONE edge down, not one per component. Counting per
+    // component would exhaust a two-member set on a single zone outage: the
+    // exact false-negative-turned-false-positive this test exists to catch.
+    const d = doc({
+      nodes: [
+        node('x'),
+        node('a1', { parent: 'az-a' }),
+        node('a2', { parent: 'az-a' }),
+        node('b1', { parent: 'az-b' }),
+        node('b2', { parent: 'az-b' }),
+      ],
+      groups: [group('az-a'), group('az-b')],
+      edges: [
+        edge('e1', 'x', 'az-a', { alt: 'az' }),
+        edge('e2', 'x', 'az-b', { alt: 'az' }),
+      ],
+    });
+    const one = blastRadius(d, 'az-a');
+    expect(one.killed).toEqual(['az-a', 'a1', 'a2']);
+    expect(one.atRisk).toEqual([]); // the other zone is up
+    const both = blastRadiusMulti(d, ['az-a', 'az-b']);
+    expect(ids(both.atRisk)).toEqual(['x']);
+  });
+
+  it('ignores a DASHED alt edge: it neither joins a set nor keeps one alive', () => {
+    // V19 forbids this document, and analysis never assumes validation ran.
+    // An async path already stops propagation (§18.3), so the surviving
+    // synchronous alternative is the whole set — and losing it is a loss.
+    const d = doc({
+      nodes: [node('x'), node('a'), node('b')],
+      edges: [
+        edge('e1', 'x', 'a', { alt: 'db' }),
+        edge('e2', 'x', 'b', { alt: 'db', style: 'dashed' }),
+      ],
+    });
+    expect(blastRadius(d, 'a').atRisk.map((n) => [n.id, n.via])).toEqual([['x', 'e1']]);
+  });
+
+  it('leaves a document with no alt tag bit-identical to the pre-§18.11 answer', () => {
+    // The additive claim, asserted rather than assumed: two untagged edges to
+    // two replicas are still two hard dependencies, and either one kills.
+    const d = doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica')],
+      edges: [edge('e1', 'app', 'pg-primary'), edge('e2', 'app', 'pg-replica')],
+    });
+    expect(blastRadius(d, 'pg-primary').atRisk.map((n) => [n.id, n.depth, n.via])).toEqual([
+      ['app', 1, 'e1'],
+    ]);
+  });
+});
+
+describe('§18.11: multi-select honours alternatives identically', () => {
+  const d = () =>
+    doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica')],
+      edges: [
+        edge('e1', 'app', 'pg-primary', { alt: 'pg' }),
+        edge('e2', 'app', 'pg-replica', { alt: 'pg' }),
+      ],
+    });
+
+  it('reports nothing at risk for one replica and the app for both', () => {
+    // This is the §18.7 scenario the caveat was written for, now answered:
+    // "you toggle off two replicas, see a large at-risk set, and get no
+    // signal that losing the first one alone was survivable."
+    expect(blastRadiusMulti(d(), ['pg-primary']).atRisk).toEqual([]);
+    const both = blastRadiusMulti(d(), ['pg-primary', 'pg-replica']);
+    expect(both.atRisk.map((n) => [n.id, n.depth, n.via])).toEqual([['app', 1, 'e1']]);
+    // Each PER-TARGET result is the single-target answer, unchanged: neither
+    // replica alone endangers the app.
+    expect(both.per.map((r) => r.atRisk)).toEqual([[], []]);
+  });
+
+  it('agrees with the single-target function on every target', () => {
+    // blastRadiusMultiOn shares propagate(), so alternatives come free —
+    // asserted rather than assumed.
+    const one = blastRadiusMulti(d(), ['pg-primary']);
+    expect(one.atRisk).toEqual(blastRadius(d(), 'pg-primary').atRisk);
+    expect(one.contained).toEqual(blastRadius(d(), 'pg-primary').contained);
+  });
+
+  it('carries the exhausted set through the fixpoint under multi-select too', () => {
+    const fix = doc({
+      nodes: [node('x'), node('a'), node('b'), node('c1'), node('c2')],
+      edges: [
+        edge('e1', 'x', 'a', { alt: 'db' }),
+        edge('e2', 'x', 'b', { alt: 'db' }),
+        edge('e3', 'a', 'c1'),
+        edge('e4', 'b', 'c2'),
+      ],
+    });
+    // Killing c1 alone: a falls, b holds, x survives.
+    expect(ids(blastRadius(fix, 'c1').atRisk)).toEqual(['a']);
+    // Killing both: a and b fall at depth 1, so x falls at depth 2.
+    const r = blastRadiusMulti(fix, ['c1', 'c2']);
+    expect(r.atRisk.map((n) => [n.id, n.depth])).toEqual([
+      ['a', 1],
+      ['b', 1],
+      ['x', 2],
+    ]);
+  });
+});
+
+describe('§18.11: the caveat narrows once the document states redundancy', () => {
+  const bare = () =>
+    doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica')],
+      edges: [edge('e1', 'app', 'pg-primary'), edge('e2', 'app', 'pg-replica')],
+    });
+  const tagged = () =>
+    doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica')],
+      edges: [
+        edge('e1', 'app', 'pg-primary', { alt: 'pg' }),
+        edge('e2', 'app', 'pg-replica', { alt: 'pg' }),
+      ],
+    });
+
+  it('says the model cannot express redundancy when no edge carries alt', () => {
+    const r = blastRadiusMulti(bare(), ['pg-primary', 'pg-replica']);
+    expect(r.redundancyCaveat).toBe(ASSUMPTION_NO_REDUNDANCY);
+    expect(r.assumptions.at(-1)).toBe(ASSUMPTION_NO_REDUNDANCY);
+  });
+
+  it('says the untagged edges are the unknown once redundancy IS expressed', () => {
+    // The old sentence would now be false for the edges carrying alt, and
+    // still true for the ones that do not. It narrows rather than disappears:
+    // rule 14 says redundancy is told, not deduced, so an untagged edge means
+    // nobody said — not that nothing is redundant.
+    const r = blastRadiusMulti(tagged(), ['pg-primary', 'pg-replica']);
+    expect(r.redundancyCaveat).toBe(ASSUMPTION_PARTIAL_REDUNDANCY);
+    expect(r.assumptions.at(-1)).toBe(ASSUMPTION_PARTIAL_REDUNDANCY);
+    expect(r.assumptions).not.toContain(ASSUMPTION_NO_REDUNDANCY);
+    expect(r.assumptions).toContain(ASSUMPTION_AT_RISK);
+    expect(r.assumptions).toContain(ASSUMPTION_SYNC_ONLY);
+  });
+
+  it('is a property of the DOCUMENT, not of the selection', () => {
+    // Selecting two nodes that carry no alt themselves, in a document that
+    // expresses redundancy elsewhere, still gets the narrowed wording: the
+    // claim is about which edges the traversal could and could not reason
+    // about, and it traversed the whole graph.
+    const mixed = doc({
+      nodes: [node('app'), node('pg-primary'), node('pg-replica'), node('mail'), node('sms')],
+      edges: [
+        edge('e1', 'app', 'pg-primary', { alt: 'pg' }),
+        edge('e2', 'app', 'pg-replica', { alt: 'pg' }),
+        edge('e3', 'app', 'mail'),
+        edge('e4', 'app', 'sms'),
+      ],
+    });
+    expect(blastRadiusMulti(mixed, ['mail', 'sms']).redundancyCaveat).toBe(
+      ASSUMPTION_PARTIAL_REDUNDANCY,
+    );
+    // hasAlternatives() is the one predicate behind that, so a surface never
+    // has to re-derive it from the document.
+    expect(hasAlternatives(runtimeGraph(mixed))).toBe(true);
+    expect(hasAlternatives(runtimeGraph(bare()))).toBe(false);
+  });
+
+  it('adds no caveat at all to a one-target result, either way', () => {
+    expect(blastRadiusMulti(tagged(), ['pg-primary']).redundancyCaveat).toBeNull();
+    expect(blastRadiusMulti(bare(), ['pg-primary']).redundancyCaveat).toBeNull();
+  });
+
+  it('still never says "will fail" (C3 is untouched by any of this)', () => {
+    const r = blastRadiusMulti(tagged(), ['pg-primary', 'pg-replica']);
+    expect(JSON.stringify(r)).not.toContain('will fail: no');
+    expect(r.assumptions).toContain(ASSUMPTION_AT_RISK);
+  });
+});
+
+describe('§18.11: the fixpoint stays linear inside the backlog', () => {
+  it('ranks a 200-element document full of alt sets inside the §15.2 budget', () => {
+    // The fixpoint runs once per backlog candidate, so a re-scan-until-stable
+    // implementation would be O(n) passes per candidate on top of the sweep
+    // that already had to be optimised once. Counters keep it O(V+E): every
+    // edge is marked down at most once per propagation.
+    //
+    // 66 sources, each with a 2-member alt set, chained so that killing the
+    // deepest leaf cascades the whole way up — the worst case for the
+    // fixpoint, since every set is exhausted in turn.
+    const nodes = [];
+    const edges = [];
+    for (let i = 0; i < 66; i += 1) {
+      nodes.push(node(`s${i}`), node(`a${i}`), node(`b${i}`));
+      edges.push(
+        edge(`ea${i}`, `s${i}`, `a${i}`, { alt: 'r' }),
+        edge(`eb${i}`, `s${i}`, `b${i}`, { alt: 'r' }),
+      );
+      if (i > 0) {
+        edges.push(edge(`ca${i}`, `a${i - 1}`, `s${i}`), edge(`cb${i}`, `b${i - 1}`, `s${i}`));
+      }
+    }
+    const d = doc({ nodes, edges });
+    const started = Date.now();
+    const ranked = backlog(d);
+    const elapsed = Date.now() - started;
+    expect(ranked).toHaveLength(nodes.length - runtimeGraph(d).entryPoints.length);
+    // The whole cascade really does happen — this is not a fast answer to an
+    // easy question: killing the deepest PAIR exhausts s65's set, which
+    // exhausts s64's, all the way to the top (196 of the 198 nodes), while
+    // killing one of the pair costs nothing at all.
+    expect(blastRadiusMulti(d, ['a65', 'b65']).atRisk).toHaveLength(196);
+    expect(blastRadius(d, 'a65').atRisk).toEqual([]);
+    expect(elapsed).toBeLessThan(500);
   });
 });

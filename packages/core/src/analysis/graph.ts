@@ -53,6 +53,13 @@ export type RuntimeEdge = {
   /** solid, or style absent. A dashed edge is asynchronous and stops a cascade. */
   sync: boolean;
   label: string | null;
+  /**
+   * Redundancy tag (spec §18.11), or null for a hard dependency. Edges from
+   * ONE source sharing a tag are alternatives: failure reaches the source only
+   * when every one of them is unavailable. Carried here, not re-read from the
+   * document, so propagation and every other signal see the same projection.
+   */
+  alt: string | null;
 };
 
 /**
@@ -129,6 +136,22 @@ export type RuntimeGraph = {
   in: Map<string, RuntimeEdge[]>;
   /** nodes with no inbound edge (spec §15.2: usually `client`, never assumed to be) */
   entryPoints: string[];
+  /**
+   * The alternative sets (spec §18.11): source id -> alt tag -> the SYNCHRONOUS
+   * edges from that source carrying that tag, in document order.
+   *
+   * Computed once with the projection rather than per traversal, because
+   * backlog() runs propagation once per candidate and must not re-derive an
+   * index of the whole document each time. Empty for every document that uses
+   * no `alt`, which is every document written before §18.11 — those pay one
+   * empty Map and nothing else.
+   *
+   * DASHED edges are not in it. V19 forbids `alt` on an asynchronous edge, and
+   * analysis never assumes validation ran: a dashed alternative already stops
+   * propagation on its own (§18.3), so it neither joins a set nor keeps one
+   * alive.
+   */
+  altSets: Map<string, Map<string, RuntimeEdge[]>>;
   excluded: Exclusions;
   coverage: Coverage;
 };
@@ -214,6 +237,7 @@ export function runtimeGraph(doc: GraphDoc): RuntimeGraph {
       to: e.to,
       sync: isSyncEdge(e),
       label: e.label ?? null,
+      alt: e.alt ?? null,
     });
   }
 
@@ -261,6 +285,21 @@ export function runtimeGraph(doc: GraphDoc): RuntimeGraph {
   };
   const entryPoints = nodeIds.filter((id) => !dependedOn(id));
 
+  // Alternative sets (§18.11), scoped per source. Global scoping would link
+  // services that merely chose the same word, so the outer key is the source.
+  const altSets = new Map<string, Map<string, RuntimeEdge[]>>();
+  for (const e of edges) {
+    if (e.alt === null || !e.sync) continue;
+    let byTag = altSets.get(e.from);
+    if (byTag === undefined) {
+      byTag = new Map<string, RuntimeEdge[]>();
+      altSets.set(e.from, byTag);
+    }
+    const set = byTag.get(e.alt);
+    if (set === undefined) byTag.set(e.alt, [e]);
+    else set.push(e);
+  }
+
   const missing: string[] = [];
   const keys = new Set<string>();
   const keyCounts: Record<string, number> = {};
@@ -285,6 +324,7 @@ export function runtimeGraph(doc: GraphDoc): RuntimeGraph {
     out,
     in: inbound,
     entryPoints,
+    altSets,
     excluded: {
       entityNodes,
       cardinalityEdges,
