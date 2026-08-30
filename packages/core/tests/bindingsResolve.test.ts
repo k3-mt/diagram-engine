@@ -275,34 +275,95 @@ describe('resolveBindings refuses to leave the root', () => {
 // Honesty about what cannot be checked
 // ---------------------------------------------------------------------------
 
-describe('an identifier is unchecked, never ok', () => {
-  it('does not try to resolve a compose service key as a file', () => {
+describe('an identifier is searched for, and is never quietly ok', () => {
+  it('never reports an identifier ok without finding a definition', () => {
+    // The invariant the original "identifier => unchecked" test was protecting,
+    // kept exactly: the one thing that must never happen is a citation
+    // reported as verified when nothing verified it. The fixture tree's
+    // docker-compose.yml has a `services:` key and no services under it.
     const { root } = fixtureTree();
-    expect(one(root, { source: 'compose', ref: 'orders-api' })).toEqual({
-      status: 'unchecked',
-      reason: 'identifier, not a path — nothing on disk to resolve',
-    });
-  });
-
-  it('does not report a terraform address as missing', () => {
-    // The failure mode this whole feature exists to prevent, in miniature: a
-    // correct citation reported as a broken one, because the checker guessed
-    // that a dot means a file extension.
-    const { root } = fixtureTree();
-    expect(one(root, { source: 'terraform', ref: 'aws_ecs_service.orders' }).status).toBe(
-      'unchecked',
+    expect(one(root, { source: 'compose', ref: 'orders-api' }).status).not.toBe('ok');
+    expect(one(root, { source: 'terraform', ref: 'aws_ecs_service.orders' }).status).not.toBe(
+      'ok',
     );
   });
 
-  it('does not fail the run', () => {
+  it('reports a compose service that no compose file declares as missing', () => {
     const { root } = fixtureTree();
+    expect(one(root, { source: 'compose', ref: 'orders-api' })).toEqual({
+      status: 'missing',
+      reason:
+        'not defined in the 1 docker-compose*.y*ml / compose*.y*ml file under the root',
+    });
+  });
+
+  it('verifies a compose service that IS declared, and names the file', () => {
+    const { root } = fixtureTree();
+    fs.writeFileSync(
+      path.join(root, 'docker-compose.yml'),
+      'version: "3"\nservices:\n  orders-api:\n    image: orders\n',
+    );
+    expect(one(root, { source: 'compose', ref: 'orders-api' })).toEqual({
+      status: 'ok',
+      reason: 'defined in docker-compose.yml:3',
+    });
+  });
+
+  it('reports a terraform citation in a repo with no terraform as missing', () => {
+    // Spec §3.8 rule 1: no candidate file of the right kind is a WRONG
+    // citation, not an unanswerable one. Reporting it unchecked let a quarter
+    // of every corpus's citations pass without ever being read.
+    const { root } = fixtureTree();
+    expect(one(root, { source: 'terraform', ref: 'aws_ecs_service.orders' })).toEqual({
+      status: 'missing',
+      reason: 'no *.tf file under the root',
+    });
+  });
+
+  it('verifies a terraform resource that is declared, and not one that is only mentioned', () => {
+    const { root } = fixtureTree();
+    fs.mkdirSync(path.join(root, 'infra'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'infra', 'main.tf'),
+      '# resource "aws_ecs_service" "ghost" {}\nresource "aws_ecs_service" "orders" {\n}\n',
+    );
+    expect(one(root, { source: 'terraform', ref: 'aws_ecs_service.orders' })).toEqual({
+      status: 'ok',
+      reason: 'defined in infra/main.tf:2',
+    });
+    // Named only in a comment: not a definition, and not verified.
+    expect(one(root, { source: 'terraform', ref: 'aws_ecs_service.ghost' }).status).toBe(
+      'missing',
+    );
+  });
+
+  it('fails the run when an identifier does not resolve', () => {
+    // It used to pass, because it was unchecked. An identifier citing nothing
+    // is now as much a failure as a path citing nothing — which is the whole
+    // point of making it checkable.
+    const { root } = fixtureTree();
+    const report = resolveBindings(
+      withBindings({ source: 'terraform', ref: 'aws_ecs_service.orders' }),
+      root,
+    );
+    expect(report.ok).toBe(false);
+    expect(report.counts.missing).toBe(1);
+    expect(report.counts.unchecked).toBe(0);
+  });
+
+  it('stays unchecked, and passing, where no precise pattern can be written', () => {
+    // The residue §3.8 rule 2 keeps: flow-style YAML needs a parser this
+    // package will not take a dependency on, and guessing is worse than
+    // admitting. Reported, counted, and not a failure.
+    const { root } = fixtureTree();
+    fs.writeFileSync(path.join(root, 'docker-compose.yml'), 'services: {orders-api: {}}\n');
     const report = resolveBindings(
       withBindings({ source: 'compose', ref: 'orders-api' }),
       root,
     );
+    expect(report.results[0]?.status).toBe('unchecked');
+    expect(report.results[0]?.reason).toContain('flow style');
     expect(report.ok).toBe(true);
-    expect(report.counts.unchecked).toBe(1);
-    expect(report.counts.ok).toBe(0);
   });
 });
 
@@ -334,7 +395,7 @@ describe('the report as a whole', () => {
     expect(report.bindings).toBe(3);
     expect(report.results.map((r) => `${r.kind}:${r.id}:${r.status}`)).toEqual([
       'node:orders:ok',
-      'node:orders:unchecked',
+      'node:orders:missing',
       'edge:e7:stale',
     ]);
     expect(report.ok).toBe(false);
@@ -362,9 +423,12 @@ describe('the report as a whole', () => {
       ),
       path.join(root, 'no-such-dir'),
     );
+    // Including the identifier: with no tree there is nothing to search
+    // either, and one wrong --root must read as one fact, not as two kinds of
+    // failure the reader then has to reconcile.
     expect(report.results.map((r) => r.reason)).toEqual([
       'the root itself does not exist',
-      'identifier, not a path — nothing on disk to resolve',
+      'the root itself does not exist',
     ]);
     expect(report.ok).toBe(false);
   });
@@ -535,8 +599,15 @@ describe('a repo ref is always a path, and so is always resolved', () => {
     // the allowlist exists to avoid, in a second dress.
     const { root } = fixtureTree();
     expect(one(root, { source: 'package', ref: '@acme/utils' })).toEqual({
-      status: 'unchecked',
-      reason: 'identifier, not a path — nothing on disk to resolve',
+      status: 'missing',
+      reason: 'no package.json file under the root',
+    });
+    // ...and once a package.json declares it, it verifies — which is only
+    // possible because it was never treated as a directory.
+    fs.writeFileSync(path.join(root, 'package.json'), '{\n  "name": "@acme/utils"\n}\n');
+    expect(one(root, { source: 'package', ref: '@acme/utils' })).toEqual({
+      status: 'ok',
+      reason: 'defined in package.json:2',
     });
   });
 });

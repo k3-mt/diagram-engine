@@ -24,6 +24,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { GraphDoc } from '../schema/graph.js';
 import {
+  candidateDescription,
+  definesIdentifier,
+  isCandidateFilename,
+  isIdentifierSource,
+  type IdentifierSource,
+} from './identifier.js';
+import {
   collectBindings,
   formatBinding,
   parseBindingRef,
@@ -43,17 +50,25 @@ import {
  *   escaped       it resolves OUTSIDE the root — a symlink out of the tree
  *   malformed     the ref is not usable at all; V16 rejects every such ref, so
  *                 seeing one means the file was hand-edited past validation
- *   unchecked     there is nothing on disk this could name: an identifier
- *                 (`compose=orders-api`), or a file too large to count lines in
+ *   unchecked     the question could not be answered: a file too large to
+ *                 count lines in, or an identifier whose candidate files
+ *                 could not be read precisely enough to say either way
  *
  * `unchecked` is a first-class outcome rather than a quiet `ok` on purpose.
- * Reporting an unresolvable class as verified would be the same lie this
- * feature exists to prevent — an identifier is honestly UNCHECKED, and the
- * report says so and counts it separately.
+ * Reporting an unanswerable question as verified would be the same lie this
+ * feature exists to prevent. It is a RESIDUE, not a category: an identifier
+ * ref is searched for by the structured patterns in identifier.ts and comes
+ * back `ok` or `missing` like anything else, and lands here only where no
+ * precise pattern can be written. The count is always reported, so the gap
+ * stays visible instead of being absorbed into a passing number.
  */
 export type BindingStatus = 'ok' | 'unchecked' | 'missing' | 'stale' | 'escaped' | 'malformed';
 
-/** One binding, resolved. `reason` is empty only for `ok`. */
+/**
+ * One binding, resolved. `reason` is empty for a path that resolved, and on an
+ * `ok` identifier names the file and line the definition was found in — the
+ * evidence, so a reader can check the tool rather than trust it.
+ */
 export interface ResolvedBinding {
   kind: BoundElementKind;
   /** The node or edge id the binding hangs off. */
@@ -227,6 +242,285 @@ function firstMisspelledSegment(
   return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// The bounded search for identifier definitions (spec §3.8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Directories the walk never enters. Dependencies, build output and VCS
+ * internals hold thousands of `*.yaml` files that no citation ever means, and
+ * a vendored copy of someone else's chart defining `Deployment/orders` would
+ * verify a citation the agent could not have read. Fixed and small on purpose:
+ * reading `.gitignore` needs a glob engine (a dependency this feature is not
+ * worth) and would make the answer depend on a file that changes.
+ */
+export const SKIP_DIRECTORIES: ReadonlySet<string> = new Set([
+  '.bundle', '.cache', '.diagram', '.git', '.gradle', '.idea', '.mypy_cache',
+  '.next', '.nuxt', '.pytest_cache', '.svn', '.terraform', '.tox', '.venv',
+  '.vscode', '__pycache__', 'bower_components', 'build', 'coverage', 'dist',
+  'node_modules', 'out', 'target', 'tmp', 'vendor', 'venv',
+]);
+
+/**
+ * The walk's ceiling, in directory entries examined. A checker that runs in CI
+ * on every commit cannot walk an unbounded tree, and a monorepo with a million
+ * files would otherwise make `diagram check --bindings` the slowest step in
+ * the build.
+ *
+ * WHAT HAPPENS WHEN IT IS HIT IS THE POINT. A cap that silently truncated the
+ * search would turn a real citation into a false `missing` — the one failure
+ * mode this feature exists to prevent — so hitting it is recorded on the index
+ * and every identifier that was NOT found under a truncated walk is reported
+ * `unchecked`, naming the cap. An identifier that WAS found is still `ok`:
+ * finding a definition is not made less true by not having looked everywhere.
+ */
+export const MAX_WALK_ENTRIES = 20_000;
+
+/** Per source, the most candidate files the index will hold. Same rule on hitting it. */
+export const MAX_CANDIDATE_FILES = 400;
+
+/**
+ * Candidate files larger than this are not read. A 40 MB generated manifest is
+ * not something an agent read an identifier out of, and the same honesty rule
+ * applies: a skipped file makes an unfound identifier `unchecked`, not
+ * `missing`.
+ */
+export const MAX_CANDIDATE_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The three ceilings, in one object so a test can prove the behaviour AT the
+ * cap without building a 20,000-file tree — and so the report can name the
+ * number that actually applied rather than a constant that might not have.
+ */
+export interface SearchLimits {
+  /** Directory entries examined before the walk stops. */
+  maxEntries: number;
+  /** Candidate files held per source. */
+  maxFiles: number;
+  /** Candidate files larger than this are not opened. */
+  maxFileBytes: number;
+}
+
+export const DEFAULT_SEARCH_LIMITS: SearchLimits = {
+  maxEntries: MAX_WALK_ENTRIES,
+  maxFiles: MAX_CANDIDATE_FILES,
+  maxFileBytes: MAX_CANDIDATE_FILE_BYTES,
+};
+
+/** Every candidate file under the root, by source. Absolute paths, sorted. */
+export interface CandidateIndex {
+  /** The root the walk started at, already realpath'd. */
+  root: string;
+  files: Record<IdentifierSource, string[]>;
+  /** The walk stopped early: MAX_WALK_ENTRIES or MAX_CANDIDATE_FILES was hit. */
+  truncated: boolean;
+  /** Directory entries examined, capped at MAX_WALK_ENTRIES. */
+  entries: number;
+}
+
+const IDENTIFIER_KINDS: readonly IdentifierSource[] = [
+  'terraform',
+  'compose',
+  'package',
+  'k8s-manifest',
+];
+
+/**
+ * Walk `realRoot` once and collect every file each source can live in.
+ *
+ * Deterministic: directory entries are sorted by name before being visited, so
+ * the same tree gives the same index and the same first-match file, every
+ * time, on every platform.
+ *
+ * Bounded: it never leaves the root (a symlinked directory is followed only
+ * when its real path is still inside, and only once, so a link back up the
+ * tree cannot spin), it never enters SKIP_DIRECTORIES, it opens NO files, and
+ * it stops at MAX_WALK_ENTRIES.
+ */
+export function indexCandidateFiles(
+  realRoot: string,
+  limits: SearchLimits = DEFAULT_SEARCH_LIMITS,
+): CandidateIndex {
+  const files: Record<IdentifierSource, string[]> = {
+    terraform: [],
+    compose: [],
+    package: [],
+    'k8s-manifest': [],
+  };
+  const index: CandidateIndex = { root: realRoot, files, truncated: false, entries: 0 };
+  const seen = new Set<string>([realRoot]);
+
+  const walk = (dir: string): void => {
+    if (index.truncated) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory: not a verdict, just nothing to see
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const directories: string[] = [];
+    for (const entry of entries) {
+      index.entries += 1;
+      if (index.entries > limits.maxEntries) {
+        index.truncated = true;
+        return;
+      }
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        // The same two locks the path checker uses: realpath the link, then
+        // require the target to still be inside the root.
+        let real: string;
+        try {
+          real = fs.realpathSync(full);
+        } catch {
+          continue; // dangling
+        }
+        if (!isInside(realRoot, real)) continue;
+        const st = statOrUndefined(real);
+        if (st === undefined) continue;
+        if (st.isDirectory()) {
+          if (SKIP_DIRECTORIES.has(entry.name) || seen.has(real)) continue;
+          seen.add(real);
+          directories.push(full);
+          continue;
+        }
+        if (!st.isFile()) continue;
+      } else if (entry.isDirectory()) {
+        if (SKIP_DIRECTORIES.has(entry.name)) continue;
+        directories.push(full);
+        continue;
+      } else if (!entry.isFile()) {
+        continue; // a FIFO, a socket, a device: nothing to read an identifier from
+      }
+      for (const kind of IDENTIFIER_KINDS) {
+        if (!isCandidateFilename(kind, entry.name)) continue;
+        const bucket = files[kind];
+        if (bucket.length >= limits.maxFiles) {
+          index.truncated = true;
+          continue;
+        }
+        bucket.push(full);
+      }
+    }
+    for (const d of directories) walk(d);
+  };
+
+  walk(realRoot);
+  return index;
+}
+
+/** What the identifier search concluded, in the checker's vocabulary. */
+interface IdentifierOutcome {
+  status: 'ok' | 'missing' | 'unchecked';
+  reason: string;
+}
+
+/**
+ * The per-run identifier search: it indexes the tree at most once, caches the
+ * text of every candidate it opens, and answers one identifier at a time.
+ *
+ * Lazy on purpose. A document with no identifier bindings — most documents
+ * today — must not pay for a tree walk, and `diagram check` on a repository
+ * whose citations are all paths does exactly the IO it did before.
+ */
+export class IdentifierSearch {
+  private index: CandidateIndex | undefined;
+  private readonly texts = new Map<string, string | null>();
+
+  constructor(
+    private readonly realRoot: string,
+    private readonly limits: SearchLimits = DEFAULT_SEARCH_LIMITS,
+  ) {}
+
+  /** The index, built on first use. Exposed so a test can assert the bound. */
+  candidates(): CandidateIndex {
+    if (this.index === undefined) {
+      this.index = indexCandidateFiles(this.realRoot, this.limits);
+    }
+    return this.index;
+  }
+
+  private read(file: string): string | null {
+    const hit = this.texts.get(file);
+    if (hit !== undefined) return hit;
+    let text: string | null;
+    try {
+      const st = fs.statSync(file);
+      text = st.size > this.limits.maxFileBytes ? null : fs.readFileSync(file, 'utf8');
+    } catch {
+      text = null;
+    }
+    this.texts.set(file, text);
+    return text;
+  }
+
+  /**
+   * Does anything under the root define this identifier?
+   *
+   * The three outcomes, and §3.8's three rules in the order they apply:
+   *
+   *  1. NO CANDIDATE FILE OF THE RIGHT KIND -> `missing`, never `unchecked`.
+   *     Citing Terraform in a repository with no `.tf` file is a wrong
+   *     citation, and saying so is the entire point of the rule.
+   *  2. A file defines it -> `ok`, naming the file and line, so a human can
+   *     check the tool rather than take its word.
+   *  3. Candidates exist and none defines it -> `missing`... UNLESS something
+   *     stopped us from reading them all (the walk cap, an oversized file, or
+   *     a file the matcher could not read precisely — flow-style YAML, invalid
+   *     JSON). Then it is `unchecked`, with the reason, because "we did not
+   *     find it" and "it is not there" are different claims and only the
+   *     second one may fail a build.
+   */
+  lookup(source: IdentifierSource, identifier: string): IdentifierOutcome {
+    const index = this.candidates();
+    const kindDescription = candidateDescription(source);
+    const candidates = index.files[source];
+
+    if (candidates.length === 0) {
+      if (index.truncated) {
+        return {
+          status: 'unchecked',
+          reason: `the search hit its bound before finding any ${kindDescription} file`,
+        };
+      }
+      return { status: 'missing', reason: `no ${kindDescription} file under the root` };
+    }
+
+    let blocked: string | undefined;
+    for (const file of candidates) {
+      const text = this.read(file);
+      if (text === null) {
+        blocked ??= `${path.relative(this.realRoot, file)} could not be read`;
+        continue;
+      }
+      const got = definesIdentifier(source, text, identifier);
+      if (got.verdict === 'defines') {
+        return {
+          status: 'ok',
+          reason: `defined in ${path.relative(this.realRoot, file)}:${got.line}`,
+        };
+      }
+      if (got.verdict === 'unchecked') {
+        blocked ??= `${path.relative(this.realRoot, file)}: ${got.reason}`;
+      }
+    }
+
+    if (blocked !== undefined) return { status: 'unchecked', reason: blocked };
+    if (index.truncated) {
+      return {
+        status: 'unchecked',
+        reason: `not found in ${candidates.length} ${kindDescription} files, and the search hit its bound before reading the whole tree`,
+      };
+    }
+    const n = candidates.length;
+    return {
+      status: 'missing',
+      reason: `not defined in ${n === 1 ? `the 1 ${kindDescription} file` : `any of the ${n} ${kindDescription} files`} under the root`,
+    };
+  }
+}
+
 /**
  * Resolve ONE binding against a real root.
  *
@@ -256,6 +550,7 @@ export function resolveBinding(
   bound: BoundBinding,
   realRoot: string,
   cache?: DirCache,
+  search?: IdentifierSearch,
 ): ResolvedBinding {
   const base = {
     kind: bound.kind,
@@ -277,9 +572,23 @@ export function resolveBinding(
   // is a service key, `terraform=aws_ecs_service.orders` a resource address.
   // Joining either to the root and stat-ing it would report every correct
   // terraform citation in the corpus as missing, which is precisely the wrong
-  // "missing" this checker exists to avoid. It is reported as unchecked.
+  // "missing" this checker exists to avoid. So it is not resolved as a path —
+  // it is SEARCHED for, in the files its source can live in, by the structured
+  // patterns in identifier.ts. Until that search existed this returned
+  // `unchecked` and about a quarter of every corpus's citations were asserted
+  // rather than verified, behind a headline precision of 1.0.
   if (parsed.kind === 'identifier') {
-    return finish('unchecked', 'identifier, not a path — nothing on disk to resolve');
+    const source = bound.binding.source;
+    if (!isIdentifierSource(source)) {
+      // Unreachable: `repo` is the only other source and its refs are always
+      // paths (ref.ts). Kept because the alternative to a branch here is a
+      // cast, and a new source added to the schema must not silently become
+      // a verified citation.
+      return finish('unchecked', 'identifier, and no file kind is defined for this source');
+    }
+    const searcher = search ?? new IdentifierSearch(realRoot);
+    const found = searcher.lookup(source, parsed.normalised);
+    return finish(found.status, found.reason);
   }
 
   const joined = path.resolve(realRoot, ...parsed.segments);
@@ -404,29 +713,24 @@ export function resolveBindings(doc: GraphDoc, root: string): BindingReport {
   }
 
   const cache: DirCache = new Map();
+  // One search per run, so a document with forty terraform citations walks the
+  // tree once — and a document with none never walks it at all (the index is
+  // built on first lookup).
+  const search = realRoot === undefined ? undefined : new IdentifierSearch(realRoot);
   const results: ResolvedBinding[] =
     realRoot === undefined
-      ? all.map((b) => {
-          const parsed = parseBindingRef(b.binding.ref, b.binding.source);
-          const formatted = formatBinding(b.binding);
-          if (parsed.ok && parsed.kind === 'identifier') {
-            return {
-              kind: b.kind,
-              id: b.id,
-              formatted,
-              status: 'unchecked' as const,
-              reason: 'identifier, not a path — nothing on disk to resolve',
-            };
-          }
-          return {
-            kind: b.kind,
-            id: b.id,
-            formatted,
-            status: 'missing' as const,
-            reason: 'the root itself does not exist',
-          };
-        })
-      : all.map((b) => resolveBinding(b, realRoot as string, cache));
+      ? // No root, no answer of any kind: a path cannot be stat'd and an
+        // identifier cannot be searched for. One fact about the run, reported
+        // identically on every binding, so nobody reads twenty-two per-file
+        // failures for one wrong `--root`.
+        all.map((b) => ({
+          kind: b.kind,
+          id: b.id,
+          formatted: formatBinding(b.binding),
+          status: 'missing' as const,
+          reason: 'the root itself does not exist',
+        }))
+      : all.map((b) => resolveBinding(b, realRoot as string, cache, search));
 
   const counts: Record<BindingStatus, number> = {
     ok: 0,

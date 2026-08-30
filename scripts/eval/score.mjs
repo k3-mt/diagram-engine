@@ -164,11 +164,15 @@ export const CONFIG_PATH = path.join(HERE, 'config.json');
 //
 // Consequences of reusing it, all of them wanted:
 //   * an identifier ref (`compose=orders-api`, `terraform=aws_ecs_service.x`)
-//     comes back `unchecked`, not `missing`. It is a legitimate citation form
-//     that names something inside a file, so it is excluded from BOTH sides of
-//     precision and reported separately. Scoring it as a hit would launder an
-//     invented identifier; scoring it as a miss would punish the most precise
-//     citation available for a terraform resource.
+//     is SEARCHED FOR in the files its source can live in and comes back `ok`
+//     or `missing` like anything else. It used to come back `unchecked`, and
+//     about a quarter of every corpus's citations were therefore asserted
+//     rather than verified, behind a headline precision of 1.0 — the metric's
+//     own failure mode aimed at the metric.
+//   * `unchecked` is now a RESIDUE: a file too large to read, or a candidate
+//     file no precise pattern can read (flow-style YAML, invalid JSON). It is
+//     still excluded from BOTH sides of precision and still reported
+//     separately, because it is neither a verified citation nor a wrong one.
 //   * a `..`, absolute or URL ref comes back `malformed` and COUNTS AGAINST
 //     precision. V16 rejects all of them on every write path, so one can only
 //     reach a produced document by hand-editing past validation.
@@ -368,18 +372,20 @@ export function scoreBindings(produced, root, altRoot = null) {
     altRoot: altRoot && altRoot !== root ? altRoot : null,
     produced: produce,
     resolved: ok,
-    // `unchecked` (an identifier ref, or a file too large to count lines in) is
-    // in NEITHER side of this ratio: it is not a verified citation and it is
-    // not a wrong one. It is reported so a run that cited everything as
-    // identifiers cannot hide behind a precision computed over three paths.
+    // `unchecked` (a file too large to read, or one no precise pattern can
+    // read) is in NEITHER side of this ratio: it is not a verified citation
+    // and it is not a wrong one. It is reported so a run whose citations the
+    // checker could not read cannot hide behind a precision computed over the
+    // three it could.
     precision: ratio(ok, ok + failed.length),
     unchecked,
-    // The share of citations that could not be resolved at all. Precision is
-    // computed over the rest, so a document cited entirely as identifiers
-    // scores precision `null` — never 1.0 — and this number is what says so
-    // out loud. aggregate.mjs flags a run where it dominates: an unfalsifiable
-    // citation must not read as a checked one just because nothing failed.
-    identifierShare: ratio(unchecked, produce),
+    // The share of citations the checker could not answer either way.
+    // Precision is computed over the rest, so a document whose citations are
+    // all unreadable scores precision `null` — never 1.0 — and this number is
+    // what says so out loud. aggregate.mjs flags a run where it dominates: an
+    // unfalsifiable citation must not read as a checked one just because
+    // nothing failed. On a real repository it should be near zero.
+    uncheckedShare: ratio(unchecked, produce),
     counts: { ...report.counts, viaAltRoot, altRootRefused },
     // Every binding with what happened to it, in document order. Small (a
     // document carries tens, not thousands) and it is what makes a precision

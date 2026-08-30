@@ -170,18 +170,20 @@ export function aggregate(runs, system, attempted = runs.length, provenance = nu
           'and edges carry no citation at all (acceptance G11 wants every one of them cited)',
       );
     }
-    // Precision is computed over the citations that COULD be resolved. An
-    // identifier ref (`terraform=aws_ecs_service.x`) is in neither side of it,
-    // which is right — but it also means a set cited mostly as identifiers is
-    // mostly unfalsifiable while reading as fully sourced. Nothing in the
-    // numbers says so on its own, so this does.
+    // Precision is computed over the citations that COULD be resolved. A
+    // citation the checker could not answer either way — a file too large to
+    // read, a compose file written in flow style — is in neither side of it,
+    // which is right, but it also means a set of such citations is
+    // unfalsifiable while reading as fully sourced. Nothing in the numbers
+    // says so on its own, so this does. Identifier refs are resolved now, so
+    // this should fire rarely; when it does, the residue is the story.
     const producedTotal = bindingRuns.reduce((n, r) => n + (r.bindings.produced ?? 0), 0);
     const uncheckedTotal = bindingRuns.reduce((n, r) => n + (r.bindings.unchecked ?? 0), 0);
     if (producedTotal > 0 && uncheckedTotal / producedTotal > 0.5) {
       flags.push(
-        `${uncheckedTotal}/${producedTotal} citations across the set are identifiers, which the ` +
-          'checker cannot resolve — precision is computed over the rest, so most of this set is ' +
-          'unfalsifiable. A path ref is the one that carries weight (rule 15).',
+        `${uncheckedTotal}/${producedTotal} citations across the set could not be checked either ` +
+          'way — precision is computed over the rest, so most of this set is unfalsifiable. ' +
+          'A citation the checker can resolve is the one that carries weight (rule 15).',
       );
     }
     if (hiddenFound > hiddenBound) {

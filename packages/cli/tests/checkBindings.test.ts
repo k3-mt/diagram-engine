@@ -192,11 +192,18 @@ describe('`diagram check --bindings`', () => {
     ]);
   });
 
-  it('counts an identifier separately, and never as verified', () => {
-    // Reporting an unresolvable class as ok would be the same lie the whole
-    // feature exists to prevent — and reporting it as missing would report
-    // every correct terraform citation as broken. It is its own count.
-    const { dir } = project();
+  it('resolves an identifier against the tree, and names the file it verified', () => {
+    // Reporting an identifier as ok without opening anything would be the same
+    // lie the whole feature exists to prevent, so each one is SEARCHED for by
+    // a structured pattern: the terraform address is declared and verifies
+    // with its file and line, and the compose service is declared nowhere and
+    // is as missing as a missing file.
+    const { dir, root } = project();
+    fs.mkdirSync(path.join(root, 'infra'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'infra', 'main.tf'),
+      'resource "aws_ecs_service" "orders" {\n  name = "orders"\n}\n',
+    );
     patch(dir, [
       {
         ...ORDERS,
@@ -211,13 +218,17 @@ describe('`diagram check --bindings`', () => {
       },
     ]);
     const out = runCheck({ dir, bindings: true });
-    expect(out.code).toBe(0);
-    expect(out.stdout).toContain('  ok         1');
-    expect(out.stdout).toContain(
-      '  unchecked  2   orders    terraform=aws_ecs_service.orders    identifier, not a path — nothing on disk to resolve',
+    expect(out.code).toBe(1);
+    expect(out.stderr).toContain('  ok         2');
+    // The evidence, printed: a reader can open infra/main.tf line 1 and check
+    // the tool rather than take its word.
+    expect(out.stderr).toContain(
+      'orders    terraform=aws_ecs_service.orders    defined in infra/main.tf:1',
     );
-    expect(out.stdout).toContain(
-      '                 orders    compose=orders-api                  identifier, not a path — nothing on disk to resolve',
+    expect(out.stderr).toContain('missing');
+    expect(out.stderr).toContain(
+      'orders    compose=orders-api                  not defined in the 1 ' +
+        'docker-compose*.y*ml / compose*.y*ml file under the root',
     );
   });
 

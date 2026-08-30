@@ -292,6 +292,10 @@ describe('the CLI and the MCP tools are one implementation', () => {
     const root = path.dirname(ctx.dir);
     fs.mkdirSync(path.join(root, 'internal'), { recursive: true });
     fs.writeFileSync(path.join(root, 'internal', 'pay.go'), 'a\nb\nc\n');
+    // Flow style: a compose file this checker will not read precisely, so
+    // `compose=orders-api` stays honestly unchecked and the assertion below
+    // still covers all three claims a report can make.
+    fs.writeFileSync(path.join(root, 'docker-compose.yml'), 'services: {orders-api: {}}\n');
 
     const cited: GraphPatch = {
       ops: [

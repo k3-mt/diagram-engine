@@ -658,24 +658,27 @@ describe('scorer — bindings (acceptance G10/G11)', () => {
     expect(b.failures[0].status).toBe('stale');
   });
 
-  it('an identifier ref is unchecked — in neither half of precision', () => {
-    // `terraform=aws_ecs_service.orders` names a resource inside a file, not a
-    // file. Scoring it as a hit would launder an invented identifier; scoring
-    // it as a miss would report the most precise citation available for a
-    // terraform resource as a failure. It is honestly unchecked.
+  it('an identifier ref is resolved, and counts in precision like any other', () => {
+    // It used to be `unchecked` and excluded from both halves, which left about
+    // a quarter of a corpus's citations asserted rather than verified behind a
+    // precision of 1.0. The compose service IS declared in the tree; the
+    // terraform resource is cited in a repository with no terraform at all,
+    // which is a wrong citation and now scores as one.
     const root = tree();
     const b = scorer.scoreBindings(
       doc([
         { id: 'orders', type: 'service', label: 'O', parent: null, bindings: [
           { source: 'terraform', ref: 'aws_ecs_service.orders' },
-          { source: 'compose', ref: 'docker-compose.yml' },
+          { source: 'compose', ref: 'orders' },
         ] },
       ]),
       root,
     );
-    expect(b.unchecked).toBe(1);
-    expect(b.precision).toBe(1); // one path binding, and it resolves
+    expect(b.unchecked).toBe(0);
+    expect(b.resolved).toBe(1);
+    expect(b.precision).toBe(0.5);
     expect(b.produced).toBe(2);
+    expect(b.failures[0].status).toBe('missing');
   });
 
   it('counts edges as elements — the half that had nowhere to put a citation', () => {
@@ -816,20 +819,24 @@ describe('scorer — bindings (acceptance G10/G11)', () => {
     expect(b.counts.altRootRefused).toBe(2);
   });
 
-  it('says out loud what share of the citations could not be resolved at all', () => {
+  it('says out loud what share of the citations could not be checked either way', () => {
     // Precision is computed over the citations that could be resolved, which
-    // is right — and it means a document cited entirely as identifiers scores
-    // precision null while reading as fully sourced. identifierShare is what
-    // says so; aggregate.mjs flags a set where it dominates.
+    // is right — and it means a document whose citations the checker cannot
+    // read scores precision null while reading as fully sourced. The residue
+    // is small now that identifiers resolve, but it is not empty: a
+    // flow-style compose file needs a YAML parser this engine will not take a
+    // dependency on, so it is honestly unreadable. uncheckedShare says so;
+    // aggregate.mjs flags a set where it dominates.
     const root = tmpdir();
+    fs.writeFileSync(path.join(root, 'docker-compose.yml'), 'services: {a-api: {}, b-api: {}}\n');
     const idents = doc([
-      { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'terraform', ref: 'aws_ecs_service.a' }] },
+      { id: 'a', type: 'service', label: 'A', parent: null, bindings: [{ source: 'compose', ref: 'a-api' }] },
       { id: 'b', type: 'service', label: 'B', parent: null, bindings: [{ source: 'compose', ref: 'b-api' }] },
     ]);
     const b = scorer.scoreBindings(idents, root);
     expect(b.precision).toBeNull();
     expect(b.coverage).toBe(1);
-    expect(b.identifierShare).toBe(1);
+    expect(b.uncheckedShare).toBe(1);
   });
 
   it('gold itself carries no bindings, so a gold-against-gold run is uncited, not wrong', () => {
@@ -932,16 +939,16 @@ describe('harness — aggregation', () => {
     expect(flags).toMatch(/binding\.coverage mean 0/);
   });
 
-  it('flags a set whose citations are mostly unresolvable identifiers', () => {
-    // A document cited entirely as `terraform=aws_ecs_service.<anything>` is
-    // 100% unfalsifiable, exits 0, and reads as fully sourced. Precision is
-    // honest about it (null, never 1.0); nothing said so out loud until now.
+  it('flags a set whose citations mostly could not be checked either way', () => {
+    // A document whose every citation the checker cannot read is 100%
+    // unfalsifiable, exits 0, and reads as fully sourced. Precision is honest
+    // about it (null, never 1.0); nothing said so out loud until now.
     const ident = {
       ...runOf(1, 1),
-      bindings: { scored: true, precision: null, coverage: 1, produced: 8, resolved: 0, unchecked: 8, identifierShare: 1, failures: [] },
+      bindings: { scored: true, precision: null, coverage: 1, produced: 8, resolved: 0, unchecked: 8, uncheckedShare: 1, failures: [] },
     };
     const out = aggregator.aggregate([ident, { ...ident, run: 2 }], 'b');
-    expect(out.flags.join('\n')).toMatch(/16\/16 citations across the set are identifiers/);
+    expect(out.flags.join('\n')).toMatch(/16\/16 citations across the set could not be checked/);
   });
 
   it('runs that never produced a score are recorded, not erased', () => {

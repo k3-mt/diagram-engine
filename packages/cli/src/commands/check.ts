@@ -120,7 +120,7 @@ const STATUS_ORDER: readonly BindingStatus[] = [
   'malformed',
 ] as const;
 
-/** Statuses whose rows are listed one by one. `ok` is a count and nothing more. */
+/** Statuses whose rows are always listed one by one. */
 const LISTED: ReadonlySet<BindingStatus> = new Set<BindingStatus>([
   'unchecked',
   'missing',
@@ -128,6 +128,23 @@ const LISTED: ReadonlySet<BindingStatus> = new Set<BindingStatus>([
   'escaped',
   'malformed',
 ]);
+
+/**
+ * Which rows get a line of their own.
+ *
+ * Every failure does, so the agent can find the exact string to fix. A path
+ * that resolved does NOT — twenty verified files is a count, and printing them
+ * would bury the two that failed.
+ *
+ * An `ok` IDENTIFIER does, because it carries evidence a count cannot: the
+ * file and line the definition was found in. `compose=orders-api` resolved by
+ * searching a tree is a claim about a search, and a reader who cannot see
+ * which file answered it has to take the tool's word — which is the posture
+ * this whole feature exists to replace.
+ */
+function isListed(r: ResolvedBinding): boolean {
+  return LISTED.has(r.status) || r.reason !== '';
+}
 
 /** Column widths, chosen so `ok        20` matches §3.8's sample exactly. */
 const STATUS_WIDTH = 10;
@@ -153,7 +170,7 @@ const GAP = '    ';
  */
 export function renderBindingReport(report: BindingReport): string {
   const rows = STATUS_ORDER.filter((s) => report.counts[s] > 0);
-  const listed = report.results.filter((r) => LISTED.has(r.status));
+  const listed = report.results.filter(isListed);
 
   const countWidth = Math.max(
     MIN_COUNT_WIDTH,
@@ -175,12 +192,13 @@ export function renderBindingReport(report: BindingReport): string {
   ];
   for (const status of rows) {
     const head = `  ${status.padEnd(STATUS_WIDTH)}${String(report.counts[status]).padStart(countWidth)}`;
-    if (!LISTED.has(status)) {
+    const items = report.results.filter((r) => r.status === status && isListed(r));
+    const first = items[0];
+    if (first === undefined) {
       lines.push(head);
       continue;
     }
-    const items = report.results.filter((r) => r.status === status);
-    lines.push(`${head}   ${detail(items[0] as ResolvedBinding)}`);
+    lines.push(`${head}   ${detail(first)}`);
     for (const r of items.slice(1)) lines.push(`${hang}${detail(r)}`);
   }
 
