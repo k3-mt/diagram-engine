@@ -1,0 +1,289 @@
+{
+  "schemaVersion": 1,
+  "title": "Northwind Fleet — telemetry platform",
+  "direction": "DOWN",
+  "groups": [
+    {
+      "id": "fleet-vpc",
+      "label": "fleet VPC (eu-west-1)",
+      "kind": "vpc",
+      "parent": null
+    }
+  ],
+  "nodes": [
+    {
+      "id": "vehicle-units",
+      "label": "In-vehicle units",
+      "type": "client",
+      "parent": null,
+      "note": "speak NF-1 over TLS to ingest-gateway only",
+      "meta": {
+        "protocol": "NF-1",
+        "buffering": "up to 6h of frames, retried with backoff"
+      }
+    },
+    {
+      "id": "fleet-console",
+      "label": "Fleet console",
+      "type": "client",
+      "parent": null,
+      "note": "separate repository; calls fleet-api only",
+      "meta": {
+        "repo": "northwind-fleet/console",
+        "hosting": "React app on CloudFront",
+        "deployed_from": "not this repository"
+      }
+    },
+    {
+      "id": "ingest-gateway",
+      "label": "ingest-gateway",
+      "type": "service",
+      "parent": "fleet-vpc",
+      "note": "decodes NF-1 frames; only producer on the stream",
+      "meta": {
+        "listen": ":8443",
+        "tls": "terminated in-process, no load balancer",
+        "subnets": "public",
+        "cpu": "1024"
+      }
+    },
+    {
+      "id": "trip-builder",
+      "label": "trip-builder",
+      "type": "service",
+      "parent": "fleet-vpc",
+      "note": "stitches decoded frames into trips",
+      "meta": {
+        "consumer": "enhanced fan-out",
+        "subnets": "private",
+        "cpu": "1024"
+      }
+    },
+    {
+      "id": "geofence-eval",
+      "label": "geofence-eval",
+      "type": "service",
+      "parent": "fleet-vpc",
+      "note": "evaluates zone rules, records entry/exit alerts",
+      "meta": {
+        "consumer": "enhanced fan-out",
+        "subnets": "private",
+        "cpu": "2048",
+        "desired_count": "4"
+      }
+    },
+    {
+      "id": "fleet-api",
+      "label": "fleet-api",
+      "type": "service",
+      "parent": "fleet-vpc",
+      "note": "REST surface for the console",
+      "meta": {
+        "listen": ":8443",
+        "tls": "terminated in-process, no load balancer",
+        "subnets": "public",
+        "cpu": "512"
+      }
+    },
+    {
+      "id": "dispatch",
+      "label": "dispatch",
+      "type": "service",
+      "parent": "fleet-vpc",
+      "note": "gRPC job assignment; CreateJob and HoldVehicle",
+      "meta": {
+        "listen": ":9090",
+        "cloud_map": "dispatch.fleet.internal",
+        "subnets": "private",
+        "cpu": "512"
+      }
+    },
+    {
+      "id": "maintenance-forecast",
+      "label": "maintenance-forecast",
+      "type": "service",
+      "parent": "fleet-vpc",
+      "note": "nightly one-shot task, not a long-running service",
+      "meta": {
+        "schedule": "EventBridge cron(15 2 * * ? *)",
+        "subnets": "private",
+        "cpu": "2048"
+      }
+    },
+    {
+      "id": "fleetdb",
+      "label": "fleetdb",
+      "type": "database",
+      "parent": "fleet-vpc",
+      "note": "RDS Postgres 16.3: vehicles, trips, zones, alerts, jobs",
+      "meta": {
+        "engine": "postgres 16.3",
+        "instance": "db.r6g.large",
+        "multi_az": "true"
+      }
+    },
+    {
+      "id": "vehicle-state",
+      "label": "vehicle-state",
+      "type": "database",
+      "parent": null,
+      "note": "DynamoDB: one item per vehicle, latest position",
+      "meta": {
+        "engine": "dynamodb",
+        "hash_key": "vehicle_id",
+        "billing": "PAY_PER_REQUEST"
+      }
+    },
+    {
+      "id": "raw-frames",
+      "label": "raw-frames",
+      "type": "storage",
+      "parent": null,
+      "note": "S3: every raw frame, gzipped, partitioned by day",
+      "meta": {
+        "engine": "s3",
+        "lifecycle": "GLACIER_IR after 90d",
+        "readers": "none inside this system"
+      }
+    },
+    {
+      "id": "telemetry-frames",
+      "label": "telemetry-frames",
+      "type": "queue",
+      "parent": null,
+      "note": "Kinesis stream; the only queue in the system",
+      "meta": {
+        "engine": "kinesis",
+        "shards": "4 (var.stream_shards)",
+        "retention": "48h",
+        "fan_out": "two registered consumers"
+      }
+    },
+    {
+      "id": "waypoint-labs",
+      "label": "Waypoint Labs routing API",
+      "type": "external",
+      "parent": null,
+      "note": "third-party ETAs; the only outbound call off-platform",
+      "meta": {
+        "base_url": "https://api.waypointlabs.io",
+        "endpoint": "GET /v2/eta"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "vehicle-units-ingest-gateway",
+      "from": "vehicle-units",
+      "to": "ingest-gateway",
+      "label": "sends frames",
+      "style": "solid"
+    },
+    {
+      "id": "ingest-gateway-raw-frames",
+      "from": "ingest-gateway",
+      "to": "raw-frames",
+      "label": "archives frames",
+      "style": "solid"
+    },
+    {
+      "id": "ingest-gateway-vehicle-state",
+      "from": "ingest-gateway",
+      "to": "vehicle-state",
+      "label": "writes",
+      "style": "solid"
+    },
+    {
+      "id": "ingest-gateway-telemetry-frames",
+      "from": "ingest-gateway",
+      "to": "telemetry-frames",
+      "label": "publishes",
+      "style": "dashed"
+    },
+    {
+      "id": "trip-builder-telemetry-frames",
+      "from": "trip-builder",
+      "to": "telemetry-frames",
+      "label": "consumes",
+      "style": "dashed"
+    },
+    {
+      "id": "trip-builder-fleetdb",
+      "from": "trip-builder",
+      "to": "fleetdb",
+      "label": "writes trips",
+      "style": "solid"
+    },
+    {
+      "id": "geofence-eval-telemetry-frames",
+      "from": "geofence-eval",
+      "to": "telemetry-frames",
+      "label": "consumes",
+      "style": "dashed"
+    },
+    {
+      "id": "geofence-eval-fleetdb",
+      "from": "geofence-eval",
+      "to": "fleetdb",
+      "label": "reads and writes",
+      "style": "solid"
+    },
+    {
+      "id": "fleet-console-fleet-api",
+      "from": "fleet-console",
+      "to": "fleet-api",
+      "label": "https",
+      "style": "solid"
+    },
+    {
+      "id": "fleet-api-fleetdb",
+      "from": "fleet-api",
+      "to": "fleetdb",
+      "label": "reads",
+      "style": "solid"
+    },
+    {
+      "id": "fleet-api-vehicle-state",
+      "from": "fleet-api",
+      "to": "vehicle-state",
+      "label": "reads",
+      "style": "solid"
+    },
+    {
+      "id": "fleet-api-dispatch",
+      "from": "fleet-api",
+      "to": "dispatch",
+      "label": "grpc",
+      "style": "solid"
+    },
+    {
+      "id": "dispatch-fleetdb",
+      "from": "dispatch",
+      "to": "fleetdb",
+      "label": "reads and writes",
+      "style": "solid"
+    },
+    {
+      "id": "dispatch-waypoint-labs",
+      "from": "dispatch",
+      "to": "waypoint-labs",
+      "label": "requests eta",
+      "style": "solid"
+    },
+    {
+      "id": "maintenance-forecast-fleetdb",
+      "from": "maintenance-forecast",
+      "to": "fleetdb",
+      "label": "reads and writes",
+      "style": "solid"
+    },
+    {
+      "id": "maintenance-forecast-dispatch",
+      "from": "maintenance-forecast",
+      "to": "dispatch",
+      "label": "grpc",
+      "style": "solid"
+    }
+  ],
+  "collapsed": []
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@sparrow/auth",
+  "version": "2.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "4.19.2",
+    "pg": "8.12.0",
+    "ioredis": "5.4.1",
+    "jose": "5.9.3",
+    "argon2": "0.41.1",
+    "pino": "9.3.2"
+  }
+}

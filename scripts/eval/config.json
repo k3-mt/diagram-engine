@@ -1,0 +1,126 @@
+{
+  "_header": "scripts/eval/config.json — scoring configuration for the M8 eval harness (BUILD.md P3-05). Every entry below is taken from fixtures/ref-<s>/gold-citations.md, which is the critic-written answer key; the section it comes from is named in each `why`. This file is scorer-side only and is NEVER staged into the agent's workspace (see scripts/eval/stage.mjs).",
+
+  "shared": {
+    "_why": "Normalisation applied to every id and label before matching. See the 'Node matching rule' block at the top of score.mjs.",
+    "stopwords": [
+      "service", "services", "svc", "srv", "app", "apps", "application",
+      "server", "daemon", "process", "container", "deployment", "the", "a", "our"
+    ],
+    "modifiers": [
+      "bucket", "table", "topic", "stream", "queue", "db", "database", "cache",
+      "store", "storage", "pool", "tier", "prod", "production", "primary",
+      "main", "aws", "internal", "private", "shared", "platform", "cluster",
+      "instance", "group", "region", "eu", "us", "west", "east", "central"
+    ]
+  },
+
+  "a": {
+    "system": "Sparrow — fixtures/ref-a",
+    "aliases": {
+      "_why": "gold-citations.md 'Nodes — 8'. Alternative names an agent may legitimately choose for the same component. The nginx spellings of `web` are cited to README.md:13 ('React bundle served by nginx'), web/nginx.conf and gold.json's own note on `web`: the one container that runs nginx may be named after it. Matching is one-to-one, so a SECOND nginx node drawn alongside `web` still falls through to the plantedAbsence trap and still fails G13 (PLANTED.md:125-140).",
+      "web": ["web-ui", "webapp", "web-frontend", "frontend", "sparrow-web", "react-app", "web-client", "nginx", "nginx-web", "web-nginx", "sparrow-nginx"],
+      "api-gateway": ["gateway", "apigw", "api", "edge-api", "sparrow-gateway"],
+      "auth": ["auth-api", "authentication", "identity", "sparrow-auth"],
+      "orders": ["order", "orders-api", "order-management", "sparrow-orders"],
+      "fulfilment-worker": [
+        "fulfillment-worker", "fulfilment", "fulfillment", "worker",
+        "fulfilment-service", "fulfillment-service", "order-fulfilment"
+      ],
+      "postgres": ["postgresql", "pg", "sparrow-db", "sparrow-postgres", "database", "rdbms"],
+      "redis": ["redis-cache", "sparrow-redis", "cache"],
+      "kafka": ["kafka-broker", "sparrow-kafka", "order-events", "event-bus", "broker"]
+    },
+    "acceptedTypes": {
+      "_why": "gold-citations.md 'Accepted ambiguity: web as client vs service'.",
+      "web": ["client", "service"]
+    },
+    "neutralNodes": {
+      "_why": "gold-citations.md 'Accepted ambiguity: a browser / public-internet node' — neither a hit nor a miss, and never an invention. Matched against the normalised id and label of an otherwise-unmatched node.",
+      "patterns": [
+        { "pattern": "^(browser|user|users|customer|customers|public-?internet|internet|end-?user)$", "why": "a browser / public-internet node in front of web (gold-citations 'Accepted ambiguity', PLANTED.md:132-133)" }
+      ]
+    },
+    "neutralEdges": {
+      "_why": "gold-citations.md 'Couplings that are real but are deliberately NOT edges' — defensible either way, so excluded from both the precision and the recall denominators.",
+      "pairs": [
+        { "pair": ["fulfilment-worker", "orders"], "why": "the worker writes tables orders owns (fulfilment-worker/src/db.js:1-3); real coupling, but through the shared database" }
+      ]
+    },
+    "inventionTraps": {
+      "_why": "gold-citations.md 'Known trap — the load balancer that must NOT appear'. Applied ONLY to nodes that matched no gold node and no neutral pattern.",
+      "plantedAbsence": {
+        "label": "edge load balancer / ingress / TLS terminator",
+        "_whyNoForbiddenTypes": "system A's gold DOES contain a cache (redis) and a client (web), so no node type can stand in for this trap; the pattern is the whole check here.",
+        "forbiddenTypes": [],
+        "pattern": "load.?balanc|(^|[^a-z])lb([^a-z]|$)|ingress|edge.?tier|edge.?lb|reverse.?proxy|(^|-)proxy|cdn|tls.?termin|nginx|traefik|envoy|haproxy|(^|[^a-z])a?lb([^a-z]|$)|elb|cloudfront"
+      },
+      "other": [
+        { "label": "object storage that does not exist here", "pattern": "(^|[^a-z])s3([^a-z]|$)|object.?storage|blob.?store|bucket", "why": "spec Part 12's demo prose mentions S3; this system has none — the worker writes fulfilments to Postgres" }
+      ]
+    },
+    "hiddenEdge": {
+      "_why": "PLANTED.md plant 1 / gold-citations edge 12. G12.",
+      "from": "fulfilment-worker",
+      "to": "auth",
+      "label": "fulfilment-worker -> auth (verifies tokens), visible only in fulfilment-worker/src/auth-client.js:6",
+      "_whyCitation": "PLANTED.md (A): 'Score the edge as found only when the citation resolves to fulfilment-worker/src/auth-client.js or fulfilment-worker/src/index.js. A citation pointing at docker-compose.yml is a lucky guess, not a finding.' See score.mjs on what a schema-v1 document can actually carry a citation IN.",
+      "citation": "fulfilment-worker/src/(auth-client|index)\\.js|auth-client\\.js"
+    }
+  },
+
+  "b": {
+    "system": "Northwind Fleet — fixtures/ref-b",
+    "aliases": {
+      "_why": "gold-citations.md 'Nodes'.",
+      "vehicle-units": ["telematics-unit", "telematics-units", "vehicle", "vehicles", "device", "devices", "telematics-device", "nf1-unit"],
+      "fleet-console": ["console", "operator-console", "web-console", "fleet-ui", "operator-ui"],
+      "ingest-gateway": ["ingest", "frame-ingest", "ingestion-gateway", "nf1-gateway"],
+      "trip-builder": ["trips", "trip-service", "trip-stitcher"],
+      "geofence-eval": ["geofence", "geofence-evaluator", "geofencing"],
+      "fleet-api": ["api", "rest-api", "fleet-rest-api"],
+      "dispatch": ["dispatch-grpc", "dispatcher", "job-dispatch"],
+      "maintenance-forecast": ["maintenance", "forecast", "maintenance-forecaster", "forecaster"],
+      "fleetdb": ["fleet-db", "fleet-database", "postgres", "postgresql", "rds", "fleet-postgres", "fleet-rds"],
+      "vehicle-state": ["vehicle-state-table", "dynamodb", "ddb", "vehicle-positions", "positions-table"],
+      "raw-frames": ["raw-frame-archive", "frame-archive", "archive", "raw-frames-bucket", "s3-archive"],
+      "telemetry-frames": ["telemetry-stream", "kinesis", "frames-stream", "telemetry-frames-stream", "kinesis-stream"],
+      "waypoint-labs": ["waypoint", "routing-provider", "eta-provider", "waypoint-labs-api"]
+    },
+    "acceptedTypes": {
+      "_why": "gold-citations.md 'Accepted variants' item 4. Item 5 is explicitly NOT accepted, so vehicle-state carries no exemption: typing it `cache` is scored as a type error.",
+      "vehicle-units": ["client", "external"]
+    },
+    "neutralNodes": {
+      "_why": "gold-citations.md 'Accepted variants' items 1 and 2.",
+      "patterns": [
+        { "pattern": "event.?bridge|schedule|scheduler|cron", "why": "the EventBridge schedule driving maintenance-forecast is real (terraform/schedules.tf:4-8); gold carries it as meta instead (accepted variant 2)" }
+      ]
+    },
+    "neutralEdges": {
+      "_why": "no neutral edges are documented for system B; the list exists so the two systems score through identical code.",
+      "pairs": []
+    },
+    "inventionTraps": {
+      "_why": "gold-citations.md 'Known traps — what must NOT appear in gold.json'. Applied ONLY to unmatched, non-neutral nodes.",
+      "plantedAbsence": {
+        "label": "the position cache (Redis / ElastiCache)",
+        "_whyForbiddenTypes": "PLANTED.md:103-111 — 'a `cache`-type node in the produced document is a false positive against the gold node set AND should be reported separately as an invention failure ... Its presence is a fail for B even if every other node is right.' No node in gold-b is a cache (the two stores are `database` and one is `storage`), so the TYPE alone is the trap, checked over EVERY produced node whether or not its name matched a gold node. Without this, `vehicle-state cache` launders the plant into a correct match.",
+        "forbiddenTypes": ["cache"],
+        "pattern": "cache|redis|elasticache|memcache|position.?store"
+      },
+      "other": [
+        { "label": "invented edge infrastructure", "pattern": "load.?balanc|(^|[^a-z])a?lb([^a-z]|$)|(^|[^a-z])nlb([^a-z]|$)|ingress|cdn|cloudfront|api.?gateway|reverse.?proxy|nginx|envoy", "why": "trap 2: terraform/ecs.tf:4-8 and cmd/ingest-gateway/main.go:69-71 both say there is deliberately no load balancer; CloudFront hosts the separate console repo and is meta, not a node" },
+        { "label": "an SQS queue", "pattern": "(^|[^a-z])sqs([^a-z]|$)", "why": "trap 3: internal/platform/sqsx speaks Kinesis; the package name is a documented leftover" }
+      ]
+    },
+    "hiddenEdge": {
+      "_why": "PLANTED.md plant 1 / gold-citations edge 16. G12.",
+      "from": "maintenance-forecast",
+      "to": "dispatch",
+      "label": "maintenance-forecast -> dispatch (gRPC HoldVehicle), visible only in internal/maintenance/forecast.go:14,67",
+      "_whyCitation": "PLANTED.md (B): 'An agent that <<found>> this in Terraform is hallucinating a citation, which is a rule 9 failure even though the edge is right.' The accepted sources are the calling package and the client it calls through.",
+      "citation": "internal/maintenance/forecast\\.go|internal/dispatchclient/client\\.go"
+    }
+  }
+}

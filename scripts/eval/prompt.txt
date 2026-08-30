@@ -1,0 +1,1 @@
+Read the repository at {{SYSTEM_DIR}} and diagram its architecture using the diagram tools. Stop when the diagram is complete.

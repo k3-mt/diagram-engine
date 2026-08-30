@@ -1,0 +1,18 @@
+{
+  "name": "@sparrow/orders",
+  "version": "3.1.4",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "4.19.2",
+    "pg": "8.12.0",
+    "ioredis": "5.4.1",
+    "kafkajs": "2.2.4",
+    "pino": "9.3.2"
+  }
+}

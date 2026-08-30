@@ -1,0 +1,142 @@
+# Sparrow — local and staging topology.
+#
+# Two networks. `edge` is the only one the outside world reaches; everything
+# behind the gateway lives on `internal` and is not published.
+#
+# In production the `edge` network sits behind the platform team's shared TLS
+# terminator; see ops/README.md before you change any published port.
+
+name: sparrow
+
+services:
+  web:
+    build: ./web
+    image: sparrow/web:local
+    # Static bundle. Nothing here talks to a database; every call goes to the
+    # gateway through /api, which nginx proxies (see web/nginx.conf).
+    environment:
+      API_BASE_URL: http://api-gateway:8080
+    ports:
+      - "8081:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - edge
+
+  api-gateway:
+    build: ./api-gateway
+    image: sparrow/api-gateway:local
+    environment:
+      PORT: "8080"
+      AUTH_URL: http://auth:3001
+      ORDERS_URL: http://orders:3002
+      REDIS_URL: redis://redis:6379/0
+      # Requests arrive with X-Forwarded-For already set by the edge tier.
+      TRUST_PROXY_HEADER: "X-Forwarded-For"
+      RATE_LIMIT_PER_MIN: "600"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - auth
+      - orders
+      - redis
+    networks:
+      - edge
+      - internal
+
+  auth:
+    build: ./auth
+    image: sparrow/auth:local
+    environment:
+      PORT: "3001"
+      DATABASE_URL: postgres://sparrow:sparrow@postgres:5432/sparrow
+      REDIS_URL: redis://redis:6379/1
+      TOKEN_TTL_SECONDS: "900"
+      JWT_SIGNING_KEY: dev-only-not-a-real-key
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - internal
+
+  orders:
+    build: ./orders
+    image: sparrow/orders:local
+    environment:
+      PORT: "3002"
+      DATABASE_URL: postgres://sparrow:sparrow@postgres:5432/sparrow
+      REDIS_URL: redis://redis:6379/2
+      KAFKA_BROKERS: kafka:9092
+      ORDER_EVENTS_TOPIC: order.events.v1
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    networks:
+      - internal
+
+  fulfilment-worker:
+    build: ./fulfilment-worker
+    image: sparrow/fulfilment-worker:local
+    environment:
+      DATABASE_URL: postgres://sparrow:sparrow@postgres:5432/sparrow
+      KAFKA_BROKERS: kafka:9092
+      ORDER_EVENTS_TOPIC: order.events.v1
+      CONSUMER_GROUP: fulfilment-worker
+      SERVICE_ACCOUNT_ID: svc-fulfilment
+      SERVICE_ACCOUNT_SECRET: dev-only-not-a-real-secret
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - internal
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sparrow
+      POSTGRES_PASSWORD: sparrow
+      POSTGRES_DB: sparrow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./auth/migrations:/docker-entrypoint-initdb.d/auth:ro
+      - ./orders/migrations:/docker-entrypoint-initdb.d/orders:ro
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - internal
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      # KRaft, single node. No zookeeper in this stack.
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafkadata:/bitnami/kafka
+    networks:
+      - internal
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:

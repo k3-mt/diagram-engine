@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "title": "Sparrow",
+  "direction": "RIGHT",
+  "nodes": [
+    {
+      "id": "web",
+      "label": "Web app",
+      "type": "client",
+      "parent": null,
+      "note": "React bundle served by nginx; proxies /api to the gateway",
+      "meta": { "image": "sparrow/web:local", "published_port": "8081", "network": "edge" }
+    },
+    {
+      "id": "api-gateway",
+      "label": "API gateway",
+      "type": "service",
+      "parent": null,
+      "note": "Rate limiting, session check, routing. No business logic.",
+      "meta": { "port": "8080", "network": "edge, internal", "note_edge": "behind the platform edge tier, not deployed here" }
+    },
+    {
+      "id": "auth",
+      "label": "Auth",
+      "type": "service",
+      "parent": null,
+      "note": "Logins, sessions, and service tokens",
+      "meta": { "port": "3001", "network": "internal" }
+    },
+    {
+      "id": "orders",
+      "label": "Orders",
+      "type": "service",
+      "parent": null,
+      "note": "Order read and write; publishes order.placed",
+      "meta": { "port": "3002", "network": "internal" }
+    },
+    {
+      "id": "fulfilment-worker",
+      "label": "Fulfilment worker",
+      "type": "service",
+      "parent": null,
+      "note": "Consumes order events; admin replay surface on 3003",
+      "meta": { "port": "3003", "network": "internal" }
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "type": "database",
+      "parent": null,
+      "note": "One instance; each service owns its own tables",
+      "meta": { "image": "postgres:16-alpine", "network": "internal" }
+    },
+    {
+      "id": "redis",
+      "label": "Redis",
+      "type": "cache",
+      "parent": null,
+      "note": "/0 gateway rate limits, /1 auth sessions, /2 orders cache",
+      "meta": { "image": "redis:7-alpine", "network": "internal" }
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka",
+      "type": "queue",
+      "parent": null,
+      "note": "One topic, order.events.v1",
+      "meta": { "image": "bitnami/kafka:3.7", "network": "internal" }
+    }
+  ],
+  "groups": [],
+  "edges": [
+    { "id": "web-to-api-gateway", "from": "web", "to": "api-gateway", "label": "proxies /api", "style": "solid", "arrow": "forward" },
+    { "id": "api-gateway-to-auth", "from": "api-gateway", "to": "auth", "label": "proxies", "style": "solid", "arrow": "forward" },
+    { "id": "api-gateway-to-orders", "from": "api-gateway", "to": "orders", "label": "proxies", "style": "solid", "arrow": "forward" },
+    { "id": "api-gateway-to-redis", "from": "api-gateway", "to": "redis", "label": "rate limit counters", "style": "solid", "arrow": "forward" },
+    { "id": "auth-to-postgres", "from": "auth", "to": "postgres", "label": "reads users", "style": "solid", "arrow": "forward" },
+    { "id": "auth-to-redis", "from": "auth", "to": "redis", "label": "stores sessions", "style": "solid", "arrow": "forward" },
+    { "id": "orders-to-postgres", "from": "orders", "to": "postgres", "label": "reads and writes", "style": "solid", "arrow": "forward" },
+    { "id": "orders-to-redis", "from": "orders", "to": "redis", "label": "caches list", "style": "solid", "arrow": "forward" },
+    { "id": "orders-to-kafka", "from": "orders", "to": "kafka", "label": "publishes", "style": "dashed", "arrow": "forward" },
+    { "id": "fulfilment-worker-to-kafka", "from": "fulfilment-worker", "to": "kafka", "label": "consumes", "style": "dashed", "arrow": "forward" },
+    { "id": "fulfilment-worker-to-postgres", "from": "fulfilment-worker", "to": "postgres", "label": "writes fulfilments", "style": "solid", "arrow": "forward" },
+    { "id": "fulfilment-worker-to-auth", "from": "fulfilment-worker", "to": "auth", "label": "verifies tokens", "style": "solid", "arrow": "forward" }
+  ],
+  "collapsed": []
+}

@@ -6,3 +6,7 @@ dist/
 .diagram/
 logs/
 .worktrees/
+
+# eval harness output: the record of a run, not source (BUILD.md P3-05)
+eval-*.json
+eval-*-logs/

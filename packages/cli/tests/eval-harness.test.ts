@@ -1,0 +1,692 @@
+// tests/eval-harness.test.ts — the M8 measurement rig (BUILD.md P3-05 / P3-06,
+// spec Part 10 M8, acceptance G9 / G12 / G13).
+//
+// Two things are under test, and the second one matters more than the first.
+//
+//  1. THE SCORER. It must give gold a perfect score against itself, and it must
+//     detect each of the three real, observed failures the rig was built for:
+//     reversed edge direction, invented infrastructure, and a coupling visible
+//     only in code. A scorer that is quietly too generous inflates every number
+//     in M8 and nothing downstream would notice.
+//
+//  2. THE ANTI-LEAK GUARANTEE. The answer key lives INSIDE the reference system
+//     (fixtures/ref-a/gold.json sits beside docker-compose.yml). An eval that
+//     shows the model its answer key measures nothing, so the staging pass
+//     withholds the answer key and a second, independent audit pass proves the
+//     staged tree carries none of it. The tests below fail if gold ever becomes
+//     reachable from the workspace the agent runs in.
+//
+// Everything here runs against OS temp directories and reads the repository
+// read-only. Nothing starts a reference system (ground rule R2) and nothing
+// writes into the repo's .diagram/.
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const EVAL = path.join(REPO, 'scripts', 'eval');
+const load = (f: string) => import(pathToFileURL(path.join(EVAL, f)).href) as Promise<any>;
+
+let scorer: any;
+let stager: any;
+let aggregator: any;
+let cfg: any;
+
+beforeAll(async () => {
+  scorer = await load('score.mjs');
+  stager = await load('stage.mjs');
+  aggregator = await load('aggregate.mjs');
+  cfg = scorer.loadConfig();
+});
+
+const goldPath = (s: string) => path.join(REPO, 'fixtures', `ref-${s}`, 'gold.json');
+const readGoldDoc = (s: string) => JSON.parse(fs.readFileSync(goldPath(s), 'utf8'));
+const scoreDoc = (doc: any, s: string) => scorer.score(doc, scorer.loadGold(goldPath(s), s, cfg), s, cfg);
+
+const tmps: string[] = [];
+function tmpdir(): string {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'eval-harness-test-'));
+  tmps.push(d);
+  return d;
+}
+afterEach(() => {
+  while (tmps.length) fs.rmSync(tmps.pop()!, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// 1. the scorer agrees with gold about gold
+// ---------------------------------------------------------------------------
+
+describe('scorer — gold against itself', () => {
+  for (const sys of ['a', 'b']) {
+    it(`system ${sys}: every number is perfect and both planted checks pass`, () => {
+      const r = scoreDoc(readGoldDoc(sys), sys);
+      expect(r.nodes.precision).toBe(1);
+      expect(r.nodes.recall).toBe(1);
+      expect(r.edges.precision).toBe(1);
+      expect(r.edges.recall).toBe(1);
+      expect(r.direction.accuracy).toBe(1);
+      expect(r.invention.count).toBe(0);
+      expect(r.invention.plantedAbsenceDrawn).toBe(false);
+      expect(r.hiddenEdge.found).toBe(true);
+      expect(r.hiddenEdge.directionCorrect).toBe(true);
+      expect(r.types.accuracy).toBe(1);
+    });
+  }
+
+  it('refuses to score when two gold nodes normalise to the same form', () => {
+    // The matcher cannot tell such a pair apart, and silently picking one is how
+    // a rig starts lying. See failure mode 1 in score.mjs.
+    const doc = readGoldDoc('a');
+    doc.nodes.push({ ...doc.nodes[3], id: 'orders-service', label: 'Orders service' });
+    const p = path.join(tmpdir(), 'gold.json');
+    fs.writeFileSync(p, JSON.stringify(doc));
+    expect(() => scorer.loadGold(p, 'a', cfg)).toThrow(/normalise to the same form/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. node matching — ids differ, meaning does not
+// ---------------------------------------------------------------------------
+
+describe('scorer — node matching rule', () => {
+  it('matches on meaning, not on the literal id', () => {
+    const doc = readGoldDoc('a');
+    const rename = (from: string, to: string) => {
+      for (const n of doc.nodes) if (n.id === from) n.id = to;
+      for (const e of doc.edges) {
+        if (e.from === from) e.from = to;
+        if (e.to === from) e.to = to;
+      }
+    };
+    rename('orders', 'orders-service'); // stopword — exact tier
+    rename('postgres', 'sparrow-db'); //   alias table
+    rename('fulfilment-worker', 'fulfillment-worker'); // spelling, alias table
+    rename('api-gateway', 'gateway'); //   alias table
+
+    const r = scoreDoc(doc, 'a');
+    expect(r.nodes.recall).toBe(1);
+    expect(r.nodes.precision).toBe(1);
+    expect(r.edges.recall).toBe(1);
+    expect(r.direction.accuracy).toBe(1);
+    expect(r.invention.count).toBe(0);
+  });
+
+  it('is one-to-one: five spellings of one node cannot farm recall', () => {
+    const doc = readGoldDoc('a');
+    for (const id of ['auth-service', 'authentication', 'auth-api', 'identity']) {
+      doc.nodes.push({ id, label: id, type: 'service', parent: null });
+    }
+    const r = scoreDoc(doc, 'a');
+    expect(r.nodes.matched).toBe(8); // still eight gold nodes matched, not twelve
+    expect(r.nodes.recall).toBe(1);
+    expect(r.nodes.precision).toBeLessThan(1); // and the extras cost precision
+    expect(r.invention.count).toBe(4);
+  });
+
+  it('a documented accepted variant is neither a hit nor a miss', () => {
+    // gold-citations.md (system A): "an agent that adds a client node in front
+    // of web has not invented infrastructure ... neither a hit nor a miss".
+    const doc = readGoldDoc('a');
+    doc.nodes.push({ id: 'browser', label: 'Browser', type: 'client', parent: null });
+    const r = scoreDoc(doc, 'a');
+    expect(r.nodes.neutral.map((n: any) => n.id)).toEqual(['browser']);
+    expect(r.nodes.precision).toBe(1);
+    expect(r.invention.count).toBe(0);
+  });
+
+  it('a wrong node type is reported without being laundered into an invention', () => {
+    // gold-citations.md (system B) accepted-variant 5: typing vehicle-state as a
+    // cache is explicitly NOT acceptable. It is still the same component, so it
+    // must score as a type error, not as an invented cache.
+    const doc = readGoldDoc('b');
+    for (const n of doc.nodes) if (n.id === 'vehicle-state') n.type = 'cache';
+    const r = scoreDoc(doc, 'b');
+    expect(r.nodes.recall).toBe(1);
+    expect(r.invention.count).toBe(0);
+    expect(r.types.errors).toEqual([
+      { node: 'vehicle-state', gold: 'database', produced: 'cache', as: 'vehicle-state' },
+    ]);
+  });
+
+  it('an accepted type ambiguity costs nothing', () => {
+    // gold-citations.md (system A): web is legitimately client OR service.
+    const doc = readGoldDoc('a');
+    for (const n of doc.nodes) if (n.id === 'web') n.type = 'service';
+    expect(scoreDoc(doc, 'a').types.accuracy).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. the three real failures the rig exists to detect
+// ---------------------------------------------------------------------------
+
+describe('scorer — reversed edge direction (acceptance G9)', () => {
+  it('scores direction as its own number: a perfect edge set with reversed arrows', () => {
+    // The observed failure: a real document built under a self-contradictory
+    // rule 4 had EIGHT of seventeen labelled edges pointing the wrong way. An
+    // edge-set score that ignores direction calls that document perfect.
+    const doc = readGoldDoc('b');
+    let flipped = 0;
+    for (const e of doc.edges) {
+      if (flipped < 8) {
+        [e.from, e.to] = [e.to, e.from];
+        flipped += 1;
+      }
+    }
+    const r = scoreDoc(doc, 'b');
+    expect(r.edges.precision).toBe(1); // the edge set is untouched...
+    expect(r.edges.recall).toBe(1);
+    expect(r.direction.accuracy).toBeLessThan(0.95); // ...and direction catches it
+    expect(r.direction.correct).toBe(r.direction.scored - 8);
+    expect(r.direction.reversed).toHaveLength(8);
+  });
+
+  it('the queue direction trap: kafka -> worker is a direction failure, not a missing edge', () => {
+    // README.md draws orders -> kafka -> fulfilment-worker, which is message
+    // flow. Rule 4 wants the arrow on the dependency: worker -> kafka.
+    const doc = readGoldDoc('a');
+    const e = doc.edges.find((x: any) => x.id === 'fulfilment-worker-to-kafka');
+    [e.from, e.to] = [e.to, e.from];
+    const r = scoreDoc(doc, 'a');
+    expect(r.edges.recall).toBe(1);
+    expect(r.direction.accuracy).toBe(Number((11 / 12).toFixed(4)));
+    expect(r.direction.reversed[0].gold).toBe('fulfilment-worker -> kafka');
+  });
+
+  it('an undirected arrow is not the gold direction', () => {
+    const doc = readGoldDoc('a');
+    doc.edges[0].arrow = 'both';
+    const r = scoreDoc(doc, 'a');
+    expect(r.direction.nonForwardArrows).toBe(1);
+    expect(r.direction.accuracy).toBeLessThan(1);
+  });
+
+  it('splitting one gold edge into two does not cost precision, and both must point right', () => {
+    // gold-citations.md: an agent splitting api-gateway -> auth into "proxies"
+    // and "introspects" has found the same coupling, not an extra one.
+    const doc = readGoldDoc('a');
+    doc.edges.push({ id: 'api-gateway-introspects-auth', from: 'api-gateway', to: 'auth', label: 'introspects', style: 'solid', arrow: 'forward' });
+    expect(scoreDoc(doc, 'a').edges.precision).toBe(1);
+    expect(scoreDoc(doc, 'a').direction.accuracy).toBe(1);
+
+    doc.edges[doc.edges.length - 1].from = 'auth';
+    doc.edges[doc.edges.length - 1].to = 'api-gateway';
+    expect(scoreDoc(doc, 'a').direction.accuracy).toBeLessThan(1);
+  });
+});
+
+describe('scorer — invented infrastructure (acceptance G13)', () => {
+  it('system A: the planted load balancer is flagged as the planted absence', () => {
+    const doc = readGoldDoc('a');
+    doc.nodes.push({ id: 'edge-lb', label: 'Edge load balancer', type: 'service', parent: null });
+    doc.edges.push({ id: 'edge-lb-to-web', from: 'edge-lb', to: 'web', style: 'solid', arrow: 'forward' });
+    const r = scoreDoc(doc, 'a');
+    expect(r.invention.plantedAbsenceDrawn).toBe(true);
+    expect(r.invention.plantedAbsence.drawn).toEqual(['edge-lb']);
+    expect(r.invention.nodes[0].trap).toMatch(/load balancer/);
+    // the edge hanging off it is unresolvable, not a second, separate failure
+    expect(r.edges.precision).toBe(1);
+    expect(r.edges.unresolvable).toHaveLength(1);
+    expect(r.edges.precisionStrict).toBeLessThan(1);
+  });
+
+  it('system B: the position cache is flagged as the planted absence', () => {
+    const doc = readGoldDoc('b');
+    doc.nodes.push({ id: 'position-cache', label: 'Position cache', type: 'cache', parent: null });
+    const r = scoreDoc(doc, 'b');
+    expect(r.invention.plantedAbsenceDrawn).toBe(true);
+    expect(r.invention.plantedAbsence.drawn).toEqual(['position-cache']);
+  });
+
+  it('system A: an S3 node is an invention here, however plausible it sounds', () => {
+    // The spec's own demo prose (Part 12) says the worker writes to S3. This
+    // system has none: it writes fulfilments to Postgres.
+    const doc = readGoldDoc('a');
+    doc.nodes.push({ id: 'fulfilment-bucket', label: 'S3 bucket', type: 'storage', parent: null });
+    const r = scoreDoc(doc, 'a');
+    expect(r.invention.count).toBe(1);
+    expect(r.invention.plantedAbsenceDrawn).toBe(false); // a different trap
+    expect(r.invention.nodes[0].trap).toMatch(/object storage/);
+  });
+
+  it('a real node is never an invention, whatever words are in its label', () => {
+    // `web` is nginx, and "nginx" is in the load-balancer trap pattern. Traps
+    // are only ever applied to nodes that matched no gold node.
+    const doc = readGoldDoc('a');
+    for (const n of doc.nodes) if (n.id === 'web') n.label = 'nginx web bundle';
+    const r = scoreDoc(doc, 'a');
+    expect(r.invention.count).toBe(0);
+  });
+
+  it('system A: naming the web node "nginx" is a reading of the source, not an invention', () => {
+    // README.md:13 says "React bundle served by nginx" and web/nginx.conf is
+    // right there, so an agent following rule 9 may name the container after
+    // what it runs. Before the alias existed this cost a miss, a false
+    // positive, an unresolvable edge AND a false G13 failure — four penalties
+    // on a diagram that was right. This is the test that would have caught it.
+    const doc = readGoldDoc('a');
+    for (const n of doc.nodes) if (n.id === 'web') { n.label = 'nginx'; n.id = 'nginx'; }
+    for (const e of doc.edges) {
+      if (e.from === 'web') e.from = 'nginx';
+      if (e.to === 'web') e.to = 'nginx';
+    }
+    const r = scoreDoc(doc, 'a');
+    expect(r.invention.plantedAbsenceDrawn).toBe(false);
+    expect(r.invention.count).toBe(0);
+    expect(r.nodes.precision).toBe(1);
+    expect(r.nodes.recall).toBe(1);
+    expect(r.edges.unresolvable).toEqual([]);
+  });
+
+  it('system A: a SECOND nginx node beside web is still the planted absence', () => {
+    // The alias must not become a laundry chute. Matching is one-to-one: `web`
+    // takes the exact match, the extra node falls through to the trap.
+    const doc = readGoldDoc('a');
+    doc.nodes.push({ id: 'nginx', label: 'nginx', type: 'service', parent: null });
+    const r = scoreDoc(doc, 'a');
+    expect(r.invention.plantedAbsenceDrawn).toBe(true);
+    expect(r.invention.plantedAbsence.drawn).toEqual(['nginx']);
+  });
+
+  it('system B: the position cache named after the table it shadows still fails G13', () => {
+    // THE HOLE THIS CLOSES. `cache` is a shared modifier word, so a produced
+    // `vehicle-state-cache` used to match gold's `vehicle-state` at T1, and
+    // invention traps only ever see UNMATCHED nodes — so the one plant the
+    // held-out system exists to catch scored a clean sweep. "vehicle-state
+    // cache" is exactly what an agent that believed the FLEET-812 trace would
+    // call it: handlers.go:68-70 puts the cache TODO on the vehicle-state read
+    // path. PLANTED.md:103-111 says this document must fail B.
+    const doc = readGoldDoc('b');
+    for (const n of doc.nodes) {
+      if (n.id === 'vehicle-state') { n.id = 'vehicle-state-cache'; n.label = 'vehicle-state cache'; n.type = 'cache'; }
+    }
+    for (const e of doc.edges) {
+      if (e.from === 'vehicle-state') e.from = 'vehicle-state-cache';
+      if (e.to === 'vehicle-state') e.to = 'vehicle-state-cache';
+    }
+    const r = scoreDoc(doc, 'b');
+    expect(r.invention.plantedAbsenceDrawn).toBe(true);
+    expect(r.nodes.missing).toContain('vehicle-state');
+  });
+
+  it('system B: a cache-typed node fails G13 even when its NAME matches gold exactly', () => {
+    // The name-independent half. gold-b has no cache of any kind, so the TYPE
+    // alone is the trap and it is checked over every produced node, matched or
+    // not. Without this, mistyping vehicle-state as a cache left type.accuracy
+    // 0.9231 as the only trace — one node in thirteen, gating nothing.
+    const doc = readGoldDoc('b');
+    for (const n of doc.nodes) if (n.id === 'vehicle-state') n.type = 'cache';
+    const r = scoreDoc(doc, 'b');
+    expect(r.invention.plantedAbsenceDrawn).toBe(true);
+    expect(r.invention.plantedAbsence.byForbiddenType.map((n: any) => n.id)).toEqual(['vehicle-state']);
+    expect(r.types.accuracy).toBeLessThan(1);
+  });
+
+  it('system A has no forbidden type: its own gold contains a real cache', () => {
+    // redis is type `cache` in gold-a. The type check must be per-system, or
+    // system A would fail G13 against its own answer key.
+    const r = scoreDoc(readGoldDoc('a'), 'a');
+    expect(r.invention.plantedAbsenceDrawn).toBe(false);
+    expect(r.invention.plantedAbsence.byForbiddenType).toEqual([]);
+  });
+});
+
+describe('scorer — the planted hidden edge (acceptance G12)', () => {
+  it('system A: reports it missing when the worker -> auth edge is dropped', () => {
+    const doc = readGoldDoc('a');
+    doc.edges = doc.edges.filter((e: any) => e.id !== 'fulfilment-worker-to-auth');
+    const r = scoreDoc(doc, 'a');
+    expect(r.hiddenEdge.found).toBe(false);
+    expect(r.edges.recall).toBeLessThan(1);
+    expect(r.edges.missing).toContain('fulfilment-worker -> auth');
+  });
+
+  it('system A: found but reversed is found-with-wrong-direction, not found', () => {
+    const doc = readGoldDoc('a');
+    const e = doc.edges.find((x: any) => x.id === 'fulfilment-worker-to-auth');
+    [e.from, e.to] = [e.to, e.from];
+    const r = scoreDoc(doc, 'a');
+    expect(r.hiddenEdge.found).toBe(true);
+    expect(r.hiddenEdge.directionCorrect).toBe(false);
+  });
+
+  it('system B: the code-only maintenance-forecast -> dispatch edge', () => {
+    const doc = readGoldDoc('b');
+    doc.edges = doc.edges.filter(
+      (e: any) => !(e.from === 'maintenance-forecast' && e.to === 'dispatch'),
+    );
+    const r = scoreDoc(doc, 'b');
+    expect(r.hiddenEdge.found).toBe(false);
+    // drawing the discoverable half (fleet-api -> dispatch) does not rescue it
+    expect(r.edges.matched).toBeGreaterThan(10);
+  });
+
+  it('reports whether the hidden edge was cited to the source it is visible in', () => {
+    // Both answer keys say a "found" edge nobody can point at a source file for
+    // is a lucky guess — system A even plants the near-miss (SERVICE_ACCOUNT_ID
+    // in docker-compose.yml) that produces one. Schema v1 gives GEdge no note,
+    // no meta and no binding, so this cannot be measured per edge; it is
+    // document-level evidence, reported beside `found` and never gated on. Per
+    // edge provenance arrives with GBinding (BUILD.md P5-01/P5-02).
+    const doc = readGoldDoc('a');
+    const bare = scoreDoc(doc, 'a');
+    expect(bare.hiddenEdge.found).toBe(true);
+    expect(bare.hiddenEdge.citation.citedInDocument).toBe(false);
+
+    for (const n of doc.nodes) {
+      if (n.id === 'fulfilment-worker') n.meta = { source: 'fulfilment-worker/src/auth-client.js:6' };
+    }
+    const cited = scoreDoc(doc, 'a');
+    expect(cited.hiddenEdge.found).toBe(true);
+    expect(cited.hiddenEdge.citation.citedInDocument).toBe(true);
+    expect(cited.hiddenEdge.citation.where).toMatch(/auth-client\.js/);
+
+    // a citation to the credential env vars in docker-compose.yml is the
+    // documented lucky guess, and it does not count as evidence
+    for (const n of doc.nodes) {
+      if (n.id === 'fulfilment-worker') n.meta = { source: 'docker-compose.yml:86' };
+    }
+    expect(scoreDoc(doc, 'a').hiddenEdge.citation.citedInDocument).toBe(false);
+  });
+
+  it('a neutral edge is in neither denominator', () => {
+    // gold-citations.md (system A): fulfilment-worker -> orders is real coupling
+    // through the shared database — neither a miss if absent nor an invention.
+    const doc = readGoldDoc('a');
+    const base = scoreDoc(doc, 'a');
+    doc.edges.push({ id: 'worker-shares-orders', from: 'fulfilment-worker', to: 'orders', label: 'shares tables', style: 'dashed', arrow: 'forward' });
+    const r = scoreDoc(doc, 'a');
+    expect(r.edges.precision).toBe(base.edges.precision);
+    expect(r.edges.recall).toBe(base.edges.recall);
+  });
+});
+
+describe('scorer — an empty document is a zero, not a crash', () => {
+  it('scores a document the agent never wrote to', () => {
+    const empty = { schemaVersion: 1, title: 'Untitled', direction: 'RIGHT', nodes: [], groups: [], edges: [], collapsed: [] };
+    const r = scoreDoc(empty, 'a');
+    expect(r.nodes.recall).toBe(0);
+    expect(r.nodes.precision).toBeNull(); // no denominator, and 0/0 is not 1
+    expect(r.edges.recall).toBe(0);
+    expect(r.direction.accuracy).toBeNull();
+    expect(r.hiddenEdge.found).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. THE ANTI-LEAK GUARANTEE
+// ---------------------------------------------------------------------------
+
+describe('harness — the agent can never reach gold', () => {
+  for (const sys of ['a', 'b']) {
+    it(`staging ref-${sys} withholds every answer-key file and audits clean`, () => {
+      const dest = path.join(tmpdir(), 'system');
+      const { copied, skipped } = stager.stageAndAudit(path.join(REPO, 'fixtures', `ref-${sys}`), dest);
+      expect(copied.length).toBeGreaterThan(20);
+      const withheld = skipped.map((s: any) => s.path);
+      expect(withheld).toContain('gold.json');
+      expect(withheld).toContain('gold-citations.md');
+      expect(withheld).toContain('PLANTED.md');
+      // and, independently of what stage() believes, nothing is on disk
+      expect(stager.walk(dest).filter((f: string) => stager.isDenied(path.basename(f)))).toEqual([]);
+      expect(stager.audit(dest)).toEqual([]);
+    });
+  }
+
+  // THE TEST THAT FAILS IF GOLD BECOMES REACHABLE. Three ways it could:
+  // the file itself, a quotation of it, or a link back into the repository.
+
+  it('fails when gold.json is present in the staged tree', () => {
+    const dest = path.join(tmpdir(), 'system');
+    stager.stageAndAudit(path.join(REPO, 'fixtures', 'ref-a'), dest);
+    expect(stager.audit(dest)).toEqual([]);
+    fs.copyFileSync(goldPath('a'), path.join(dest, 'gold.json'));
+    expect(stager.audit(dest)).toEqual(['gold.json: answer-key file present in the agent\'s workspace']);
+  });
+
+  it('fails when gold.json is hidden deeper in the tree under any name', () => {
+    const dest = path.join(tmpdir(), 'system');
+    stager.stageAndAudit(path.join(REPO, 'fixtures', 'ref-a'), dest);
+    fs.mkdirSync(path.join(dest, 'ops', 'notes'), { recursive: true });
+    fs.copyFileSync(goldPath('a'), path.join(dest, 'ops', 'notes', 'gold.backup.json'));
+    expect(stager.audit(dest).join('\n')).toMatch(/ops.notes.gold\.backup\.json: answer-key file/);
+  });
+
+  it('fails when a staged file merely quotes the answer key', () => {
+    const dest = path.join(tmpdir(), 'system');
+    stager.stageAndAudit(path.join(REPO, 'fixtures', 'ref-a'), dest);
+    fs.appendFileSync(path.join(dest, 'README.md'), '\nSee PLANTED.md for the two plants.\n');
+    expect(stager.audit(dest).join('\n')).toMatch(/README\.md: contains the leak marker/);
+  });
+
+  it('fails on a symlink, which is the one way a staged tree points back at the repo', () => {
+    const dest = path.join(tmpdir(), 'system');
+    stager.stageAndAudit(path.join(REPO, 'fixtures', 'ref-a'), dest);
+    fs.symlinkSync(path.join(REPO, 'fixtures', 'ref-a'), path.join(dest, 'upstream'));
+    expect(stager.audit(dest).join('\n')).toMatch(/upstream: symlink in the staged tree/);
+    // and stage() would never have created one in the first place
+    const second = path.join(tmpdir(), 'again');
+    const { skipped } = stager.stage(dest, second);
+    expect(skipped.map((s: any) => s.why)).toContain('symlink');
+  });
+
+  it('the fixed prompt names no gold file, no fixture path and no plant', () => {
+    const prompt = fs.readFileSync(path.join(EVAL, 'prompt.txt'), 'utf8');
+    for (const marker of [...stager.LEAK_MARKERS, 'fixtures/', 'ref-a', 'ref-b', 'load balancer', 'cache', 'auth-client', 'dispatch']) {
+      expect(prompt.toLowerCase()).not.toContain(marker.toLowerCase());
+    }
+    // one substitution, and it is a path inside the agent's own workspace
+    expect(prompt.match(/\{\{[A-Z_]+\}\}/g)).toEqual(['{{SYSTEM_DIR}}']);
+  });
+
+  it('the prompt is identical for both systems, and carries no per-system hint', () => {
+    // The prompt is a variable we are not measuring. One template, one
+    // substitution, and the substituted value is "./system" in both cases.
+    const prompt = fs.readFileSync(path.join(EVAL, 'prompt.txt'), 'utf8');
+    const a = prompt.replace('{{SYSTEM_DIR}}', './system');
+    const b = prompt.replace('{{SYSTEM_DIR}}', './system');
+    expect(a).toBe(b);
+    expect(a).not.toMatch(/\{\{/);
+  });
+
+  it('eval.sh passes no gold path to the agent, and reads gold only after it exits', () => {
+    const sh = fs.readFileSync(path.join(REPO, 'scripts', 'eval.sh'), 'utf8');
+    // $GOLD appears only on the scoring and preflight lines, never inside the
+    // subshell that runs the agent.
+    const agentBlock = sh
+      .slice(sh.indexOf('# 6. run the agent'), sh.indexOf('# 7. the produced document'))
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#')) // comments explain; code is what runs
+      .join('\n');
+    expect(agentBlock).not.toContain('GOLD');
+    expect(agentBlock).not.toContain('$REF');
+    expect(agentBlock).not.toContain('fixtures');
+    // the default agent gets no shell and no fetch, so nothing outside cwd is
+    // reachable even by an agent that goes looking
+    expect(sh).toContain('--allowedTools "Read,Grep,Glob,mcp__diagram"');
+    expect(sh).not.toMatch(/--add-dir/);
+  });
+
+  for (const sys of ['a', 'b']) {
+    it(`no staged file in ref-${sys} tells the agent it is a fixture, or names this repository`, () => {
+      // fixtures/ref-b/go.mod used to open with "Reference system B for the
+      // diagram-engine eval rig (BUILD.md P3-03)", and it was copied verbatim
+      // into the agent's cwd for every system-B run. Three disclosures in one
+      // line: that it is being scored, the repository name (the search term
+      // that finds the answer key), and the file describing the whole rig.
+      // No LEAK_MARKER matched it, because the list was a fixed vocabulary.
+      const dest = path.join(tmpdir(), 'system');
+      stager.stageAndAudit(path.join(REPO, 'fixtures', `ref-${sys}`), dest);
+      const forbidden = [...stager.LEAK_MARKERS, ...stager.FIXTURE_ONLY_MARKERS()];
+      for (const rel of stager.walk(dest)) {
+        const text = fs.readFileSync(path.join(dest, rel), 'utf8').toLowerCase();
+        for (const m of forbidden) {
+          expect(`${rel}: ${text.includes(m.toLowerCase()) ? `LEAKS "${m}"` : 'clean'}`).toBe(`${rel}: clean`);
+        }
+      }
+    });
+  }
+
+  it('the repository name is a fixture-scope marker only, not a workspace one', () => {
+    // `diagram init` writes <!-- diagram-engine:begin --> sentinels into the
+    // workspace CLAUDE.md and .gitignore. Those are the product's own markers,
+    // not a leak, so the repo-name check has to be scoped to the staged
+    // fixture — otherwise the last gate before the agent starts fails on every
+    // single run and someone deletes the gate.
+    expect(stager.LEAK_MARKERS).not.toContain(path.basename(REPO));
+    expect(stager.FIXTURE_ONLY_MARKERS()).toContain(path.basename(REPO));
+  });
+
+  it("system B's code-only coupling is not given away in prose", () => {
+    // G12 on B is the held-out measurement of "a dependency visible only by
+    // reading code". deploy/README.md used to say the nightly forecast job
+    // calls HoldVehicle in plain English, so an agent could score it without
+    // opening a single .go file. Nothing outside Go may connect the caller to
+    // the call.
+    // Proximity, not whole file: deploy/README.md may still say what
+    // maintenance-forecast IS (a nightly ECS task), which is deployment fact.
+    // What it must not do is put the caller next to the call.
+    const WINDOW = 6;
+    const dest = path.join(tmpdir(), 'system');
+    stager.stageAndAudit(path.join(REPO, 'fixtures', 'ref-b'), dest);
+    for (const rel of stager.walk(dest)) {
+      if (rel.endsWith('.go')) continue;
+      const lines = fs.readFileSync(path.join(dest, rel), 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/HoldVehicle/i.test(lines[i] ?? '')) continue;
+        const near = lines.slice(Math.max(0, i - WINDOW), i + WINDOW + 1).join('\n');
+        const hit = /forecast|nightly|maintenance/i.exec(near);
+        expect(`${rel}:${i + 1} ${hit ? `names the caller ("${hit[0]}")` : 'names no caller'}`).toBe(
+          `${rel}:${i + 1} names no caller`,
+        );
+      }
+    }
+  });
+
+  it('eval.sh confines the agent with the OS, and says so instead of claiming a flag does it', () => {
+    const sh = fs.readFileSync(path.join(REPO, 'scripts', 'eval.sh'), 'utf8');
+    // --allowedTools is a permission PRE-APPROVAL, not a jail: Read/Grep/Glob
+    // take absolute paths, and Glob alone finds a file named PLANTED.md
+    // anywhere without being told where to look. Proven live against this rig.
+    expect(sh).toContain('sandbox-exec');
+    expect(sh).toMatch(/deny file-read-data \(subpath "\$REPO"\)/);
+    expect(sh).toMatch(/deny file-read-data \(subpath "\$HOME\/\.claude"\)/);
+    expect(sh).toContain('--disallowedTools "Bash,WebFetch,WebSearch,Task"');
+    // and it refuses rather than running unconfined by accident
+    expect(sh).toMatch(/no filesystem sandbox available/);
+    expect(sh).toMatch(/UNCONFINED=1/);
+  });
+
+  it('--score-only writes no file unless one is named, and no mode clobbers a result', () => {
+    // --score-only is the cheap command run over and over while debugging the
+    // scorer; the agent run is the expensive one. They shared a default output
+    // path, so debugging the scorer ate the run it was debugging.
+    const sh = fs.readFileSync(path.join(REPO, 'scripts', 'eval.sh'), 'utf8');
+    const block = sh.slice(sh.indexOf('if [ -n "$SCORE_ONLY" ]'), sh.indexOf('# --- confinement'));
+    expect(block).toMatch(/if \[ -z "\$OUT" \]/); // stdout when no --out
+    expect(sh).toMatch(/refuse_clobber/);
+    expect(sh).toMatch(/Refusing to overwrite the record of a previous run/);
+  });
+
+  it('the scoring config lives outside the fixtures and is never staged', () => {
+    // config.json quotes the answer key freely; it must stay scorer-side.
+    expect(fs.existsSync(path.join(EVAL, 'config.json'))).toBe(true);
+    const dest = path.join(tmpdir(), 'system');
+    stager.stageAndAudit(path.join(REPO, 'fixtures', 'ref-a'), dest);
+    expect(stager.walk(dest)).not.toContain('config.json');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. aggregation — a mean alone hides a bimodal result
+// ---------------------------------------------------------------------------
+
+describe('harness — aggregation', () => {
+  const runOf = (dir: number, run: number, invented = 0, hidden = true) => ({
+    run,
+    system: 'b',
+    nodes: { precision: 1, recall: 1 },
+    edges: { precision: 1, recall: 1 },
+    direction: { accuracy: dir },
+    invention: { count: invented, plantedAbsenceDrawn: invented > 0, plantedAbsence: { what: 'the position cache (Redis / ElastiCache)' } },
+    hiddenEdge: {
+      expected: 'maintenance-forecast -> dispatch',
+      what: 'x',
+      found: hidden,
+      directionCorrect: hidden,
+      // A clean run is one that found the edge AND can point at the source
+      // file it read it out of (rule 9). See the G12 note in score.mjs.
+      citation: { citedInDocument: hidden, accepted: 'internal/maintenance/forecast\\.go' },
+    },
+    types: { accuracy: 1 },
+  });
+
+  it('flags a bimodal result rather than reporting a comfortable mean', () => {
+    const out = aggregator.aggregate([runOf(1, 1), runOf(1, 2), runOf(1, 3), runOf(0.55, 4), runOf(0.55, 5), runOf(0.55, 6)], 'b');
+    expect(out.summary['direction.accuracy'].mean).toBeCloseTo(0.775, 3);
+    expect(out.summary['direction.accuracy'].spread).toBeCloseTo(0.45, 3);
+    expect(out.flags.join('\n')).toMatch(/spread 0\.45 across 6 runs/);
+    expect(out.flags.join('\n')).toMatch(/below the 0\.95 bar/);
+  });
+
+  it('keeps per-run detail, and counts the two planted checks over the set', () => {
+    const out = aggregator.aggregate([runOf(1, 1), runOf(1, 2, 1), runOf(1, 3, 0, false)], 'b');
+    expect(out.detail).toHaveLength(3);
+    expect(out.planted.absence.drawnRuns).toBe(1);
+    expect(out.planted.hiddenEdge.foundRuns).toBe(2);
+    expect(out.flags.join('\n')).toMatch(/planted absence drawn in 1\/3 runs/);
+    expect(out.flags.join('\n')).toMatch(/planted hidden edge missed in 1\/3 runs/);
+  });
+
+  it('a clean set of runs raises no flag', () => {
+    const out = aggregator.aggregate([runOf(1, 1), runOf(1, 2), runOf(1, 3)], 'b');
+    expect(out.flags).toEqual([]);
+  });
+
+  it('a null metric is excluded from the mean AND flagged, never silently dropped', () => {
+    // An empty document scores direction.accuracy as null — correctly, since
+    // 0/0 is not 0. Dropping those runs without saying so is how a 20-run G9
+    // set with ten dead runs reports a clean 1.00: the dead runs are the hard
+    // ones. The mean still excludes them; the flag says the mean is a subset.
+    const dead = { ...runOf(1, 2), direction: { accuracy: null }, nodes: { precision: null, recall: 0 } };
+    const out = aggregator.aggregate([runOf(1, 1), dead], 'b');
+    expect(out.summary['direction.accuracy'].n).toBe(1);
+    expect(out.summary['direction.accuracy'].absent).toBe(1);
+    expect(out.summary['direction.accuracy'].mean).toBe(1);
+    expect(out.flags.join('\n')).toMatch(/direction\.accuracy: scored in only 1\/2 run/);
+    expect(out.flags.join('\n')).toMatch(/node\.precision: scored in only 1\/2 run/);
+  });
+
+  it('runs that never produced a score are recorded, not erased', () => {
+    // --runs 20 with 14 crashes must not be byte-identical to a deliberate
+    // 6-run eval. eval.sh passes --attempted; the artifact carries all three.
+    const out = aggregator.aggregate([runOf(1, 1), runOf(1, 2)], 'b', 6);
+    expect(out.runsRequested).toBe(6);
+    expect(out.runsScored).toBe(2);
+    expect(out.runsFailed).toBe(4);
+    expect(out.flags.join('\n')).toMatch(/4\/6 run\(s\) produced no score at all/);
+  });
+
+  it('flags the hidden edge found but drawn backwards — G12 passing while G9 fails', () => {
+    // One reversed edge in twelve is a 0.083 dip in direction.accuracy, well
+    // inside the 0.95 bar, and hiddenEdge.found is true. Without this flag the
+    // single most important edge in the fixture can point the wrong way in
+    // silence.
+    const backwards = { ...runOf(1, 2), hiddenEdge: { ...runOf(1, 2).hiddenEdge, found: true, directionCorrect: false } };
+    const out = aggregator.aggregate([runOf(1, 1), backwards], 'b');
+    expect(out.planted.hiddenEdge.foundRuns).toBe(2);
+    expect(out.planted.hiddenEdge.foundAndCorrectDirectionRuns).toBe(1);
+    expect(out.flags.join('\n')).toMatch(/drawn BACKWARDS in 1\/2/);
+  });
+
+  it('flags a hidden edge drawn but never cited to source (rule 9)', () => {
+    const uncited = { ...runOf(1, 2), hiddenEdge: { ...runOf(1, 2).hiddenEdge, citation: { citedInDocument: false } } };
+    const out = aggregator.aggregate([runOf(1, 1), uncited], 'b');
+    expect(out.planted.hiddenEdge.citedToSourceRuns).toBe(1);
+    expect(out.flags.join('\n')).toMatch(/cited to its source file in only 1/);
+  });
+});

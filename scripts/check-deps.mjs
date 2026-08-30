@@ -18,7 +18,12 @@ const ALLOWED_RUNTIME = new Set([
 // carry no supply-chain risk of their own.
 const WORKSPACE_SCOPES = ['@diagram-engine/', '@topology/'];
 
-const SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', 'logs']);
+// `fixtures/` holds the reference systems the eval harness reads (BUILD.md
+// P3-01/P3-03). Their package.json files are FIXTURE CONTENT, not manifests of
+// this repo: nothing there is ever installed, built or started (ground rule
+// R2), so their dependencies carry no supply-chain risk here and must not be
+// held to the R3 allowlist. Deliberately not a wildcard — only this one dir.
+const SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', 'logs', 'fixtures']);
 const fails = [];
 
 function walk(dir, fn) {
