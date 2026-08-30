@@ -59,12 +59,16 @@ diagram init          # .mcp.json, .gitignore, agent rules, Claude Code skill
 diagram serve         # viewer on http://localhost:4400
 ```
 
-Then start your agent. It picks up the MCP server on next launch and gets nine tools:
+Then start your agent. It picks up the MCP server on next launch and gets ten tools:
 `diagram_get`, `diagram_patch`, `diagram_undo`, `diagram_redo`, `diagram_view`,
-`diagram_export`, `diagram_analyse`, `diagram_blast_radius`, `diagram_reset`.
+`diagram_export`, `diagram_check`, `diagram_analyse`, `diagram_blast_radius`,
+`diagram_reset`.
 
 The package is not published yet, so `diagram` must be on your `PATH` — `npm link` from
 this repo, or install it globally.
+
+**New here?** [TRYING-IT.md](TRYING-IT.md) is a ten-minute first session — install, talk to
+your agent, and check its work.
 
 ## Two processes, one file
 
@@ -95,7 +99,7 @@ view      exec | eng | focus <id>   — set which groups are collapsed
 serve     the viewer, with live reload
 export    write json or svg
 import    replace the document from a JSON file
-check     validate; exit 1 with the problems on stderr
+check     validate; --bindings also resolves every citation against the filesystem
 analyse   structural pressure: chokepoints, sync chains, cycles, boundaries
 blast-radius   what is at risk if a component dies; no id ranks the experiments
 rules     print the agent rules (--erd for ERD mode)
@@ -136,7 +140,7 @@ docs/spec.md   the full product and build specification
 ## Development
 
 ```bash
-npm test                   # 691 tests
+npm test                   # 1241 tests
 npm run typecheck
 npm run check:no-model-sdk # fails if a model SDK or dotenv appears anywhere
 npm run build              # both binaries + the viewer bundle
@@ -147,19 +151,54 @@ functions over fixtures, so almost everything is testable with no agent and no b
 
 ## Status
 
-Milestones M0–M7 are built and verified end to end: document core, ELK layout, crossing
-detection with hop arcs, the themed renderer, the viewer server, the full agent surface,
-and views plus export.
+Everything in Parts 1–13 of the spec is built and verified: the document core, ELK layout,
+crossing detection with hop arcs, the renderer, the viewer server, the full agent surface,
+views and export — plus three things the spec originally listed as future directions.
 
-**M8 — rules hardening — is the remaining milestone.** It is twenty varied sessions across
-at least two different agents, logging every rejected patch and every ID coercion, and
-fixing `rules.md` rather than the code unless a real bug appears.
+**Structural analysis** (Part 15). `diagram analyse` reports fan-in, shared dependencies,
+articulation points, the longest synchronous chain, boundary crossings and synchronous
+cycles, and always reports its own coverage — how much of the document carries no
+operational data — because an analysis that hides its blind spots is worse than none.
 
-`docs/spec.md` also carries five specified but unbuilt directions: the layered canvas
-(Part 14), structural analysis of bottlenecks and chokepoints (Part 15), packaging as a
-Claude Code plugin (Part 16), importing observed topology from a running system to diff
-against the design (Part 17), and chaos blast-radius prediction (Part 18). Each has
-explicit decision gates, and all of them gate on M8.
+**Blast-radius prediction** (Part 18). `diagram blast-radius <id>` answers what is at risk
+if a component dies, computed as reverse reachability over synchronous edges. Dashed edges
+stop propagation and the node beyond one is reported *contained* by name. It reports "at
+risk", never "will fail" — the document knows nothing of retries or circuit breakers.
+Redundancy is expressible: edges from one source sharing an `alt` tag are alternatives, so
+losing one replica does not take the caller down.
+
+**Provenance** (§3.8). Nodes and edges carry `bindings` — where a claim was read —
+and `diagram check --bindings` resolves every one against the filesystem, including
+identifier refs like `terraform=aws_ecs_service.orders`, which it verifies by structured
+pattern rather than substring. It exits non-zero on a citation that does not resolve, so it
+runs in CI without an agent.
+
+### How that is known
+
+There is a benchmark, not just a test suite. Two reference systems live in `fixtures/` —
+one docker-compose and JavaScript, one Terraform and Go — each with a real coupling visible
+only in source and a plausible component that does not exist. `scripts/eval.sh` runs an
+agent against a sandboxed copy with the answer key withheld and scores node set, edge set,
+**edge direction as its own number**, invention, and binding precision.
+
+The second system is held out: it was never used to tune the rules text, so it is the only
+score that counts. Over twenty runs it reports direction 1.0, invention 0, binding
+precision 1.0, with zero spread.
+
+Direction is scored separately for a reason. An agent can identify every connection
+correctly and draw all the arrows backwards, and precision and recall both stay at 1.0.
+That happened, and it is why rule 4 was rewritten.
+
+### Not done
+
+- **Distribution** (Part 16). The package is not published, so `diagram` has to be on your
+  PATH via `npm link`. Specced, not built.
+- **The prose benchmark** (BUILD.md Phase 6). Both reference systems are repositories, so
+  acceptance G1 — "a 100-word description produces a correct diagram, no follow-up" — is the
+  headline criterion that nothing measures yet.
+- Binding chips in the viewer's hover panel.
+- Deliberately out of scope: the layered canvas (Part 14), observed-vs-designed drift
+  (Part 17), chaos *verification* (§18.8), and mouse editing.
 
 ## A note on the rules
 
