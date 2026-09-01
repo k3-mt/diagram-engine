@@ -538,7 +538,14 @@ describe('harness — the agent can never reach gold', () => {
     // fixture — otherwise the last gate before the agent starts fails on every
     // single run and someone deletes the gate.
     expect(stager.LEAK_MARKERS).not.toContain(path.basename(REPO));
-    expect(stager.FIXTURE_ONLY_MARKERS()).toContain(path.basename(REPO));
+    // The repository's canonical name, NOT the basename of whoever's checkout
+    // this is: markers are substring-matched, so a directory name leaks local
+    // state into the verdict. A clone in ~/fresh used to fail ten tests on the
+    // word "refresh" in a fixture.
+    const pkgName = JSON.parse(
+      fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'),
+    ).name;
+    expect(stager.FIXTURE_ONLY_MARKERS()).toContain(pkgName);
   });
 
   it("system B's code-only coupling is not given away in prose", () => {

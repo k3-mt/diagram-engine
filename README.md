@@ -112,6 +112,10 @@ and so on — which is why the rules describe tools by role rather than pinning 
 **New here?** [TRYING-IT.md](TRYING-IT.md) is a ten-minute first session — install, talk to
 your agent, and check its work.
 
+**Setting this up with an agent?** [AGENTS.md](AGENTS.md) is the build-and-install
+guide written for one: exact commands, the outputs to expect, how to verify the
+artifact, and the traps whose failure modes are misleading.
+
 ## Two processes, one file
 
 ```

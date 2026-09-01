@@ -143,9 +143,28 @@ export function stage(src, dest) {
  * The name of the repository the rig lives in, derived rather than hard-coded:
  * a staged file that names it hands the agent the one search term it needs.
  * `audit()` adds it to the marker list automatically.
+ *
+ * TAKEN FROM package.json, NOT THE DIRECTORY NAME. The basename of the
+ * checkout is an incidental local path, and markers are matched as plain
+ * substrings, so deriving from it made the test suite's result depend on what
+ * the developer happened to call their clone: checking out into `~/fresh`
+ * fails ten tests, because fixtures/ref-a/.../auth-client.js says "refresh"
+ * and "refresh" contains "fresh". The package name is the repository's actual
+ * identity and is the same on every machine — which is also the string a
+ * staged file could realistically leak.
+ *
+ * Falls back to the directory name only if package.json cannot be read, since
+ * a marker list that silently loses an entry is worse than an imperfect one.
  */
 export function repoName(from = new URL('../..', import.meta.url).pathname) {
-  return path.basename(path.resolve(from));
+  const root = path.resolve(from);
+  try {
+    const name = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).name;
+    if (typeof name === 'string' && name !== '') return name;
+  } catch {
+    /* fall through to the directory name */
+  }
+  return path.basename(root);
 }
 
 /**
