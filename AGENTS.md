@@ -276,6 +276,36 @@ writing for this reason. If an `npm link` symlink or a plugin's `.mcp.json` poin
 at a file a rename orphaned, you get an MCP server that appears broken but is merely
 old. Check `claude mcp list` — it names the exact path each server runs.
 
+**Open the port the viewer actually printed, not 4400.** The viewer requests 4400
+and auto-increments to 4401, 4402… when it is taken (up to 4410). Port 4400 is very
+often already held — by your own earlier `diagram serve`, or by a *different user
+account* on the same machine — and a stale viewer there serves an older bundle of
+the app itself. That looks exactly like your own viewer with features missing: the
+diagram is someone else's, and UI added since that bundle was built is absent. It is
+a confusing failure precisely because nothing is broken.
+
+Ask a port which document it is showing:
+
+```bash
+curl -s http://localhost:4400/__diagram/serve.json
+```
+
+A viewer for your document answers with a JSON identity naming the exact
+`graph.json` it watches. Anything else — `not found`, or a different document —
+means that port is not yours. `ps aux | grep 'diagram serve'` names the owner.
+
+**The plugin cache is keyed by version, and does not refresh in place.** After
+bumping the version and rebuilding, an installed plugin keeps serving the old
+version directory until it is reinstalled:
+
+```bash
+ls ~/.claude/plugins/cache/<marketplace>/<plugin>/    # one dir per version
+claude plugin uninstall diagram && claude plugin install diagram@diagram-engine
+```
+
+Confirm with `claude mcp list`, which prints the full path each server runs from —
+the version is in it.
+
 **Two `diagram` MCP servers can coexist.** A plugin install provides
 `plugin:diagram:diagram`; an older `diagram init` may have left a `diagram` entry in
 `~/.claude.json` pointing at a global binary. One failing does not mean the other
