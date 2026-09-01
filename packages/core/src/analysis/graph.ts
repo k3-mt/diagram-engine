@@ -33,6 +33,7 @@
 // deeply frozen document, which turns any accidental write into a throw.
 
 import { COLLAPSED_META_KEY } from '../view/derive.js';
+import { edgeIsAsync } from '../schema/graph.js';
 import type { GEdge, GGroup, GNode, GraphDoc } from '../schema/graph.js';
 
 /** The node type that is a data model rather than a runtime component (A4). */
@@ -161,9 +162,17 @@ export function isRuntimeNode(node: GNode): boolean {
   return node.type !== EXCLUDED_NODE_TYPE;
 }
 
-/** True for a synchronous edge: solid, or `style` absent (spec §4.4 rule 6). */
+/**
+ * True for a synchronous edge: solid, or `style` absent (spec §4.4 rule 6).
+ *
+ * Delegates to `edgeIsAsync` rather than testing `style` here, because since
+ * §3.9 an edge can say it is asynchronous with `kind: "publish"` and no
+ * `style` at all. Asking the question in two places is how a `publish` edge
+ * would get traversed as a hard dependency and reported as a cascade path
+ * that cannot happen.
+ */
 export function isSyncEdge(edge: GEdge): boolean {
-  return edge.style !== 'dashed';
+  return !edgeIsAsync(edge);
 }
 
 /**

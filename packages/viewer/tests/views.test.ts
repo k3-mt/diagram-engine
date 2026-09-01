@@ -33,13 +33,20 @@ import { kindText, visibleMeta } from '../src/render/HoverCard.js';
 import { CollapsedGroupIcon, NODE_ICONS } from '../src/render/icons.js';
 import { NodeContent, nodeIcon } from '../src/render/NodeBox.js';
 import { StatusBar } from '../src/render/StatusBar.js';
-import { ViewButtons, focusButtonText } from '../src/render/ViewButtons.js';
+import {
+  ViewButtons,
+  NO_FOCUS,
+  focusOptionText,
+  sortFocusOptions,
+} from '../src/render/ViewButtons.js';
 import {
   INITIAL_VIEW_STATE,
   activePreset,
   canFocus,
   collapsedKey,
   effectiveCollapsed,
+  focusCandidates,
+  focusGroup,
   focusTarget,
   inferredFocus,
   nextFocusTarget,
@@ -169,6 +176,50 @@ describe('activePreset — which button is lit', () => {
   });
 });
 
+// The picker's action. Cycling reached the fourth group in four presses;
+// this reaches it in one, and — the part that needed a new function — it can
+// also say "none", which a cycle through N groups had no way to express.
+describe('focusGroup — the picker picks', () => {
+  it('focuses the named group, whatever the state was', () => {
+    const next = focusGroup(doc, INITIAL_VIEW_STATE, 'data');
+    expect(next.focus).toBe('data');
+    expect(activePreset(doc, effectiveCollapsed(doc, next), next.focus)).toBe('focus');
+  });
+
+  it('goes straight to any group, with no steps in between', () => {
+    const groups = focusCandidates(doc);
+    expect(groups.length).toBeGreaterThan(1);
+    const last = groups[groups.length - 1]!.id;
+    expect(focusGroup(doc, INITIAL_VIEW_STATE, last).focus).toBe(last);
+  });
+
+  it('leaves focus entirely on null, opening everything', () => {
+    const focused = focusGroup(doc, INITIAL_VIEW_STATE, 'data');
+    const off = focusGroup(doc, focused, null);
+    expect(off.focus).toBe(null);
+    expect(off.local).toEqual([]);
+    expect(activePreset(doc, effectiveCollapsed(doc, off), off.focus)).toBe('eng');
+  });
+
+  it('treats an id that is no longer a group as "no focus"', () => {
+    // The agent can delete a container between the render and the click; the
+    // view must not strand itself on a target that is gone.
+    expect(focusGroup(doc, INITIAL_VIEW_STATE, 'gone').focus).toBe(null);
+    // A NODE id is not a group either.
+    expect(focusGroup(doc, INITIAL_VIEW_STATE, doc.nodes[0]!.id).focus).toBe(null);
+  });
+
+  it('never mutates the state it is handed', () => {
+    const before = { ...INITIAL_VIEW_STATE };
+    focusGroup(doc, INITIAL_VIEW_STATE, 'data');
+    expect(INITIAL_VIEW_STATE).toEqual(before);
+  });
+
+  it('is a no-op with no document', () => {
+    expect(focusGroup(null, INITIAL_VIEW_STATE, 'data')).toBe(INITIAL_VIEW_STATE);
+  });
+});
+
 describe('[focus] with no mouse selection', () => {
   it('is disabled when the document has no groups', () => {
     const flat: GraphDoc = { ...doc, groups: [], nodes: [], edges: [] };
@@ -280,14 +331,23 @@ describe('ViewButtons in the StatusBar views slot (§8.4)', () => {
       }),
     );
 
-  it('renders all three, in preset order', () => {
+  const OPTIONS = [
+    { id: 'payments', label: 'Payments' },
+    { id: 'data', label: 'Data' },
+  ];
+
+  it('renders the two toggle presets as buttons, in order', () => {
     const html = buttons();
-    for (const name of ['exec', 'eng', 'focus']) {
+    for (const name of ['exec', 'eng']) {
       expect(html).toContain(`data-testid="view-button-${name}"`);
     }
     expect(html.indexOf('view-button-exec')).toBeLessThan(
       html.indexOf('view-button-eng'),
     );
+    // focus is NOT a button any more: it is one picture per group, so the
+    // control has to name which group before it can do anything.
+    expect(html).not.toContain('view-button-focus');
+    expect(html).toContain('data-testid="view-focus"');
   });
 
   /** The one <button> element carrying `data-testid="view-button-<name>"`. */
@@ -307,20 +367,109 @@ describe('ViewButtons in the StatusBar views slot (§8.4)', () => {
     expect(buttons({ active: null })).not.toContain('aria-pressed="true"');
   });
 
-  it('names the focus target and disables the button when there is none', () => {
-    expect(buttons({ focusLabel: 'Payments' })).toContain('focus: Payments');
-    const off = buttons({ focusEnabled: false });
-    expect(button(off, 'focus')).toContain('disabled');
+  it('lists the numbered stages first, in numeric order', () => {
+    // Document order interleaves them — "4 · Landing zone", "/raw/…",
+    // "Source registry", "5 · Standardisation" — so the sequence a reader is
+    // being asked to follow down the canvas was scattered through the picker.
+    const jumbled = [
+      { id: 'd', label: '4 · Landing zone' },
+      { id: 'raw', label: '/raw/{source}/' },
+      { id: 'sr', label: 'Source registry' },
+      { id: 'e', label: '5 · Standardisation' },
+      { id: 'a', label: '1 · Sources' },
+      { id: 'b', label: '2 · Pull' },
+    ];
+    expect(sortFocusOptions(jumbled).map((o) => o.label)).toEqual([
+      '1 · Sources',
+      '2 · Pull',
+      '4 · Landing zone',
+      '5 · Standardisation',
+      '/raw/{source}/',
+      'Source registry',
+    ]);
+  });
+
+  it('sorts stage 10 after stage 2, not between 1 and 2', () => {
+    // The failure a plain string sort has, at exactly the size where a picker
+    // starts to need sorting at all.
+    const many = [
+      { id: 'j', label: '10 · Ten' },
+      { id: 'b', label: '2 · Two' },
+      { id: 'a', label: '1 · One' },
+    ];
+    expect(sortFocusOptions(many).map((o) => o.label)).toEqual([
+      '1 · One',
+      '2 · Two',
+      '10 · Ten',
+    ]);
+  });
+
+  it('falls back to alphabetical when nothing is numbered', () => {
+    const plain = [
+      { id: 'b', label: 'Database VM' },
+      { id: 'a', label: 'Provisioning' },
+    ];
+    expect(sortFocusOptions(plain).map((o) => o.id)).toEqual(['b', 'a']);
+  });
+
+  it('never mutates the list it is handed', () => {
+    const input = [{ id: 'b', label: '2 · B' }, { id: 'a', label: '1 · A' }];
+    sortFocusOptions(input);
+    expect(input.map((o) => o.id)).toEqual(['b', 'a']);
+  });
+
+  it('offers every group, plus a way back out, in one control', () => {
+    // The point of the change: reaching the fourth group used to take four
+    // presses, with the target only readable as it went past.
+    const html = buttons({ focusOptions: OPTIONS });
+    expect(html).toContain('>no focus<');
+    expect(html).toContain('>Payments<');
+    expect(html).toContain('>Data<');
+    // "no focus" comes first — the way out is the resting state — and stays
+    // there whatever the sort does to the groups behind it.
+    expect(html.indexOf('>no focus<')).toBeLessThan(html.indexOf('>Data<'));
+    expect(html.indexOf('>no focus<')).toBeLessThan(html.indexOf('>Payments<'));
+  });
+
+  it('selects the focused group, and only while the view IS focused', () => {
+    // React marks the chosen option with `selected`, rather than putting a
+    // value on the <select> — so that is what the assertion looks at.
+    const on = buttons({ active: 'focus', focusId: 'data', focusOptions: OPTIONS });
+    expect(on).toContain('<option value="data" selected');
+    expect(on).toContain('data-active="true"');
+    // The moment the picture stops being a focus view the picker says so,
+    // even though the remembered target is unchanged. A select still claiming
+    // a focus the canvas has left is worse than no indicator at all.
+    const off = buttons({ active: 'eng', focusId: 'data', focusOptions: OPTIONS });
+    expect(off).toContain(`<option value="${NO_FOCUS}" selected`);
+    expect(off).not.toContain('<option value="data" selected');
+    // Scoped to the SELECT: with active 'eng' the [eng] button is legitimately
+    // marked active, so a whole-markup assertion would be testing the wrong
+    // element.
+    expect(off.slice(off.indexOf('<select'))).not.toContain('data-active="true"');
+  });
+
+  it('disables the picker when there is nothing to focus', () => {
+    const off = buttons({ focusOptions: [] });
+    const select = off.slice(off.indexOf('<select'));
+    expect(select).toContain('disabled');
     expect(button(off, 'exec')).not.toContain('disabled');
   });
 
-  it('shortens a long target label so the 28px strip never reflows', () => {
-    expect(focusButtonText('A very long boundary name')).toBe('focus: A very long bou…');
-    expect(focusButtonText(null)).toBe('focus');
+  it('shortens a long group label so the 28px strip never reflows', () => {
+    expect(focusOptionText('A very long boundary name')).toBe('A very long boundary…');
+    expect(focusOptionText('Payments')).toBe('Payments');
+    expect(focusOptionText('   ')).toBe('(unnamed group)');
   });
 
-  it('uses real buttons, so Tab and Enter reach them with no key handling', () => {
-    expect(buttons()).toContain('<button type="button"');
+  it('uses real form controls, so Tab and the arrow keys just work', () => {
+    const html = buttons({ focusOptions: OPTIONS });
+    expect(html).toContain('<button type="button"');
+    expect(html).toContain('<select');
+    // The select says what it is even when it is showing a group name — a
+    // bare dropdown reading "Payments" could be anything.
+    expect(html).toContain('<label');
+    expect(html).toContain('>focus<');
   });
 
   it('appears inside the status bar only when the slot is filled', () => {
@@ -394,15 +543,15 @@ describe('resolveView hands downstream the collapsed ARRAY (§7)', () => {
     expect(resolveView(doc, INITIAL_VIEW_STATE).key).not.toBe(a.key);
   });
 
-  it('reports focus and its label from the same pass', () => {
-    const focused = selectPreset(doc, INITIAL_VIEW_STATE, 'focus', {});
+  it('reports the active preset and its focus target from the same pass', () => {
+    const focused = focusGroup(doc, INITIAL_VIEW_STATE, 'data');
     const view = resolveView(doc, focused);
     expect(view.active).toBe('focus');
-    expect(view.focus).toBe(view.focus === null ? null : view.focus);
-    expect(view.focusEnabled).toBe(true);
-    expect(view.focusLabel).toBe(
-      doc.groups.find((g) => g.id === view.focus)?.label ?? null,
-    );
+    expect(view.focus).toBe('data');
+    // The label is NOT carried here any more. It existed for the old button's
+    // text, and the picker reads labels straight off `focusOptions`; two
+    // sources for one string is one that can go stale.
+    expect(doc.groups.some((g) => g.id === view.focus)).toBe(true);
   });
 });
 

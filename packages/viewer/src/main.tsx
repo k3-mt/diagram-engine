@@ -61,6 +61,18 @@
 //
 // The overlay is deliberately NOT part of the saved SVG (export/save.ts): the
 // file is the diagram, and a lens someone toggled on in one tab is not.
+//
+// SELECTION (§8.7). Clicking a node opens the RIGHT panel and lights up every
+// edge touching it, dimming the rest. Three rules keep it out of everything
+// else's way:
+//   1. It is resolved against the PAINTED frame on every render, so a
+//      document update that removes the selected node closes the panel by
+//      itself — there is no stale id to clean up.
+//   2. It yields to the blast overlay. A click means "target this" while that
+//      overlay is on (§18.7), and one gesture cannot mean two things; the
+//      selection panel simply does not take clicks in that mode.
+//   3. It is a lens, like everything else here: no patch, no write, nothing
+//      sent back over the socket, and not in the saved SVG.
 
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
@@ -83,9 +95,11 @@ import {
   type WorkerLike,
 } from './layout/worker.js';
 import { overlayFor } from './render/AnalysisOverlay.js';
-import { Canvas } from './render/Canvas.js';
+import { Canvas, type Emphasis } from './render/Canvas.js';
 import { editorSchemeFrom } from './render/bindingLink.js';
+import { DETAIL_WIDTH, DetailPanel } from './render/DetailPanel.js';
 import { HoverCard } from './render/HoverCard.js';
+import { DIMMED, SelectionOverlay, litEdges } from './render/SelectionOverlay.js';
 import { OverlayButtons } from './render/OverlayButtons.js';
 import {
   OverlayCaption,
@@ -103,6 +117,7 @@ import { analysisPlan, blastPlan } from './view/overlayPlan.js';
 import { buildDrawnIndex } from './view/overlayState.js';
 import { useOverlay } from './view/useOverlay.js';
 import { useViewOverride } from './view/useViewOverride.js';
+import { selectionView } from './view/selection.js';
 import { connectViewer, type ConnectionState } from './live.js';
 
 /** WorkerLike speaking the §5.4 protocol on this thread (see header note). */
@@ -165,11 +180,12 @@ function buildFrame(pending: Pending, laidOut: LaidOut): Frame {
 }
 
 /**
- * Window size minus the status strip AND the sidebar, tracked for
- * fit-to-content (§8.3). The panel takes width away from the canvas rather
+ * Window size minus the status strip AND the side panels, tracked for
+ * fit-to-content (§8.3). A panel takes width away from the canvas rather
  * than floating over it: fit-to-content has to fit the space the diagram
- * actually has, or opening the panel would push half the picture underneath
- * it. `panelWidth` is 0 while the panel is shut, and changing it re-fits.
+ * actually has, or opening one would push half the picture underneath it.
+ * `panelWidth` is the TOTAL of whatever is open — the left view panel plus
+ * §8.7's right detail panel — and is 0 with both shut; changing it re-fits.
  */
 function useCanvasSize(panelWidth: number): { vw: number; vh: number } {
   const read = (): { vw: number; vh: number } =>
@@ -446,8 +462,17 @@ export function App(): JSX.Element {
   // The panel is open by default: its whole reason to exist is that the levels
   // of a nested diagram are invisible until something lists them.
   const [panelOpen, setPanelOpen] = useState(true);
+  // §8.7's selection. An id, not a node: the node is looked up in the painted
+  // frame every render (see `selected` below), which is what makes a document
+  // update that deletes it close the panel rather than pin a ghost open.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const panelWidth = panelOpen ? SIDEBAR_WIDTH : 0;
-  const { vw, vh } = useCanvasSize(panelWidth);
+  // Both panels squeeze the canvas from their own side, so the viewport is
+  // measured against what is left between them — otherwise the diagram
+  // centres itself under the right panel and the box just clicked slides out
+  // of view behind it.
+  const detailWidth = selectedId === null ? 0 : DETAIL_WIDTH;
+  const { vw, vh } = useCanvasSize(panelWidth + detailWidth);
   const bounds = useMemo(
     () =>
       frame === null
@@ -517,6 +542,21 @@ export function App(): JSX.Element {
     [view, overlay],
   );
 
+  // §8.7's click-to-inspect, and the same three guards for the same reasons:
+  // the mode (a click belongs to the blast overlay while that is on — see
+  // rule 2 in the header), the pan (useViewport already knows a drag from a
+  // click), and nothing else. Clicking the SELECTED node again closes the
+  // panel, so the gesture that opened it also puts it away.
+  const onNodeSelect = useCallback(
+    (id: string) => {
+      if (view.didPan()) return;
+      setSelectedId((current) => (current === id ? null : id));
+    },
+    [view],
+  );
+
+  const clearSelection = useCallback(() => setSelectedId(null), []);
+
   // Escape clears the whole selection — one gesture out, whether one target
   // is chosen or eight (§18.7). It is deliberately not bound to a background
   // click: the background is the pan surface, and a clear you can trigger by
@@ -524,6 +564,22 @@ export function App(): JSX.Element {
   // trust. The caption names the key wherever the selection is empty.
   const clearTargets = overlay.clearTargets;
   const blastOn = overlay.mode === 'blast';
+
+  // Escape closes the detail panel — the same one-gesture-out the blast
+  // selection has, and bound on the same terms: only while there IS a
+  // selection, so an Escape with the panel shut still belongs to whatever
+  // else on the page wants it. Deliberately not bound to a background click,
+  // for the reason given below: the background is the pan surface.
+  const selectionOn = selectedId !== null;
+  useEffect(() => {
+    if (typeof window === 'undefined' || !selectionOn) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      setSelectedId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectionOn]);
   useEffect(() => {
     if (typeof window === 'undefined' || !blastOn) return;
     const onKey = (e: KeyboardEvent) => {
@@ -612,6 +668,45 @@ export function App(): JSX.Element {
       ? null
       : (frame.doc.nodes.find((n) => n.id === hover.id) ?? null);
 
+  // §8.7. Resolved against the DRAWN document (frame.doc), which is the
+  // picture the reader clicked: a collapsed group's stand-in reports the
+  // edges drawn into and out of the stand-in, which are the lines that
+  // actually light up. Null whenever the id no longer names a drawn node —
+  // a document update, a collapse, or a view change all close the panel by
+  // themselves, with no id left over to go stale.
+  const selected = useMemo(
+    () =>
+      frame === null || selectedId === null
+        ? null
+        : selectionView(frame.doc, selectedId, {
+            // Both documents, on purpose. The geometry comes from the derived
+            // one (which line lights up), the content from the source (which
+            // relationships actually exist) — see the note in selection.ts.
+            // deriveView merges edges that share a from/to pair whether or not
+            // anything is collapsed, so without this a node that both reads
+            // and writes one database reports a single `×2` row.
+            source: frame.source,
+            merges: frame.detail.edges,
+          }),
+    [frame, selectedId],
+  );
+
+  // What stays lit while a selection is open, and in what colour. The edges
+  // draw THEMSELVES lit from this map (see Canvas and SelectionOverlay), so
+  // the highlight sits under the edge labels and step badges instead of being
+  // painted over them.
+  const emphasis: Emphasis | null = useMemo(
+    () =>
+      selected === null
+        ? null
+        : {
+            nodes: selected.nodeIds,
+            edges: litEdges(selected, theme.accent[selected.node.type]),
+            dim: DIMMED,
+          },
+    [selected],
+  );
+
   return (
     <div
       style={{
@@ -636,7 +731,7 @@ export function App(): JSX.Element {
         style={{
           position: 'absolute',
           left: panelWidth,
-          right: 0,
+          right: detailWidth,
           top: 0,
           bottom: BAR_HEIGHT,
           overflow: 'hidden',
@@ -645,10 +740,11 @@ export function App(): JSX.Element {
           // with the blast overlay on it becomes 'pointer': that click selects
           // a target (§18.7), and the affordance has to exist where the click
           // does. Never while actually panning, where the hand wins.
+          // 'pointer' over a box whenever that click DOES something: target
+          // it with the blast overlay on (§18.7), select it with the overlay
+          // off (§8.7). Never while actually panning, where the hand wins.
           cursor:
-            view.cursor === 'grab' && overlay.mode === 'blast' && hoveredNode !== null
-              ? 'pointer'
-              : view.cursor,
+            view.cursor === 'grab' && hoveredNode !== null ? 'pointer' : view.cursor,
           touchAction: 'none',
         }}
       >
@@ -673,16 +769,31 @@ export function App(): JSX.Element {
                 hoveredId={hoveredNode?.id ?? null}
                 onHoverNode={hoverApi.onHoverNode}
                 onHoverMove={hoverApi.onHoverMove}
-                // §18.7: click a node to target it, modifier-click to
-                // combine. A lens over one tab, never an edit (§1.6).
-                onNodeClick={overlay.mode === 'blast' ? onNodeClick : undefined}
+                // One click, two meanings, decided by mode — never both at
+                // once. With the blast overlay on it targets (§18.7); with it
+                // off it selects and opens the detail panel (§8.7). A lens
+                // over one tab either way, never an edit (§1.6).
+                onNodeClick={
+                  overlay.mode === 'blast'
+                    ? onNodeClick
+                    : (id) => onNodeSelect(id)
+                }
                 // A ring means "target" or "contained" while the blast
-                // overlay is on, so the hover ring stands down — see Canvas.
-                hoverRing={overlay.mode !== 'blast'}
+                // overlay is on, and "selected" or "connected" while the
+                // detail panel is open, so the hover ring stands down for
+                // both — a ring keeps one meaning. See Canvas.
+                hoverRing={overlay.mode !== 'blast' && selected === null}
                 // Layer 7 (§8.1), above everything and never hit-tested —
                 // the slot Canvas already exposes, so nothing about layers
                 // 1-6 changes and the overlay-off picture is untouched.
-                hoverOverlay={overlaySvg ?? undefined}
+                hoverOverlay={
+                  selected !== null ? (
+                    <SelectionOverlay selection={selected} laidOut={frame.laidOut} />
+                  ) : (
+                    (overlaySvg ?? undefined)
+                  )
+                }
+                emphasis={emphasis}
               />
             </g>
           </svg>
@@ -709,6 +820,19 @@ export function App(): JSX.Element {
             decision. It carries the A4/A5/C2/C3 sentences verbatim. */}
         {caption === null ? null : <OverlayCaption caption={caption} />}
       </div>
+      {/* §8.7's right panel: everything the document holds about the clicked
+          node, including what it is wired to. A sibling of the canvas
+          container, not a child of it, so it is never panned or zoomed and
+          never intercepts a drag on the canvas. */}
+      {selected === null ? null : (
+        <DetailPanel
+          selection={selected}
+          onSelect={setSelectedId}
+          onClose={clearSelection}
+          root={root}
+          editor={editor}
+        />
+      )}
       {panelOpen ? (
         <Sidebar
           depths={views.depths}
@@ -756,9 +880,10 @@ export function App(): JSX.Element {
         views={
           <ViewButtons
             active={views.active}
-            focusLabel={views.focusLabel}
-            focusEnabled={views.focusEnabled}
+            focusOptions={views.focusOptions}
+            focusId={views.focus}
             onSelect={views.select}
+            onFocus={views.selectFocus}
           />
         }
         analysis={

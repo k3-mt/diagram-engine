@@ -239,6 +239,67 @@ export const GGroupSchema = z.object({
 });
 export type GGroup = z.infer<typeof GGroupSchema>;
 
+/**
+ * EdgeKind — WHAT THE LINE MEANS, so the picture can say it (spec §3.9).
+ *
+ * The problem this solves. Rule 4 fixes an edge's direction at the
+ * DEPENDENCY: caller to callee, "the data flows back the other way, the
+ * arrow does not". That is the right direction for analysis — `analyse` and
+ * `blastRadius` walk these edges as "lose the target and the source is at
+ * risk", and reversing a read would reverse the failure. But every reader
+ * instinctively reads an arrow as FLOW, and for a read those two point
+ * opposite ways. One undifferentiated grey line was being asked to carry
+ * both truths and carried neither.
+ *
+ * The fix is not a second edge. It is ONE edge that says which kind of
+ * relationship it is; the viewer then draws the dependency leg and, where
+ * the kind implies one, a RETURN LEG back along it (see `returns`). The
+ * document stays acyclic, the edge count is unchanged, and `analyse` sees
+ * exactly the graph it saw before.
+ *
+ *   call     synchronous request that expects an answer   → return leg
+ *   read     the source pulls data out of the target      → return leg
+ *   write    the source pushes data into the target       no return leg
+ *   publish  fire-and-forget onto a queue or topic        no return leg
+ *   consume  the source pulls messages off a queue        → return leg
+ *
+ * `call`, `read` and `write` are SYNCHRONOUS and draw solid; `publish` and
+ * `consume` are ASYNCHRONOUS and draw dashed — which is rule 6, now stated
+ * once by the kind instead of restated by hand on every edge.
+ *
+ * Optional, and absent means exactly what it meant before this field
+ * existed: a dependency arrow drawn from `style` and `arrow`. Every
+ * document written before §3.9 renders to the pixel it did.
+ */
+export const EdgeKindSchema = z.enum([
+  'call',
+  'read',
+  'write',
+  'publish',
+  'consume',
+]);
+export type EdgeKind = z.infer<typeof EdgeKindSchema>;
+
+/** The kinds that draw a return leg: something comes back to the source. */
+export const RETURNING_KINDS: ReadonlySet<EdgeKind> = new Set<EdgeKind>([
+  'call',
+  'read',
+  'consume',
+]);
+
+/** The kinds that are asynchronous, and so draw dashed (rule 6). */
+export const ASYNC_KINDS: ReadonlySet<EdgeKind> = new Set<EdgeKind>([
+  'publish',
+  'consume',
+]);
+
+/**
+ * Highest step number an edge may carry. Two digits: past 99 the badge stops
+ * being readable at any zoom, and a flow with a hundred numbered steps is a
+ * sequence diagram, not an architecture diagram.
+ */
+export const MAX_EDGE_SEQ = 99;
+
 /** Cardinality (ERD mode): relationship multiplicity carried by an edge. */
 export const CardinalitySchema = z.enum(['1:1', '1:N', 'N:1', 'N:M']);
 export type Cardinality = z.infer<typeof CardinalitySchema>;
@@ -253,6 +314,36 @@ export const GEdgeSchema = z.object({
   label: z.string().min(1).max(24).optional(),
   style: z.enum(['solid', 'dashed']).optional(),
   arrow: z.enum(['forward', 'both', 'none']).optional(),
+  /**
+   * What this line MEANS (spec §3.9). Sets how the edge is drawn — its
+   * dash, its arrowheads, and whether a return leg is painted back along
+   * it — so it REPLACES `style` and `arrow` rather than joining them (V20).
+   */
+  kind: EdgeKindSchema.optional(),
+  /**
+   * What comes back, 1–24 chars: the label on the return leg — "order[]",
+   * "200 OK", "job id". Only meaningful on a kind that HAS a return leg
+   * (V21); on a `write` or a `publish` nothing comes back, and a label on a
+   * leg that is not drawn is a claim the picture cannot show.
+   *
+   * The leg itself is drawn whenever the kind implies one. This field only
+   * names it, so `kind: "read"` alone still gets the arrow back — you do
+   * not have to know what the payload is called to say that there is one.
+   */
+  returns: z.string().min(1).max(24).optional(),
+  /**
+   * Step number in a flow, 1–99 (spec §3.9). Rendered as a small numbered
+   * badge on the line, so a reader can follow "1 → 2 → 3" through the
+   * diagram instead of guessing which call happens first.
+   *
+   * ORDER, NOT IMPORTANCE. It says when this edge happens relative to the
+   * others, and it is deliberately not unique: two edges numbered 3 are two
+   * things that happen at the same step, which is exactly what a fan-out
+   * looks like. Numbers need not be contiguous either — a document that
+   * numbers only the four edges of its critical path is more readable than
+   * one that numbers all forty.
+   */
+  seq: z.number().int().min(1).max(MAX_EDGE_SEQ).optional(),
   /**
    * Relationship multiplicity for ERD edges, drawn with crow's-foot markers.
    * "N:1" exists alongside "1:N" so direction is expressible without having
@@ -287,6 +378,43 @@ export const GEdgeSchema = z.object({
     .optional(),
 });
 export type GEdge = z.infer<typeof GEdgeSchema>;
+
+// --- reading an edge's drawing and its behaviour ---------------------------
+//
+// THE ONE PLACE. Before §3.9 "is this edge asynchronous?" was the expression
+// `edge.style === 'dashed'`, written out by hand in five modules: the blast
+// propagation, the fan-in weighting, two invariants and the renderer. Adding a
+// `kind` that ALSO says async would have left those five reading only half the
+// document — a `kind: "publish"` edge would have been traversed as a
+// synchronous dependency and reported as a cascade path that cannot happen.
+// So the question is asked once, here, and the five callers ask it of this.
+
+/**
+ * Is this edge ASYNCHRONOUS — a queue, an event, a webhook? Async edges
+ * contain failure (§18.3): a cascade stops at one, and `blastRadius` reports
+ * its far side as contained rather than at risk.
+ *
+ * An explicit `style` still decides, because it always did; `kind` answers for
+ * the edges that carry one instead (V20 forbids carrying both).
+ */
+export function edgeIsAsync(edge: Pick<GEdge, 'style' | 'kind'>): boolean {
+  if (edge.style !== undefined) return edge.style === 'dashed';
+  return edge.kind !== undefined && ASYNC_KINDS.has(edge.kind);
+}
+
+/**
+ * Does something come back along this edge — a response, a row set, a
+ * message? True for the returning kinds, and for an edge that names what
+ * comes back without saying which kind it is.
+ *
+ * PURELY A DRAWING QUESTION. The return leg is a second stroke on one edge,
+ * never a second edge: the dependency still runs from `from` to `to`, and
+ * `analyse` is not told about the leg at all. See EdgeKindSchema.
+ */
+export function edgeHasReturn(edge: Pick<GEdge, 'kind' | 'returns'>): boolean {
+  if (edge.kind !== undefined) return RETURNING_KINDS.has(edge.kind);
+  return edge.returns !== undefined;
+}
 
 export const DirectionSchema = z.enum(['DOWN', 'RIGHT']);
 export type Direction = z.infer<typeof DirectionSchema>;

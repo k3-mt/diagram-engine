@@ -72,17 +72,18 @@ Every node and group needs "parent": a group id, or null for top level.
 
 4. EDGE DIRECTION POINTS AT THE DEPENDENCY: caller to callee. A
    service that reads a database has an edge FROM the service TO the
-   database; the data flows back the other way, the arrow does not.
-   CHECK EVERY EDGE by reading it aloud as "<from> <label> <to>":
-   "orders reads postgres" is right, "s3 reads etl" is backwards. A
-   protocol label ("https", "grpc") is a noun, not a verb: there the
-   arrow still runs from whoever initiates the call.
+   database; the data comes back the other way, \`kind\` says so and
+   the arrow does not. CHECK EVERY EDGE by reading it aloud as
+   "<from> <label> <to>": "orders reads postgres" is right, "s3 reads
+   etl" is backwards. A protocol label ("https", "grpc") is a noun,
+   not a verb: there the arrow still runs from whoever initiates the
+   call.
 
-5. EDGE LABELS are 1-3 words: "reads", "publishes", "grpc". Omit the
-   label when the relationship is obvious from the types.
+5. EDGE LABELS are 1-3 words. Omit when the kind or types say it.
 
-6. DASHED for asynchronous relationships (queue consumption, events,
-   webhooks). Solid for synchronous calls.
+6. KIND says what a line means and draws it: call, read, write,
+   publish, consume. Use it INSTEAD of style and arrow. No kind:
+   dashed = async, solid = sync.
 
 7. GROUPS ARE TRUST AND DEPLOYMENT BOUNDARIES. Do not group things
    merely because they are related in topic.
@@ -117,12 +118,77 @@ Every node and group needs "parent": a group id, or null for top level.
 
 ---
 
-## Addendum — node metadata, redundancy and ERD mode
+## Addendum — edge kind, node metadata, redundancy and ERD mode
 
 The rules above are unchanged. What follows is additional capability,
 not a revision. (There is no rule 13; the number was reserved for
 bindings while they were unbuilt and they arrived as rule 15, so the
 gap is left rather than renumbering rules the benchmark was tuned on.)
+
+### Edge kind (\`kind\`, \`returns\`, \`seq\`) — what a line means
+
+Rule 4 fixes an edge's DIRECTION at the dependency, and that never
+changes: the arrow runs from whoever initiates. \`kind\` says what kind
+of relationship it is, so the picture can show the data moving without
+the arrow having to lie about who calls whom.
+
+    { "from": "orders", "to": "postgres", "kind": "read",
+      "label": "reads", "returns": "order[]", "seq": 3 }
+
+    call     a synchronous request that expects an answer
+    read     the source pulls data out of the target
+    write    the source pushes data into the target
+    publish  fire-and-forget onto a queue or topic
+    consume  the source pulls messages off a queue
+
+- \`kind\` REPLACES \`style\` and \`arrow\`. Setting both is rejected: it
+  would be the document saying two things about one line. \`publish\`
+  and \`consume\` draw dashed (rule 6's async), the other three solid.
+- \`call\`, \`read\` and \`consume\` draw a SECOND, OPEN ARROWHEAD back at
+  the source, on the same line, because something comes back along
+  them. You do not author that second arrow and you must not: one
+  relationship is one edge, and a literal response edge would make
+  every synchronous call a cycle and send \`diagram analyse\`
+  propagating failure backwards.
+- \`returns\` NAMES what comes back, 1-24 chars — "order[]", "200 OK",
+  "job id". Optional: the return arrow is drawn either way. Only on a
+  kind that has one; on a \`write\` or a \`publish\` it is rejected.
+- \`seq\` is a step number, 1-99, drawn as a badge on the line. Use it
+  when the user asks to see the ORDER of a flow. It need not be unique
+  (two edges numbered 3 happen at the same step) or contiguous —
+  numbering only the critical path reads better than numbering all
+  forty edges. Leave it off otherwise.
+- To take any of the three off, \`updateEdge\` with \`null\`, as \`alt\`
+  does below.
+- NEVER REVERSE AN EDGE TO GET A LAYOUT. The viewer already reads
+  \`kind\` when it ranks the picture: a \`read\` or \`consume\` whose far
+  end is \`external\` or \`client\` is data ENTERING the system, so that
+  node is drawn FIRST and the diagram runs beginning-to-end down the
+  page. The arrow still points at the dependency, which is what
+  \`diagram analyse\` walks. Flipping \`from\`/\`to\` to move a box would
+  buy nothing and would invert the blast radius.
+- KIND IS READ, NEVER GUESSED. Rule 9 governs it like any other claim:
+  if you opened the call site, you know whether it awaits a response;
+  if you did not, leave \`kind\` off. An edge with no kind draws exactly
+  as edges always have.
+
+### Numbering a flow (\`1 · \`, \`2 · \`) — stated order
+
+A label that STARTS with a number and a separator states the reading
+order: \`"1 · Sources"\`, \`"2 · Pull"\`, \`"3 · Tag"\`. The viewer draws
+numbered siblings in numeric order — first at the top, or at the left
+under \`direction: "RIGHT"\` — even where no edge runs between them.
+
+- It orders SIBLINGS ONLY: numbers in one container say nothing about
+  numbers in another. A flow that must read 1-2-3-4-5 in order has to
+  live in one container, or the boxes are in different boundaries and
+  no layout can interleave them.
+- Number a flow when the user asks to see stages or an order. Do NOT
+  number ordinary components: \`"PostgreSQL 16/17"\` and \`"2 factor
+  auth"\` are names, not steps, and are left alone because the
+  separator is required.
+- Gaps are fine. \`2, 3, 5\` reads in that order.
+- Unnumbered siblings are not moved.
 
 ### Bindings (\`bindings\`) — where a claim was read
 

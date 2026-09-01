@@ -13,16 +13,31 @@
 // node itself — groups and nodes share one id namespace, so the group
 // id goes straight into sources/targets.
 //
+// STATED ORDER (§5.6). A label that starts with an ordinal — "1 · Sources",
+// "2 · Pull" — is a reading order the author wrote down, and it is applied
+// here as an ELK layer partition so siblings are drawn in that order even
+// when no edge runs between them. See layout/order.ts.
+//
+// READING ORDER (§5.5). ELK ranks a node by the direction of the edges
+// touching it, so a few edges are declared to ELK REVERSED — see
+// layout/flow.ts for which and why. That is a layout-rank decision only: the
+// document is untouched, and fromElk turns the resulting polyline back into
+// document order so nothing downstream knows it happened.
+//
 // Pure function; no DOM. Model order (doc array order) is preserved
 // everywhere so 'considerModelOrder' keeps layouts stable across turns.
 
 import type { GraphDoc } from '@diagram-engine/core';
 import type { ElkExtendedEdge, ElkNode } from 'elkjs';
+import { flowReversedEdgeIds } from './flow.js';
+import { orderingEdges } from './order.js';
 import { EDGE_LABEL_FONT, EDGE_LABEL_H, measureText, sizeNode } from './measure.js';
 import { EDGE_LABEL_OPTIONS, GROUP_OPTIONS, ROOT_OPTIONS } from './options.js';
 
 /** Id of the synthetic ELK root container. */
 export const ELK_ROOT_ID = 'root';
+
+
 
 /**
  * Convert a GraphDoc into the ELK input graph. Geometry produced from
@@ -76,11 +91,19 @@ export function toElk(doc: GraphDoc): ElkNode {
   // A labelled edge declares its label to ELK (sized at the smaller
   // EDGE_LABEL_FONT) so layout reserves space and places it inline on
   // the edge path (EDGE_LABEL_OPTIONS); fromElk reads the position back.
+  //
+  // A flow-reversed edge (§5.5) is declared with its endpoints SWAPPED, which
+  // is the only way to tell ELK to rank the far end first — there is no
+  // per-edge "rank me backwards" option. The swap is invisible past this
+  // point: the LCA is symmetric so the container is unchanged, and fromElk
+  // reverses the returned polyline back into document order.
+  const flowReversed = flowReversedEdgeIds(doc);
   for (const e of doc.edges) {
+    const reversed = flowReversed.has(e.id);
     const edge: ElkExtendedEdge = {
       id: e.id,
-      sources: [e.from],
-      targets: [e.to],
+      sources: [reversed ? e.to : e.from],
+      targets: [reversed ? e.from : e.to],
     };
     if (e.label !== undefined) {
       edge.labels = [
@@ -94,6 +117,16 @@ export function toElk(doc: GraphDoc): ElkNode {
     }
     const container = lcaContainer(e.from, e.to, parentOf, containers) ?? root;
     container.edges!.push(edge);
+  }
+
+  // Pass 5: §5.6's ordering edges — invisible, and declared in the container
+  // whose children they order (both endpoints are its direct children, so
+  // that container IS the LCA). They carry no label and are dropped by
+  // fromElk, so nothing downstream can draw one; what they buy is the layer
+  // ordering the numbered labels asked for.
+  for (const [parent, edges] of orderingEdges(doc)) {
+    const container = (parent !== null && containers.get(parent)) || root;
+    container.edges!.push(...edges);
   }
 
   return root;

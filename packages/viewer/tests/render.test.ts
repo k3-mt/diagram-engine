@@ -260,10 +260,13 @@ describe('edges', () => {
   });
 
   it('defines the §6.7 arrowhead marker exactly once, in the canvas defs', () => {
-    // Three markers now live in <defs>: §6.7's arrow plus the ERD
-    // crow's-foot pair (crow-one, crow-many) — each defined exactly once.
-    expect(html.split('<marker').length - 1).toBe(3);
+    // Four markers now live in <defs>: §6.7's arrow, §3.9's open return head,
+    // and the ERD crow's-foot pair (crow-one, crow-many) — each defined
+    // exactly once. A marker referenced but NOT defined renders as no head at
+    // all, with no error anywhere, so the count is what catches an omission.
+    expect(html.split('<marker').length - 1).toBe(4);
     expect(html.split('id="arrow"').length - 1).toBe(1);
+    expect(html.split('id="return-head"').length - 1).toBe(1);
     const defs = html.slice(html.indexOf('<defs>'), html.indexOf('</defs>'));
     expect(defs).toContain('<marker');
     const m = renderToStaticMarkup(createElement(ArrowMarker, {}));

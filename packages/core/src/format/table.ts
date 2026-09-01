@@ -3,6 +3,7 @@
 // more reliably. Columns are padded within each section for scanability.
 
 import { formatBinding } from '../bindings/ref.js';
+import { edgeIsAsync } from '../schema/graph.js';
 import type { GBinding, GField, GraphDoc } from '../schema/graph.js';
 
 /**
@@ -74,7 +75,8 @@ function alignRows(rows: string[][]): string[] {
  * architecture-only diagram costs the agent exactly what it did before:
  *
  *   - the edges table grows a `cardinality` column when any edge carries one,
- *     and an `alt` column when any edge carries an alternative tag (§18.11)
+ *     an `alt` column when any edge carries an alternative tag (§18.11), and
+ *     `kind` / `returns` / `seq` columns when any edge carries those (§3.9)
  *   - ### Entities (id | fields) — one line per entity, columns comma-joined
  *   - ### Meta (id | key=value)  — only nodes that actually have meta
  *   - ### Bindings (kind | id | source=ref) — provenance (§3.8), nodes and
@@ -106,13 +108,32 @@ export function toTable(doc: GraphDoc): string {
   // shows the tag on every edge, `-` included, so "which edges are in the set"
   // is one column to scan rather than a JSON export away.
   const anyAlt = doc.edges.some((e) => e.alt !== undefined);
+  // §3.9's three, on the same terms as `cardinality` and `alt` above: a
+  // column each, present only when some edge uses it, so a document that
+  // never says `kind` reads exactly as it did before the field existed.
+  const anyKind = doc.edges.some((e) => e.kind !== undefined);
+  const anyReturns = doc.edges.some((e) => e.returns !== undefined);
+  const anySeq = doc.edges.some((e) => e.seq !== undefined);
   lines.push(
-    `### Edges (id | from -> to | label | style${anyCardinality ? ' | cardinality' : ''}${anyAlt ? ' | alt' : ''})`,
+    `### Edges (id | from -> to | label | style${anyKind ? ' | kind' : ''}${anyReturns ? ' | returns' : ''}${anySeq ? ' | seq' : ''}${anyCardinality ? ' | cardinality' : ''}${anyAlt ? ' | alt' : ''})`,
   );
   lines.push(
     ...alignRows(
       doc.edges.map((e) => {
-        const row = [e.id, `${e.from} -> ${e.to}`, e.label ?? '-', e.style ?? 'solid'];
+        // The style column reports how the edge is DRAWN, not the raw field.
+        // Since §3.9 a `kind: "publish"` edge is dashed with no `style` set,
+        // and printing "solid" for it would put the table and the picture in
+        // direct contradiction on the one column an agent scans to check its
+        // own work.
+        const row = [
+          e.id,
+          `${e.from} -> ${e.to}`,
+          e.label ?? '-',
+          edgeIsAsync(e) ? 'dashed' : 'solid',
+        ];
+        if (anyKind) row.push(e.kind ?? '-');
+        if (anyReturns) row.push(e.returns ?? '-');
+        if (anySeq) row.push(e.seq === undefined ? '-' : String(e.seq));
         if (anyCardinality) row.push(e.cardinality ?? '-');
         if (anyAlt) row.push(e.alt ?? '-');
         return row;

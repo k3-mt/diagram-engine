@@ -43,6 +43,16 @@ export const GEdgeChangesSchema = GEdgeSchema.omit({ id: true })
     label: GEdgeSchema.shape.label.unwrap().nullable().optional(),
     cardinality: GEdgeSchema.shape.cardinality.unwrap().nullable().optional(),
     alt: GEdgeSchema.shape.alt.unwrap().nullable().optional(),
+    // §3.9's three, for the same reason as the three above: an edge relabelled
+    // from a call to a plain write has to be able to LOSE its `returns`, and
+    // an edge dropped out of a numbered flow has to be able to lose its `seq`
+    // — otherwise the only correction is removeEdge + addEdge, which rule 3
+    // forbids and which loses the edge id. `seq` is a number rather than a
+    // string, which changes nothing here: no GEdge property stores null, so
+    // null is still unambiguously "remove this".
+    kind: GEdgeSchema.shape.kind.unwrap().nullable().optional(),
+    returns: GEdgeSchema.shape.returns.unwrap().nullable().optional(),
+    seq: GEdgeSchema.shape.seq.unwrap().nullable().optional(),
   });
 
 export const AddNodeOpSchema = z.object({

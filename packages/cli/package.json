@@ -1,7 +1,7 @@
 {
   "name": "@diagram-engine/cli",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "diagram / diagram-mcp binaries: CLI commands, MCP stdio server, viewer server, headless SVG export.",
   "type": "module",
   "main": "src/index.ts",
@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/bundle.mjs"
   },
   "dependencies": {
-    "@diagram-engine/core": "0.1.0",
+    "@diagram-engine/core": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "commander": "^12.1.0",
     "elkjs": "^0.9.3",

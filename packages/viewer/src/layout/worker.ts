@@ -25,6 +25,7 @@
 import type { GraphDoc } from '@diagram-engine/core';
 import type { ElkNode } from 'elkjs';
 import { layoutElkGraph, type ElkEngine } from './runLayout.js';
+import { flowReversedEdgeIds } from './flow.js';
 import { toElk } from './toElk.js';
 import type { LaidOut } from './fromElk.js';
 
@@ -36,6 +37,18 @@ import type { LaidOut } from './fromElk.js';
 export interface LayoutRequest {
   id: number;
   graph: ElkNode;
+  /**
+   * Ids of the edges toElk handed to ELK with their endpoints swapped so
+   * they would rank the far end first (§5.5, layout/flow.ts).
+   *
+   * It travels in the MESSAGE because the protocol sends the ELK graph, not
+   * the document, and the swap cannot be recovered from the graph — a
+   * reversed edge looks exactly like an edge that was authored that way. The
+   * worker hands it to flatten, which puts the polylines back into document
+   * order. Optional, so a message from before §5.5 still lays out (with no
+   * edge reversed, which is what such a document meant).
+   */
+  flowReversed?: string[];
 }
 
 /** Worker -> main thread. */
@@ -56,7 +69,11 @@ export async function handleLayoutRequest(
     return {
       id: req.id,
       ok: true,
-      laidOut: await layoutElkGraph(req.graph, elk),
+      laidOut: await layoutElkGraph(
+        req.graph,
+        elk,
+        req.flowReversed === undefined ? undefined : new Set(req.flowReversed),
+      ),
     };
   } catch (err) {
     return {
@@ -108,7 +125,13 @@ export class LayoutClient {
    */
   request(doc: GraphDoc): number {
     const id = ++this.latestId;
-    const msg: LayoutRequest = { id, graph: toElk(doc) };
+    const msg: LayoutRequest = {
+      id,
+      graph: toElk(doc),
+      // Derived from the same document toElk just swapped, on this thread,
+      // so the two can never disagree about which edges were reversed.
+      flowReversed: [...flowReversedEdgeIds(doc)],
+    };
     this.worker.postMessage(msg);
     return id;
   }

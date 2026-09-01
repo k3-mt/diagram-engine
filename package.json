@@ -1,7 +1,7 @@
 {
   "name": "diagram-engine",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Prompt-driven architecture diagramming engine — local agent architecture, no API keys",
   "workspaces": [
     "packages/*"

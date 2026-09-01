@@ -20,6 +20,7 @@
 import ELK from 'elkjs/lib/elk.bundled.js';
 import type { ElkNode } from 'elkjs';
 import type { GraphDoc } from '@diagram-engine/core';
+import { flowReversedEdgeIds } from './flow.js';
 import { toElk } from './toElk.js';
 import { flatten, type LaidOut } from './fromElk.js';
 
@@ -41,10 +42,11 @@ function bundledElk(): ElkEngine {
  */
 export async function layoutElkGraph(
   graph: ElkNode,
-  elk: ElkEngine = bundledElk()
+  elk: ElkEngine = bundledElk(),
+  flowReversed?: ReadonlySet<string>
 ): Promise<LaidOut> {
   const laidOut = await elk.layout(graph);
-  return flatten(laidOut);
+  return flatten(laidOut, flowReversed);
 }
 
 /**
@@ -57,5 +59,8 @@ export async function layout(
   doc: GraphDoc,
   elk?: ElkEngine
 ): Promise<LaidOut> {
-  return layoutElkGraph(toElk(doc), elk);
+  // §5.5's reversed set is derived from the DOCUMENT, so it is computed here
+  // rather than recovered from the ELK graph — toElk has already swapped
+  // those endpoints and the swap is not recoverable from its output.
+  return layoutElkGraph(toElk(doc), elk, flowReversedEdgeIds(doc));
 }

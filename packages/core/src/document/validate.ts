@@ -1,5 +1,6 @@
 // document/validate.ts — invariants V1–V13 (spec §3.3; V11–V13 cover ERD mode,
-// spec Part 13 item 2) plus V18–V19 (redundancy, spec §18.11).
+// spec Part 13 item 2), V18–V19 (redundancy, spec §18.11) and V20–V21 (edge
+// kind, spec §3.9).
 //
 // Run after every patch, before committing. Error strings are part of the
 // contract: the agent reads them and self-corrects, so they must say what
@@ -13,6 +14,8 @@ import {
   BindingSourceSchema,
   MAX_EDGE_BINDINGS,
   MAX_NODE_BINDINGS,
+  RETURNING_KINDS,
+  edgeIsAsync,
 } from '../schema/graph.js';
 import { elementIds, isValidId, nearestId, slugify } from './ids.js';
 
@@ -402,7 +405,7 @@ export function validate(doc: GraphDoc): ValidationResult {
   const altSets = new Map<string, { tag: string; from: string; edges: typeof doc.edges }>();
   for (const e of doc.edges) {
     if (e.alt === undefined) continue;
-    if (e.style === 'dashed') continue; // V19 reports it; it is not an alternative
+    if (edgeIsAsync(e)) continue; // V19 reports it; it is not an alternative
     if (!allIdSet.has(e.from) || !allIdSet.has(e.to)) continue;
     const key = `${e.from}\x00${e.alt}`;
     const set = altSets.get(key);
@@ -451,11 +454,51 @@ export function validate(doc: GraphDoc): ValidationResult {
   // propagation (§18.3), so tagging one as an alternative claims a redundancy
   // that changes nothing.
   for (const e of doc.edges) {
-    if (e.alt === undefined || e.style !== 'dashed') continue;
+    if (e.alt === undefined || !edgeIsAsync(e)) continue;
     if (!allIdSet.has(e.from) || !allIdSet.has(e.to)) continue;
+    // Name the reason the reader can SEE. An edge is async either because it
+    // says `style: "dashed"` or because its kind is one of the async ones, and
+    // "is dashed" would be a puzzle on an edge whose document says `publish`.
+    const because =
+      e.style === 'dashed' ? 'is dashed' : `is a "${e.kind ?? ''}" edge`;
     errors.push(
-      `edge "${e.id}" is dashed and carries alt "${e.alt}": asynchronous edges already contain failure; drop one`,
+      `edge "${e.id}" ${because} and carries alt "${e.alt}": asynchronous edges already contain failure; drop one`,
     );
+  }
+
+  // Edge-kind invariants (V20–V21, spec §3.9). `kind` says what the line
+  // MEANS and the viewer draws everything from it; these two stop a document
+  // from saying two different things about one line.
+  for (const e of doc.edges) {
+    // V20 — `kind` REPLACES `style` and `arrow`, never joins them. A
+    // `{"kind": "publish", "style": "solid"}` edge is a document asserting
+    // both that the call is asynchronous and that it is drawn synchronous,
+    // and whichever the renderer picks, the other half is a lie. Rejecting is
+    // the only answer that leaves the author in control of which they meant.
+    const conflicting = [
+      e.style === undefined ? undefined : 'style',
+      e.arrow === undefined ? undefined : 'arrow',
+    ].filter((k): k is string => k !== undefined);
+    if (e.kind !== undefined && conflicting.length > 0) {
+      errors.push(
+        `edge "${e.id}" has kind "${e.kind}" and ${conflicting.join(' and ')}: kind already decides how the edge is drawn — drop ${conflicting.join(' and ')}`,
+      );
+    }
+
+    // V21 — `returns` names the label on the return leg, so it needs a kind
+    // that HAS one. On a write or a publish nothing comes back, and a payload
+    // named on a leg the viewer will not draw is a claim the picture cannot
+    // show. The message names the kinds that would make it drawable rather
+    // than only saying no.
+    if (
+      e.returns !== undefined &&
+      e.kind !== undefined &&
+      !RETURNING_KINDS.has(e.kind)
+    ) {
+      errors.push(
+        `edge "${e.id}" has returns "${e.returns}" but kind "${e.kind}": nothing comes back along it — use kind ${[...RETURNING_KINDS].map((k) => `"${k}"`).join(', ')}, or drop returns`,
+      );
+    }
   }
 
   return errors.length ? { ok: false, errors } : { ok: true };

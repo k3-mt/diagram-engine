@@ -13,6 +13,21 @@
 //      hovered node, above everything. Optional: absent unless the parent
 //      passes `hoveredId`. Layers 1–6 are untouched by it.
 //
+// EMPHASIS (§8.7) is the one thing that DOES reach into layers 3–6: when the
+// parent names a set of nodes and a set of edges, everything outside them is
+// drawn at a reduced opacity, and the named EDGES are drawn lit, in a colour
+// the parent chooses per edge.
+//
+// The lit edge is drawn by the edge itself, in layer 3, NOT as a second heavy
+// stroke in the overlay layer. That was the first attempt: layer 7 sits above
+// the edge labels and above an edge's own step badge, so the stroke meant to
+// highlight a connection was painted straight through the number and the
+// words on it. Lighting the edge in place keeps §8.1's z-order for free.
+//
+// Emphasis changes no position, no z-order and no markup for the elements it
+// does not touch, and with no emphasis set the frame is emitted
+// byte-identically to how it always was.
+//
 // Nodes above edges means an edge clipping a node corner is hidden, not
 // drawn across it.
 //
@@ -28,7 +43,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { MouseEventHandler, ReactNode } from 'react';
 import type { GEdge, GNode, GraphDoc } from '@diagram-engine/core';
 import type { LaidOut, Rect } from '../layout/fromElk.js';
-import { EdgeLabel, EdgePath, ArrowMarker, CrowManyMarker, CrowOneMarker } from './EdgePath.js';
+import {
+  EdgeLabel,
+  EdgePath,
+  ArrowMarker,
+  CrowManyMarker,
+  CrowOneMarker,
+  ReturnMarker,
+} from './EdgePath.js';
 import { EntityBox, EntityContent, isEntityTable } from './EntityBox.js';
 import { GroupLabel, GroupRect } from './GroupRect.js';
 import { NodeBox, NodeContent, type HoverHandlers } from './NodeBox.js';
@@ -82,6 +104,32 @@ export interface HoverProps {
   hoverRing?: boolean;
   /** Extra SVG the parent wants painted in the hover layer. */
   hoverOverlay?: ReactNode;
+  /**
+   * What to keep at full strength (§8.7). Everything else — edges, edge
+   * labels, node boxes, node content — is drawn at `emphasis.dim`.
+   *
+   * GROUPS ARE NEVER DIMMED. A boundary is the answer to "where does this
+   * thing live", which is exactly what the reader is asking when they click a
+   * box; fading the vpc around the selected node would remove the context the
+   * selection exists to give.
+   *
+   * Null or absent means no emphasis, and the markup is unchanged.
+   */
+  emphasis?: Emphasis | null;
+}
+
+/** What to keep lit, in what colour, and how far to fade the rest. */
+export interface Emphasis {
+  nodes: ReadonlySet<string>;
+  /**
+   * Edge id -> the colour to draw it in. A map rather than a set because the
+   * two directions of a selection are told apart by hue (see
+   * SelectionOverlay), and Canvas has no business knowing which is which — it
+   * is handed the answer.
+   */
+  edges: ReadonlyMap<string, string>;
+  /** Opacity for everything outside the sets, 0–1. */
+  dim: number;
 }
 
 export interface CanvasProps extends HoverProps {
@@ -167,18 +215,33 @@ function placedNodes(
   });
 }
 
-/** Laid-out edges paired with their document entry and composed path. */
+/**
+ * Laid-out edges paired with their document entry, composed path and the
+ * POLYLINE behind it.
+ *
+ * The polyline travels alongside the `d` string because §3.9's return leg is
+ * derived from it: a `d` string has already had hops and corner arcs baked in
+ * and cannot be offset sideways, whereas the polyline is the plain route ELK
+ * produced. Handing both down costs nothing — they are the same objects the
+ * layout already made — and keeps EdgePath the only place that knows a return
+ * leg exists.
+ */
 function placedEdges(
   doc: GraphDoc,
   laidOut: LaidOut,
   paths: string[],
-): { edge: GEdge; d: string; label: LaidOut['edges'][number]['label'] }[] {
+): {
+  edge: GEdge;
+  d: string;
+  points: LaidOut['edges'][number]['points'];
+  label: LaidOut['edges'][number]['label'];
+}[] {
   const byId = new Map<string, GEdge>(doc.edges.map((e) => [e.id, e]));
   return laidOut.edges.flatMap((abs, i) => {
     const edge = byId.get(abs.id);
     const d = paths[i];
     if (edge === undefined || d === undefined || d === '') return [];
-    return [{ edge, d, label: abs.label }];
+    return [{ edge, d, points: abs.points, label: abs.label }];
   });
 }
 
@@ -196,10 +259,20 @@ export function FrameLayers({
   onNodeClick,
   hoverRing = true,
   hoverOverlay,
+  emphasis,
 }: Frame & HoverProps): JSX.Element {
   const groups = orderedGroups(doc, laidOut);
   const nodes = placedNodes(doc, laidOut);
   const edges = placedEdges(doc, laidOut, paths);
+
+  // The two dimming tests. Both answer `undefined` when no emphasis is set,
+  // and an `opacity` of undefined emits no attribute at all — which is what
+  // keeps the un-emphasised frame byte-identical to what it was.
+  const nodeOpacity = (id: string): number | undefined =>
+    emphasis == null || emphasis.nodes.has(id) ? undefined : emphasis.dim;
+  const edgeOpacity = (id: string): number | undefined =>
+    emphasis == null || emphasis.edges.has(id) ? undefined : emphasis.dim;
+  const edgeLit = (id: string): string | undefined => emphasis?.edges.get(id);
 
   // Inspection handlers, attached to BOTH node layers so the pointer is
   // tracked over the box and over its text alike. Absent when the parent
@@ -246,31 +319,61 @@ export function FrameLayers({
       </g>
       {/* 3 — edge paths */}
       <g data-layer="edges">
-        {edges.map(({ edge, d }) => (
-          <EdgePath key={edge.id} edge={edge} d={d} />
-        ))}
+        {edges.map(({ edge, d, points }) => {
+          const o = edgeOpacity(edge.id);
+          const lit = edgeLit(edge.id);
+          // Wrapped ONLY when it is actually dimmed. A <g> around every edge
+          // in every frame would change markup the render tests and every
+          // previously exported SVG can see, for the benefit of the frames
+          // that have no emphasis — which is nearly all of them.
+          return o === undefined ? (
+            <EdgePath key={edge.id} edge={edge} d={d} points={points} lit={lit} />
+          ) : (
+            <g key={edge.id} opacity={o}>
+              <EdgePath edge={edge} d={d} points={points} />
+            </g>
+          );
+        })}
       </g>
       {/* 4 — edge labels, each with a halo */}
       <g data-layer="edge-labels">
-        {edges.map(({ edge, label }) =>
-          label === undefined ? null : (
+        {edges.map(({ edge, label }) => {
+          if (label === undefined) return null;
+          const o = edgeOpacity(edge.id);
+          return o === undefined ? (
             <EdgeLabel key={edge.id} edge={edge} label={label} />
-          ),
-        )}
+          ) : (
+            <g key={edge.id} opacity={o}>
+              <EdgeLabel edge={edge} label={label} />
+            </g>
+          );
+        })}
       </g>
       {/* 5 — node boxes (an entity WITH fields is drawn as a table) */}
       <g data-layer="nodes">
         {nodes.map(({ node, rect }) => {
           const Box = isEntityTable(node) ? EntityBox : NodeBox;
-          return <Box key={node.id} node={node} rect={rect} {...hoverOf(node.id)} />;
+          const o = nodeOpacity(node.id);
+          return o === undefined ? (
+            <Box key={node.id} node={node} rect={rect} {...hoverOf(node.id)} />
+          ) : (
+            <g key={node.id} opacity={o}>
+              <Box node={node} rect={rect} {...hoverOf(node.id)} />
+            </g>
+          );
         })}
       </g>
       {/* 6 — node icons and labels (entity: header + field rows) */}
       <g data-layer="node-content">
         {nodes.map(({ node, rect }) => {
           const Content = isEntityTable(node) ? EntityContent : NodeContent;
-          return (
+          const o = nodeOpacity(node.id);
+          return o === undefined ? (
             <Content key={node.id} node={node} rect={rect} {...hoverOf(node.id)} />
+          ) : (
+            <g key={node.id} opacity={o}>
+              <Content node={node} rect={rect} {...hoverOf(node.id)} />
+            </g>
           );
         })}
       </g>
@@ -341,6 +444,8 @@ export function Canvas({
     <g data-canvas="true" transform={transform}>
       <defs>
         <ArrowMarker />
+        {/* §3.9: the open head that says something comes back */}
+        <ReturnMarker />
         {/* ERD: the crow's-foot pair, defined once alongside §6.7's arrow */}
         <CrowOneMarker />
         <CrowManyMarker />

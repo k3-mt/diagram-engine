@@ -78,3 +78,12 @@ export {
 export { buildHopSpans, mergeClusters, segKey, type Span } from './hops.js';
 export { buildPath, buildPathCmds, serializePath, type PathCmd } from './path.js';
 export { roundCorners, CORNER_R, MIN_ROUND_SEG, HOP_CLEARANCE } from './corners.js';
+export {
+  // §3.9: anchoring the step badge and the return label on a real route.
+  midpointAlong,
+  pathLength,
+  pointAlong,
+  pointAtFraction,
+  pointNearStart,
+  type PointOnPath,
+} from './polyline.js';

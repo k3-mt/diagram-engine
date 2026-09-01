@@ -56,6 +56,7 @@ import {
   ArrowMarker,
   CrowManyMarker,
   CrowOneMarker,
+  ReturnMarker,
 } from '../render/EdgePath.js';
 import { theme } from '../render/theme.js';
 
@@ -198,6 +199,10 @@ export function renderSvgString(
   // <defs>, so an exported arrowhead cannot differ from a drawn one.
   const defs = [
     renderToStaticMarkup(createElement(ArrowMarker)),
+    // §3.9's open return head. Absent from the <defs> an edge that references
+    // it renders with NO head at that end and no error anywhere — the export
+    // would silently drop the half of the picture that says a call answers.
+    renderToStaticMarkup(createElement(ReturnMarker)),
     renderToStaticMarkup(createElement(CrowOneMarker)),
     renderToStaticMarkup(createElement(CrowManyMarker)),
   ].join('');

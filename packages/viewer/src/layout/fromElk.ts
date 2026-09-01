@@ -20,6 +20,7 @@
 // and is NEVER persisted to the document (spec §1.4/§3.1).
 
 import type { ElkNode } from 'elkjs';
+import { isOrderingEdge } from './order.js';
 
 /** An absolute rectangle, in root coordinates. Never persisted (§1.4). */
 export interface Rect {
@@ -50,6 +51,9 @@ export interface AbsEdge {
   label?: AbsEdgeLabel;
 }
 
+/** No edge was flow-reversed — the default, and every pre-§3.9 document. */
+const EMPTY: ReadonlySet<string> = new Set<string>();
+
 /** Result of flattening an ELK layout to absolute coordinates. */
 export interface LaidOut {
   /** Total laid-out canvas size (the ELK root's dimensions). */
@@ -67,7 +71,10 @@ export interface LaidOut {
  * toElk built; it is excluded from the output rects, but its size
  * becomes the canvas width/height.
  */
-export function flatten(elkRoot: ElkNode): LaidOut {
+export function flatten(
+  elkRoot: ElkNode,
+  flowReversed: ReadonlySet<string> = EMPTY,
+): LaidOut {
   // Absolute origin of every container (root included — pass 2 needs
   // it to offset root-contained edges).
   const origins = new Map<string, AbsPoint>();
@@ -99,6 +106,11 @@ export function flatten(elkRoot: ElkNode): LaidOut {
     const o = origins.get(n.id);
     if (o !== undefined) {
       for (const e of n.edges ?? []) {
+        // §5.6: an ordering edge exists only to rank two boxes. It is not in
+        // the document, has no arrowhead and no label, and must never reach
+        // the renderer OR the crossing pass — a hop drawn over an invisible
+        // line is a hop over nothing, which is worse than a crossing.
+        if (isOrderingEdge(e.id)) continue;
         // ELK positions edge labels relative to the SAME container as
         // the edge's sections (the LCA that toElk declared the edge
         // in), so the label takes the same offset as the points. A
@@ -118,6 +130,14 @@ export function flatten(elkRoot: ElkNode): LaidOut {
           const pts = [s.startPoint, ...(s.bendPoints ?? []), s.endPoint].map(
             (p) => ({ x: p.x + o.x, y: p.y + o.y }),
           );
+          // §5.5: this edge was handed to ELK with its endpoints swapped so
+          // it would rank the far end first, so ELK's polyline runs
+          // target -> source. Put it back into DOCUMENT order here, at the
+          // one boundary that knows about the swap. Everything downstream —
+          // the arrowheads, which end the return head goes on, where the step
+          // badge is anchored — reads the polyline as source -> target and
+          // must never learn that layout thought otherwise.
+          if (flowReversed.has(e.id)) pts.reverse();
           edges.push(
             label !== undefined
               ? { id: e.id, points: pts, label }

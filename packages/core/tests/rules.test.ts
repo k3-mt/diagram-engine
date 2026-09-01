@@ -103,6 +103,23 @@ describe('compactRules', () => {
     //     the room it takes.
     // The full table and the group kinds are still in rules.md, which
     // `diagram rules` prints and `diagram init` installs as the skill.
+    //
+    // §3.9 (edge kind) put a new vocabulary into rule 6 and one clause into
+    // rule 4, and again found the room rather than borrowing it — from the
+    // two rules the new vocabulary SUBSUMES, which is the only honest place
+    // to take it from:
+    //   * rule 6 was "DASHED for asynchronous relationships (queue
+    //     consumption, events, webhooks). Solid for synchronous calls." Its
+    //     whole content is now one consequence of `kind`, so the rule states
+    //     the kinds and keeps the style fallback in five words.
+    //   * rule 5's examples — "reads", "publishes", "grpc" — were three
+    //     labels illustrating a verb the `kind` enum now supplies by name,
+    //     in the same tool listing, from diagram_patch's generated schema.
+    //     The rule keeps its instruction and drops the illustration.
+    // `returns` and `seq` are deliberately NOT here: they reach the agent as
+    // field names in that same generated inputSchema, and the full
+    // vocabulary is in rules.md's addendum. Same argument as the group kinds
+    // above.
     expect(compact.length).toBeLessThan(3000);
   });
 
@@ -166,6 +183,19 @@ describe('compactRules', () => {
     // 20 runs under rule 9 alone). Pinning the headline alone would let the
     // half that does the work be trimmed against the cap.
     expect(compact).toContain('15. CITE WHAT YOU OPENED, NOTHING ELSE.');
+    // §3.9's rule 6, and the half that does the work. Naming the five kinds
+    // is what makes the field usable at all — the agent cannot pick a value
+    // it has not been shown — and "INSTEAD of style and arrow" is the half
+    // V20 rejects patches over, so an agent without it earns a rejection on
+    // its first attempt. Pinned, or the next trim against the cap takes the
+    // list and leaves the headline.
+    expect(compact).toContain('call, read, write, publish, consume');
+    expect(compact).toContain('INSTEAD of style and arrow');
+    // Rule 4's clause. The arrow points at the DEPENDENCY and `kind` carries
+    // the data direction; without this sentence the obvious reading of a new
+    // `read` kind is to flip the edge, which would reverse every failure
+    // prediction `analyse` makes.
+    expect(compact).toContain('`kind` says so and the arrow does not');
     expect(compact).toContain('`diagram check --bindings` resolves every one');
     expect(compact).toContain('an invented citation does not survive the next commit');
     // Rule 9 names the mechanism. Until P5-01 there was nowhere on a GEdge to

@@ -44,7 +44,7 @@ import { bindingHref, type EditorScheme } from './bindingLink.js';
 import { theme } from './theme.js';
 
 /** Card width, px. Fixed so the flip math needs no measurement. */
-export const CARD_W = 260;
+export const CARD_W = 300;
 /** Gap between the cursor and the card. */
 export const CARD_OFFSET = 14;
 /** Minimum gap between the card and the container edge. */
@@ -56,6 +56,52 @@ const LINE_H = 16;
 const HEAD_H = 46;
 const SECTION_GAP = 8;
 const PAD = 10;
+
+// --- the wrap model ------------------------------------------------------
+//
+// NOTHING IN THIS CARD IS EVER CLIPPED. The card exists to answer "what is
+// this box" without a click, and a meta value, a field annotation or a file
+// path cut off at `overflow: hidden` answers it with a lie of omission --
+// the reader cannot tell whether they are seeing the whole value or a
+// prefix. So every row wraps to as many lines as it needs, and the card
+// grows; only the CARD as a whole scrolls, and only when it runs out of
+// container.
+//
+// That makes the height a function of how the text wraps, which the flip
+// math (placeCard) has to know BEFORE the card is in the DOM -- it is a
+// pure function with no measurement, deliberately (see the header note).
+// So the line count is ESTIMATED from an average glyph advance. It only
+// feeds placement: an estimate that is a line short flips the card a few
+// pixels early, and the maxHeight clamp plus `overflow-y: auto` still keep
+// it on screen. It can never clip content.
+
+/** Content width inside the paddings, px. */
+const CONTENT_W = CARD_W - PAD * 2;
+/** Width of the key column on a meta row, px. */
+const KEY_W = 78;
+/** Gap between the two columns of a row, px. */
+const ROW_GAP = 8;
+/** Width a meta value or a field annotation wraps within, px. */
+const VALUE_W = CONTENT_W - KEY_W - ROW_GAP;
+/** Width a field NAME wraps within, px (it shares the row with the type). */
+const FIELD_NAME_W = CONTENT_W - KEY_W - ROW_GAP;
+/** Width a binding chip's text wraps within, px (chip padding + border). */
+const CHIP_W = CONTENT_W - 16;
+
+/** Average glyph advance at 11px system-ui, px. */
+const CHAR_W = 5.9;
+/** Average glyph advance at 10px ui-monospace, px. */
+const MONO_CHAR_W = 6.0;
+
+/**
+ * How many lines `text` takes when wrapped into `width` px. Estimated from
+ * an average advance -- see the wrap-model note above for why an estimate
+ * is the right tool here and what it can and cannot get wrong.
+ */
+export function wrappedLines(text: string, width: number, charW = CHAR_W): number {
+  const perLine = Math.max(1, Math.floor(width / charW));
+  return Math.max(1, Math.ceil(text.length / perLine));
+}
 
 /**
  * The meta rows actually shown. COLLAPSED_META_KEY is deriveView's private
@@ -79,16 +125,63 @@ export function kindText(node: GNode): string {
   return kind === undefined || kind === '' ? 'collapsed group' : `collapsed ${kind}`;
 }
 
-/** Estimated card height for `node`, used by the flip math. */
+/**
+ * The text of a field row's right-hand column -- type, key flags, nullability
+ * and note, joined. One function so the height estimate and the markup can
+ * never disagree about what is on the line.
+ */
+export function fieldDetail(f: NonNullable<GNode['fields']>[number]): string {
+  return [
+    f.type,
+    f.pk === true ? 'PK' : undefined,
+    f.fk === true ? 'FK' : undefined,
+    f.nullable === true ? 'nullable' : undefined,
+    f.note,
+  ]
+    .filter((s): s is string => s !== undefined)
+    .join(' \u00b7 ');
+}
+
+/**
+ * Estimated card height for `node`, used by the flip math.
+ *
+ * Every row is counted at the number of lines it WRAPS to, not at one line
+ * apiece: a 160-character note or a deep repo path is several lines tall and
+ * a card placed as though it were one would ride off the bottom of the
+ * container.
+ */
 export function cardHeight(node: GNode): number {
-  const metaCount = visibleMeta(node).length;
-  const fieldCount = node.fields?.length ?? 0;
-  const bindingCount = node.bindings?.length ?? 0;
+  const meta = visibleMeta(node);
+  const fields = node.fields ?? [];
+  const bindings = node.bindings ?? [];
   let h = HEAD_H + PAD;
-  if (node.note !== undefined) h += LINE_H + 2;
-  if (metaCount > 0) h += SECTION_GAP + metaCount * LINE_H;
-  if (bindingCount > 0) h += SECTION_GAP + LINE_H + bindingCount * (LINE_H + 4);
-  if (fieldCount > 0) h += SECTION_GAP + LINE_H + fieldCount * LINE_H;
+  if (node.note !== undefined) {
+    h += wrappedLines(node.note, CONTENT_W) * LINE_H + 2;
+  }
+  if (meta.length > 0) {
+    h += SECTION_GAP;
+    for (const [k, v] of meta) {
+      // The row is as tall as its taller column.
+      h +=
+        Math.max(wrappedLines(k, KEY_W), wrappedLines(v, VALUE_W)) * LINE_H;
+    }
+  }
+  if (bindings.length > 0) {
+    h += SECTION_GAP + LINE_H;
+    for (const b of bindings) {
+      h += wrappedLines(formatBinding(b), CHIP_W, MONO_CHAR_W) * LINE_H + 4;
+    }
+  }
+  if (fields.length > 0) {
+    h += SECTION_GAP + LINE_H;
+    for (const f of fields) {
+      h +=
+        Math.max(
+          wrappedLines(f.name, FIELD_NAME_W),
+          wrappedLines(fieldDetail(f), KEY_W),
+        ) * LINE_H;
+    }
+  }
   return h;
 }
 
@@ -159,24 +252,35 @@ export interface HoverCardProps {
   onChipsLeave?: () => void;
 }
 
+// `align-items: baseline` keeps a one-line key sitting on the first line of a
+// value that wrapped to four, instead of floating in the middle of them.
 const rowStyle: CSSProperties = {
   display: 'flex',
-  gap: 8,
+  gap: ROW_GAP,
+  alignItems: 'baseline',
   lineHeight: `${LINE_H}px`,
-  whiteSpace: 'nowrap',
 };
 
+// A FIXED key column, not `0 0 auto` with a min-width: the keys have to line
+// up down the card now that the values beside them run to several lines, and
+// a column that sizes to its own content puts every value at a different x.
+// `overflowWrap: anywhere` so a 24-character key breaks rather than pushing
+// the value column off the card.
 const keyStyle: CSSProperties = {
   color: theme.text.secondary,
-  flex: '0 0 auto',
-  minWidth: 68,
+  flex: `0 0 ${KEY_W}px`,
+  overflowWrap: 'anywhere',
 };
 
+// No `overflow: hidden`, no `text-overflow: ellipsis`. See the wrap-model
+// note above: this card never clips. `anywhere` rather than `break-word`
+// because the values that overflow are the ones with no spaces to break at —
+// URLs, image tags, repo paths, ARNs.
 const valueStyle: CSSProperties = {
   color: theme.text.primary,
   flex: '1 1 auto',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
+  minWidth: 0,
+  overflowWrap: 'anywhere',
 };
 
 const sectionStyle: CSSProperties = {
@@ -185,18 +289,23 @@ const sectionStyle: CSSProperties = {
   borderTop: `1px solid ${theme.node.stroke}`,
 };
 
+// A chip shows the WHOLE ref. An ellipsised path is the one thing on this
+// card a reader is most likely to want to copy or type, and a prefix of it is
+// useless — so the chip wraps inside itself and grows to as many lines as the
+// ref needs.
 const chipStyle: CSSProperties = {
   display: 'inline-block',
   maxWidth: '100%',
+  boxSizing: 'border-box',
   padding: '1px 6px',
   marginTop: 4,
   marginRight: 4,
   borderRadius: 4,
   border: `1px solid ${theme.node.stroke}`,
   font: '400 10px ui-monospace, SFMono-Regular, Menlo, monospace',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
+  lineHeight: `${LINE_H}px`,
+  whiteSpace: 'normal',
+  overflowWrap: 'anywhere',
   verticalAlign: 'top',
 };
 
@@ -334,17 +443,7 @@ export function HoverCard({
               >
                 {f.name}
               </span>
-              <span style={{ ...keyStyle, minWidth: 0, textAlign: 'right' }}>
-                {[
-                  f.type,
-                  f.pk === true ? 'PK' : undefined,
-                  f.fk === true ? 'FK' : undefined,
-                  f.nullable === true ? 'nullable' : undefined,
-                  f.note,
-                ]
-                  .filter((s): s is string => s !== undefined)
-                  .join(' · ')}
-              </span>
+              <span style={{ ...keyStyle, textAlign: 'right' }}>{fieldDetail(f)}</span>
             </div>
           ))}
         </div>

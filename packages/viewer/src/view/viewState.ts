@@ -218,13 +218,49 @@ export function nextFocusTarget(
 }
 
 /**
+ * Focus ONE NAMED GROUP, or leave focus entirely when `id` is null.
+ *
+ * This is what the focus PICKER calls. It supersedes the cycling in
+ * selectPreset below for every UI path: a dropdown names its target outright,
+ * so there is no longer any reason to reach the fourth group by pressing a
+ * button four times.
+ *
+ * "No focus" resolves to `eng` — nothing collapsed. Leaving focus means
+ * un-isolating, and the whole graph is the honest thing to show; it does not
+ * try to restore whichever preset preceded the focus, because a picker that
+ * quietly reinstates a state the user cannot see named in it is a picker that
+ * lies about what it does. [exec] is one press away.
+ *
+ * An id that no longer names a group — the agent deleted it between the
+ * render and the click — is treated as "no focus" rather than stranding the
+ * view on a target that is gone.
+ */
+export function focusGroup(
+  doc: GraphDoc | null,
+  state: ViewState,
+  id: string | null,
+): ViewState {
+  if (doc === null) return state;
+  const known = id !== null && focusCandidates(doc).some((g) => g.id === id);
+  if (!known) {
+    const ids = collapsedFor(doc, 'eng', null);
+    return ids === null ? state : { local: ids, focus: null, selected: [] };
+  }
+  const ids = collapsedFor(doc, 'focus', id);
+  return ids === null ? state : { local: ids, focus: id, selected: [] };
+}
+
+/**
  * Press a button. Returns the NEXT state; never mutates the one it is given.
  *
  * [exec] and [eng] are idempotent — pressing the active one repaints the same
  * picture. [focus] is the odd one out: pressing it when focus is already
- * active ADVANCES to the next group, which is what makes a single button a
- * usable selector with no mouse selection available (see the header). The
- * first press only enters focus mode on whatever group is already inferred.
+ * active ADVANCES to the next group. That cycling is no longer how the VIEWER
+ * picks a target — the status strip has a dropdown now (focusGroup above) —
+ * but `focus` remains a preset name the CLI and the MCP tool share
+ * (`diagram view focus <id>`), and this is still the answer to "make focus
+ * active" when no id is given, which is what the preset vocabulary means by
+ * it.
  */
 export function selectPreset(
   doc: GraphDoc | null,
@@ -278,12 +314,8 @@ export interface ResolvedView {
   key: string;
   /** Which button is lit, or null when the collapsed list matches no preset. */
   active: ViewPresetName | null;
-  /** The group [focus] is pointed at, or null when there is nothing to focus. */
+  /** The group focus is pointed at, or null when there is nothing to focus. */
   focus: string | null;
-  /** That group's label, for the button text. */
-  focusLabel: string | null;
-  /** False when [focus] must render disabled (the document has no groups). */
-  focusEnabled: boolean;
 }
 
 /**
@@ -307,8 +339,6 @@ export function resolveView(doc: GraphDoc | null, state: ViewState): ResolvedVie
     key: collapsedKey(collapsed),
     active: activePreset(doc, collapsed, focus),
     focus,
-    focusLabel: focusCandidates(doc).find((g) => g.id === focus)?.label ?? null,
-    focusEnabled: canFocus(doc),
   };
 }
 

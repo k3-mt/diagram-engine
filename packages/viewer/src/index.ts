@@ -14,6 +14,17 @@ export const VIEWER_PACKAGE = '@diagram-engine/viewer';
 // --- M2 layout (spec §5) ---------------------------------------------------
 export { layout, layoutElkGraph } from './layout/runLayout.js';
 export { ELK_ROOT_ID, toElk } from './layout/toElk.js';
+// §5.5 reading order: which edges are ranked against their document
+// direction so a diagram reads beginning-to-end rather than dependency-first.
+export { flowReversedEdgeIds, OUTSIDE_TYPES } from './layout/flow.js';
+// §5.6 stated order: a label that begins "1 · " ranks its container's
+// children in numeric order, first at the top.
+export {
+  ORDER_EDGE_PREFIX,
+  isOrderingEdge,
+  leadingOrdinal,
+  orderingEdges,
+} from './layout/order.js';
 export {
   flatten,
   type AbsEdge,
@@ -71,9 +82,16 @@ export {
   CORNER_R,
   MIN_ROUND_SEG,
   HOP_CLEARANCE,
+  // §3.9: anchoring the step badge and the return label on a real route.
+  midpointAlong,
+  pathLength,
+  pointAlong,
+  pointAtFraction,
+  pointNearStart,
   type Crossing,
   type PathCmd,
   type Point,
+  type PointOnPath,
   type Seg,
   type Span,
 } from './geometry/index.js';
@@ -90,6 +108,7 @@ export {
   HOVER_RING_W,
   extendChord,
   type CanvasProps,
+  type Emphasis,
   type HoverProps,
 } from './render/Canvas.js';
 export {
@@ -106,6 +125,15 @@ export {
   cardinalityMarkers,
 } from './render/EdgePath.js';
 export { GroupLabel, GroupRect, GROUP_LABEL_FONT } from './render/GroupRect.js';
+// §3.9: what an edge's kind does to the way it is drawn.
+export {
+  edgeDash,
+  ReturnMarker,
+  RETURN_MARKER_ID,
+  LIT_W,
+  SEQ_R,
+  SEQ_ANCHOR,
+} from './render/EdgePath.js';
 export {
   NodeBox,
   NodeContent,
@@ -135,9 +163,34 @@ export {
   CARD_W,
   cardHeight,
   placeCard,
+  fieldDetail,
+  visibleMeta,
+  wrappedLines,
   type CardPlacement,
   type HoverCardProps,
 } from './render/HoverCard.js';
+// §8.7 selection: click a node, see everything about it and light up its
+// connections. The model is pure and lives in view/; the panel and the canvas
+// overlay both render the same object, so they cannot disagree.
+export {
+  selectionView,
+  type Connection,
+  type SelectionView,
+} from './view/selection.js';
+export {
+  DetailPanel,
+  DETAIL_WIDTH,
+  connectionVerb,
+  type DetailPanelProps,
+} from './render/DetailPanel.js';
+export {
+  SelectionOverlay,
+  litEdges,
+  DIMMED,
+  NEIGHBOUR_RING_W,
+  SELECTED_RING_W,
+  type SelectionOverlayProps,
+} from './render/SelectionOverlay.js';
 // Binding chips (P5-03): from a citation to a link that opens the file. Pure,
 // and it shares core's ref parser, so a chip can never offer to open something
 // `diagram check --bindings` would refuse to resolve.

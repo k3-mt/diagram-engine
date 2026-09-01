@@ -30,6 +30,8 @@ import {
   collapsedKey,
   containerRows,
   depthOptions,
+  focusCandidates,
+  focusGroup,
   revealGroup,
   clearSelection,
   selectedIds,
@@ -50,6 +52,10 @@ import {
 export interface ViewOverride extends ResolvedView {
   /** Press a button. Local only — never writes to the document (§1.6). */
   select: (name: ViewPresetName, opts?: { reverse?: boolean }) => void;
+  /** Every group the focus picker can offer, in document order. */
+  focusOptions: { id: string; label: string }[];
+  /** Focus one named group, or null to leave focus (see focusGroup). */
+  selectFocus: (id: string | null) => void;
   /** The levels of grain on offer, coarsest first (sidebar, Grain section). */
   depths: DepthOption[];
   /** The level the picture is at, or null when it is not a uniform level. */
@@ -109,6 +115,14 @@ export function useViewOverride(doc: GraphDoc | null): ViewOverride {
     [doc],
   );
 
+  // The focus PICKER's action: one named group, or null to leave focus. It
+  // does not cycle — the dropdown names its target, so there is nothing to
+  // step through.
+  const onSelectFocus = useCallback(
+    (id: string | null) => setState((s) => focusGroup(doc, s, id)),
+    [doc],
+  );
+
   const onSelectDepth = useCallback(
     (depth: number) => setState((s) => selectDepth(doc, s, depth)),
     [doc],
@@ -143,6 +157,11 @@ export function useViewOverride(doc: GraphDoc | null): ViewOverride {
     ...resolved,
     collapsed,
     select,
+    // Every group, in document order, for the focus dropdown. Derived fresh
+    // each render like `active` and `focusLabel`, so a renamed or deleted
+    // container is right in the list immediately.
+    focusOptions: focusCandidates(doc).map((g) => ({ id: g.id, label: g.label })),
+    selectFocus: onSelectFocus,
     depths,
     depth: activeDepth(doc, resolved.collapsed),
     selectDepth: onSelectDepth,

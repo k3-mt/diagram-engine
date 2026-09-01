@@ -68,6 +68,15 @@
 //    A bucket of ONE is left completely alone — same id, label, style,
 //    cardinality — because the overwhelmingly common case (eng view, nothing
 //    collapsed) must be byte-identical to the input.
+//    §3.9's `kind`, `returns` and `seq` follow the SAME unanimity rule as
+//    `style` and `label`: they survive a merge when every constituent agrees
+//    and are dropped when they disagree. `read` + `read` is still a read;
+//    `read` + `write` is neither, and a merged edge that still drew "order[]"
+//    coming back would name a payload belonging to only one of them. Where a
+//    kind survives it REPLACES style and arrow on the merged edge, because
+//    V20 forbids carrying both — so this pass never derives a document its
+//    own validator would reject. A bucket of one KEEPS all of them anyway: it
+//    is still exactly one relationship, merely repointed.
 //    The merged edge inherits the FIRST constituent's id: it is already a
 //    valid, unique slug present in the document, which keeps the viewer's
 //    keying stable across a collapse/expand instead of inventing a synthetic
@@ -112,7 +121,9 @@
 // caller's `collapsed` order) and merged edges in doc.edges order, so two
 // callers passing the same set in a different order get identical output.
 
+import { edgeIsAsync } from '../schema/graph.js';
 import type {
+  EdgeKind,
   GEdge,
   GGroup,
   GNode,
@@ -206,9 +217,63 @@ function mergedLabel(labels: readonly (string | undefined)[]): string {
   return room > 0 ? `${agreed.slice(0, room)}… ${suffix}` : suffix;
 }
 
-/** Dashed only when unanimous; a missing style means solid. */
+/**
+ * Dashed only when unanimous; a missing style means solid.
+ *
+ * Asked through `edgeIsAsync`, not by testing `style`: since §3.9 an edge can
+ * be asynchronous by its KIND (`publish`, `consume`) and carry no `style` at
+ * all, and three merged `publish` edges that came out solid would be a
+ * collapsed view claiming a cascade the open view says is contained.
+ */
 function mergedStyle(edges: readonly GEdge[]): 'solid' | 'dashed' {
-  return edges.every((e) => e.style === 'dashed') ? 'dashed' : 'solid';
+  return edges.every((e) => edgeIsAsync(e)) ? 'dashed' : 'solid';
+}
+
+/**
+ * §3.9's `kind`, kept ONLY when every constituent agrees.
+ *
+ * Same rule as `mergedLabel` and `mergedStyle` above, and for the same
+ * reason: a shared claim survives a merge, a disagreement does not. Two
+ * relationships of different kinds cannot both be drawn by one line's dash
+ * and one return leg, so a `read` merged with a `write` keeps neither and
+ * falls back to `style`/`arrow` — but `read` merged with `read` is still,
+ * unambiguously, a read, and flattening it to a bare grey line would lose a
+ * fact the document holds and the reader asked for.
+ *
+ * This matters more than it looks. "orders reads AND writes postgres" is two
+ * edges between one pair, which is exactly what this bucket is: without this
+ * function the commonest use of the whole vocabulary would silently render as
+ * `×2` with no kind at all.
+ */
+function mergedKind(edges: readonly GEdge[]): EdgeKind | undefined {
+  const first = edges[0]?.kind;
+  if (first === undefined) return undefined;
+  return edges.every((e) => e.kind === first) ? first : undefined;
+}
+
+/**
+ * What comes back, kept only when every constituent names the same thing.
+ *
+ * Guarded by the kind as well: a `returns` on an edge whose kind did not
+ * survive the merge would be a payload named on a leg the viewer is not going
+ * to draw, which is what V21 exists to prevent.
+ */
+function mergedReturns(edges: readonly GEdge[]): string | undefined {
+  const first = edges[0]?.returns;
+  if (first === undefined) return undefined;
+  return edges.every((e) => e.returns === first) ? first : undefined;
+}
+
+/**
+ * The step number, kept only when every constituent is at the same step.
+ *
+ * Two edges at different steps merged into one line have no single step to
+ * be at, and picking the lower would assert an ordering for the other.
+ */
+function mergedSeq(edges: readonly GEdge[]): number | undefined {
+  const first = edges[0]?.seq;
+  if (first === undefined) return undefined;
+  return edges.every((e) => e.seq === first) ? first : undefined;
 }
 
 /** Union of what is drawn: any `both` wins, then any `forward`, else `none`. */
@@ -347,14 +412,27 @@ export function deriveViewDetail(
       if (moved) delete kept.cardinality;
       edges.push(kept);
     } else {
-      edges.push({
+      // A unanimous kind REPLACES style and arrow rather than joining them —
+      // V20 rejects a document that carries both, and this pass must not
+      // derive a document the validator would refuse.
+      const kind = mergedKind(group);
+      const merged: GEdge = {
         id: first.id,
         from,
         to,
         label: mergedLabel(group.map((e) => e.label)),
-        style: mergedStyle(group),
-        arrow: mergedArrow(group),
-      });
+      };
+      if (kind === undefined) {
+        merged.style = mergedStyle(group);
+        merged.arrow = mergedArrow(group);
+      } else {
+        merged.kind = kind;
+        const returns = mergedReturns(group);
+        if (returns !== undefined) merged.returns = returns;
+      }
+      const seq = mergedSeq(group);
+      if (seq !== undefined) merged.seq = seq;
+      edges.push(merged);
     }
     sources.push({ id: first.id, sources: group.map((e) => e.id) });
   }

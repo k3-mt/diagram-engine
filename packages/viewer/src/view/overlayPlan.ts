@@ -63,6 +63,7 @@
 //    MAX_BLAST_TARGETS and never were the problem.
 //
 
+import { edgeIsAsync } from '../../../core/src/schema/graph.js';
 import type { GraphDoc } from '@diagram-engine/core';
 import type {
   Analysis,
@@ -144,7 +145,11 @@ export function analysisPlan(
   // convergence being drawn.
   const weights = new Map<string, number>();
   for (const edge of doc.edges) {
-    if (edge.style === 'dashed') continue;
+    // Asked of the document's own predicate, not of `style`: since §3.9 a
+    // `kind: "publish"` edge is asynchronous with no `style` set, and
+    // weighting one here would lay a thick solid stroke over a dashed line —
+    // decision 2's exact failure, in a new spelling.
+    if (edgeIsAsync(edge)) continue;
     const target = chokepoints.get(edge.to);
     if (target === undefined || target.fanIn.sync === 0) continue;
     const drawn = projectEdge(idx, edge.id);
