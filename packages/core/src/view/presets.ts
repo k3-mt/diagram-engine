@@ -7,7 +7,9 @@
 // pure list computation the CLI, the MCP tool and the viewer's status-bar
 // buttons all share.
 //
-//   exec        root-level group ids (parent === null) — the boardroom view
+//   exec        the shallowest level holding more than one group — the
+//               boardroom view. Usually the root groups; on a diagram wrapped
+//               in one outer container, the level inside it (view/depth.ts)
 //   eng         [] — nothing collapsed, everything open
 //   focus <id>  every group id EXCEPT <id> and its ancestors, so the chain
 //               down to the focused group stays open and the rest shuts
@@ -18,6 +20,7 @@
 // listing it was just handed.
 
 import type { GraphDoc } from '../schema/graph.js';
+import { collapsedAtDepth, execDepth } from './depth.js';
 
 /** The preset names, in the order the CLI and the viewer's buttons show them. */
 export const VIEW_PRESET_NAMES = ['exec', 'eng', 'focus'] as const;
@@ -153,11 +156,13 @@ export function resolvePreset(doc: GraphDoc, preset: ViewPreset): PresetResult {
       return { ok: true, collapsed: [] };
 
     case 'exec':
-      // Every top-level boundary shut, so the diagram reads as N boxes.
-      return {
-        ok: true,
-        collapsed: doc.groups.filter((g) => g.parent === null).map((g) => g.id),
-      };
+      // The outermost level that actually DIVIDES the system, shut, so the
+      // diagram reads as N boxes. That is depth 0 on a document whose top
+      // level holds several boundaries — the old rule, unchanged — but on a
+      // document wrapped in a single outer container it is the level below it,
+      // because collapsing a lone wrapper summarises nothing. execDepth makes
+      // that choice; see view/depth.ts.
+      return { ok: true, collapsed: collapsedAtDepth(doc, execDepth(doc)) };
 
     case 'focus': {
       const { id } = preset;

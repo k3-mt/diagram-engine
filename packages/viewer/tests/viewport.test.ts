@@ -38,13 +38,13 @@ import {
 } from '../src/render/StatusBar';
 import {
   connectViewer,
-  defaultWsUrl,
+  defaultEventsUrl,
   parseDocMessage,
   parseServerMessage,
   type ConnectionState,
-  type WebSocketLike,
-  type WsMessageEvent,
-} from '../src/ws';
+  type EventSourceLike,
+  type SseMessageEvent,
+} from '../src/live';
 import type { GraphDoc } from '@diagram-engine/core';
 
 /** World point -> screen point under a camera. */
@@ -425,17 +425,21 @@ describe('status bar formatting — spec §8.4', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fake WebSocket: records every instance so the test can open/drop them.
+// Fake EventSource: records every instance so the test can open/drop them.
+//
+// Note what is NOT here any more: this fake has no way to trigger a redial,
+// because the client no longer has one. EventSource reconnects natively
+// (§16.3), so the browser owns the retry schedule and the tests that pinned
+// the hand-rolled 500ms doubling backoff went with the code they covered.
 
-class FakeSocket implements WebSocketLike {
-  static instances: FakeSocket[] = [];
+class FakeEventSource implements EventSourceLike {
+  static instances: FakeEventSource[] = [];
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
-  onmessage: ((ev: WsMessageEvent) => void) | null = null;
+  onmessage: ((ev: SseMessageEvent) => void) | null = null;
   closed = false;
   constructor(readonly url: string) {
-    FakeSocket.instances.push(this);
+    FakeEventSource.instances.push(this);
   }
   close(): void {
     this.closed = true;
@@ -444,17 +448,19 @@ class FakeSocket implements WebSocketLike {
     this.onopen?.();
   }
   drop(): void {
-    this.onclose?.();
+    this.onerror?.();
   }
   send(data: unknown): void {
     this.onmessage?.({ data });
   }
-  static last(): FakeSocket {
-    const s = FakeSocket.instances.at(-1);
-    if (s === undefined) throw new Error('no socket opened');
+  static last(): FakeEventSource {
+    const s = FakeEventSource.instances.at(-1);
+    if (s === undefined) throw new Error('no stream opened');
     return s;
   }
 }
+
+const ES = FakeEventSource as unknown as new (url: string) => EventSourceLike;
 
 const doc: GraphDoc = {
   version: 1,
@@ -465,9 +471,9 @@ const doc: GraphDoc = {
   edges: [],
 } as unknown as GraphDoc;
 
-describe('ws client — spec §2.4, §8.4', () => {
+describe('live client — spec §2.4, §8.4', () => {
   beforeEach(() => {
-    FakeSocket.instances = [];
+    FakeEventSource.instances = [];
     vi.useFakeTimers();
   });
   afterEach(() => {
@@ -477,19 +483,19 @@ describe('ws client — spec §2.4, §8.4', () => {
   it('walks connect → drop → reconnecting → down → reconnected', () => {
     const states: ConnectionState[] = [];
     const client = connectViewer({
-      url: 'ws://test',
+      url: 'http://test/events',
       onDoc: () => {},
       onState: (s) => states.push(s),
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      eventSource: ES,
     });
 
     expect(states).toEqual(['reconnecting']);
-    FakeSocket.last().open();
+    FakeEventSource.last().open();
     expect(states).toEqual(['reconnecting', 'connected']);
     expect(client.state).toBe('connected');
 
-    // The socket drops: amber immediately, red only after 5s.
-    FakeSocket.last().drop();
+    // The stream drops: amber immediately, red only after 5s.
+    FakeEventSource.last().drop();
     expect(client.state).toBe('reconnecting');
     vi.advanceTimersByTime(4_999);
     expect(client.state).toBe('reconnecting');
@@ -497,72 +503,56 @@ describe('ws client — spec §2.4, §8.4', () => {
     expect(client.state).toBe('down');
     expect(states).toEqual(['reconnecting', 'connected', 'reconnecting', 'down']);
 
-    // The newest retry socket comes up: green again.
-    FakeSocket.last().open();
+    // EventSource reconnects itself and fires onopen on the SAME object:
+    // green again, with no new instance constructed by us.
+    FakeEventSource.last().open();
     expect(client.state).toBe('connected');
     expect(states.at(-1)).toBe('connected');
     client.close();
   });
 
-  it('retries with 500ms doubling backoff capped at 5s', () => {
+  it('never redials — the browser owns the retry schedule (§16.3)', () => {
     connectViewer({
-      url: 'ws://test',
+      url: 'http://test/events',
       onDoc: () => {},
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      eventSource: ES,
     });
-    expect(FakeSocket.instances).toHaveLength(1);
-
-    const delays = [500, 1000, 2000, 4000, 5000, 5000];
-    for (const [i, delay] of delays.entries()) {
-      FakeSocket.last().drop();
-      vi.advanceTimersByTime(delay - 1);
-      expect(FakeSocket.instances).toHaveLength(i + 1); // not yet
-      vi.advanceTimersByTime(1);
-      expect(FakeSocket.instances).toHaveLength(i + 2);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    // Repeated failures over a long window: still exactly one EventSource.
+    for (let i = 0; i < 6; i++) {
+      FakeEventSource.last().drop();
+      vi.advanceTimersByTime(5_000);
     }
+    expect(FakeEventSource.instances).toHaveLength(1);
   });
 
-  it('resets the backoff after a successful connection', () => {
-    connectViewer({
-      url: 'ws://test',
+  it('stays red until the stream is actually back', () => {
+    const states: ConnectionState[] = [];
+    const client = connectViewer({
+      url: 'http://test/events',
       onDoc: () => {},
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      onState: (s) => states.push(s),
+      eventSource: ES,
     });
-    FakeSocket.last().drop();
-    vi.advanceTimersByTime(500);
-    FakeSocket.last().drop();
-    vi.advanceTimersByTime(1000); // delay had doubled
-    expect(FakeSocket.instances).toHaveLength(3);
-
-    FakeSocket.last().open(); // healthy again
-    FakeSocket.last().drop();
-    vi.advanceTimersByTime(499);
-    expect(FakeSocket.instances).toHaveLength(3);
-    vi.advanceTimersByTime(1);
-    expect(FakeSocket.instances).toHaveLength(4); // back to the 500ms base
-  });
-
-  it('does not fire onerror and onclose from one socket as two retries', () => {
-    connectViewer({
-      url: 'ws://test',
-      onDoc: () => {},
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
-    });
-    const s = FakeSocket.last();
-    s.onerror?.();
-    s.onclose?.();
-    vi.advanceTimersByTime(500);
-    expect(FakeSocket.instances).toHaveLength(2);
+    FakeEventSource.last().open();
+    FakeEventSource.last().drop();
+    vi.advanceTimersByTime(5_001);
+    expect(client.state).toBe('down');
+    // Further failed attempts while down must not flap the dot back to amber.
+    FakeEventSource.last().drop();
+    FakeEventSource.last().drop();
+    expect(client.state).toBe('down');
+    expect(states).toEqual(['reconnecting', 'connected', 'reconnecting', 'down']);
   });
 
   it('delivers docs from {type:"doc"} frames and ignores everything else', () => {
     const seen: GraphDoc[] = [];
     connectViewer({
-      url: 'ws://test',
+      url: 'http://test/events',
       onDoc: (d) => seen.push(d),
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      eventSource: ES,
     });
-    const s = FakeSocket.last();
+    const s = FakeEventSource.last();
     s.open();
     s.send(JSON.stringify({ type: 'doc', doc }));
     s.send(JSON.stringify({ type: 'hello' }));
@@ -577,12 +567,12 @@ describe('ws client — spec §2.4, §8.4', () => {
     const docs: GraphDoc[] = [];
     const errs: string[][] = [];
     connectViewer({
-      url: 'ws://test',
+      url: 'http://test/events',
       onDoc: (d) => docs.push(d),
       onError: (e) => errs.push(e),
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      eventSource: ES,
     });
-    const s = FakeSocket.last();
+    const s = FakeEventSource.last();
     s.open();
     s.send(JSON.stringify({ type: 'error', errors: ['nodes: expected array'] }));
     // A rejected doc must not repaint: nothing reaches onDoc.
@@ -596,33 +586,35 @@ describe('ws client — spec §2.4, §8.4', () => {
 
   it('survives an error frame when no onError handler is supplied', () => {
     connectViewer({
-      url: 'ws://test',
+      url: 'http://test/events',
       onDoc: () => {},
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      eventSource: ES,
     });
-    const s = FakeSocket.last();
+    const s = FakeEventSource.last();
     s.open();
     expect(() => s.send(JSON.stringify({ type: 'error', errors: ['x'] }))).not.toThrow();
   });
 
-  it('stops reconnecting and closes the socket on close()', () => {
+  it('closes the stream and goes silent on close()', () => {
     const states: ConnectionState[] = [];
     const client = connectViewer({
-      url: 'ws://test',
+      url: 'http://test/events',
       onDoc: () => {},
       onState: (s) => states.push(s),
-      webSocket: FakeSocket as unknown as new (url: string) => WebSocketLike,
+      eventSource: ES,
     });
-    FakeSocket.last().open();
+    FakeEventSource.last().open();
     client.close();
-    expect(FakeSocket.last().closed).toBe(true);
+    expect(FakeEventSource.last().closed).toBe(true);
+    // No further state changes, and the 'down' fuse must not burn after close.
+    FakeEventSource.last().drop();
     vi.advanceTimersByTime(60_000);
-    expect(FakeSocket.instances).toHaveLength(1);
+    expect(FakeEventSource.instances).toHaveLength(1);
     expect(states).toEqual(['reconnecting', 'connected']);
   });
 });
 
-describe('parseDocMessage / defaultWsUrl', () => {
+describe('parseDocMessage / defaultEventsUrl', () => {
   it('returns null for non-string and malformed payloads', () => {
     expect(parseDocMessage(null)).toBeNull();
     expect(parseDocMessage(new ArrayBuffer(4))).toBeNull();
@@ -653,7 +645,7 @@ describe('parseDocMessage / defaultWsUrl', () => {
     expect(parseDocMessage(JSON.stringify({ type: 'error', errors: ['a'] }))).toBeNull();
   });
 
-  it('falls back to a localhost ws url outside a browser', () => {
-    expect(defaultWsUrl()).toMatch(/^ws:\/\//);
+  it('falls back to a localhost http url on the events path outside a browser', () => {
+    expect(defaultEventsUrl()).toMatch(/^http:\/\/.+\/__diagram\/events$/);
   });
 });

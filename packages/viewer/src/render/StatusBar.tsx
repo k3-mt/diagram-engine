@@ -1,7 +1,15 @@
 // render/StatusBar.tsx — the thin bottom strip (spec §8.4).
 //
-//   Checkout platform   11 nodes · 2 groups · 9 edges   [exec] [eng] [focus]
+//   [☰] Checkout platform  11 nodes · 2 groups · 9 edges  level 1 · 2 of 4
+//       containers collapsed  [exec] [eng] [focus]
 //   ● connected                     last update 2s ago   [SVG ⌘S] [PNG 2×]
+//
+// The strip answers ONE question: what state is this session in — which
+// document, how much of it is drawn, is the socket alive, when did it last
+// move, and can I save it. The CONTROLS for which elements are drawn live in
+// the sidebar (render/Sidebar.tsx); what appears here is the readout of them
+// plus the preset buttons, which are small enough and used often enough to
+// earn a second home.
 //
 // Everything the browser window needs, given the terminal is elsewhere.
 // The connection dot matters: when the agent's MCP process dies or
@@ -28,7 +36,7 @@
 
 import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { ConnectionState } from '../ws.js';
+import type { ConnectionState } from '../live.js';
 import { theme } from './theme.js';
 
 /** Counts shown in the strip. Kept as plain numbers so the bar never walks the doc. */
@@ -152,6 +160,18 @@ export interface StatusBarProps {
   /** M7 view buttons ([exec] [eng] [focus]); nothing is rendered without it. */
   views?: ReactNode;
   /**
+   * The panel toggle, first in the strip. A slot rather than a boolean prop
+   * for the same reason as `views`: the bar gives a control a place to sit
+   * and has no opinion about what it does.
+   */
+  panel?: ReactNode;
+  /**
+   * One line saying what the view is showing ("level 1 · 5 of 8 containers
+   * collapsed"). It sits beside the counts because both describe the picture
+   * on screen; the CONTROLS for it are in the sidebar.
+   */
+  viewSummary?: string | null;
+  /**
    * M9 analysis overlays ([analysis] [blast: X], §15.5/§18.7); nothing is
    * rendered without it. A slot of its own rather than more children in
    * `views`: the view presets change WHICH ELEMENTS are drawn, the overlays
@@ -193,6 +213,8 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
     connection,
     lastUpdate,
     views,
+    panel,
+    viewSummary = null,
     analysis,
     save,
     tickMs = 1000,
@@ -221,8 +243,16 @@ export function StatusBar(props: StatusBarProps): JSX.Element {
       data-doc-error={docError === null ? undefined : 'true'}
       data-flashing={flashing ? 'true' : undefined}
     >
+      {panel === undefined || panel === null ? null : (
+        <span data-testid="panel-slot" style={{ display: 'flex', alignItems: 'center' }}>
+          {panel}
+        </span>
+      )}
       <span style={{ color: theme.text.primary, fontWeight: 600 }}>{title}</span>
       <span>{countsText(counts)}</span>
+      {viewSummary === null || viewSummary === '' ? null : (
+        <span data-testid="view-summary">{viewSummary}</span>
+      )}
       {views === undefined || views === null ? null : (
         <span
           data-testid="view-slot"

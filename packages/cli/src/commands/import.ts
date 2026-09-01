@@ -48,6 +48,7 @@ import * as path from 'node:path';
 import type { Command } from 'commander';
 import {
   GraphDocSchema,
+  reconcileView,
   formatIssues,
   readDoc,
   snapshotHistory,
@@ -134,7 +135,11 @@ export function parseDocText(raw: string, source: string): ParseDocResult {
   if (!invariants.ok) {
     return { ok: false, errors: [`${source}: invalid diagram`, ...invariants.errors] };
   }
-  return { ok: true, doc: result.data };
+  // An imported document carrying a depth rule gets its collapsed list derived
+  // from that rule, exactly as a patch would. Otherwise a hand-written import
+  // could store `{"view":{"depth":1}}` beside a stale list and the two would
+  // disagree until the next patch happened to reconcile them.
+  return { ok: true, doc: reconcileView(result.data) };
 }
 
 /** Is there anything in this document to lose? */

@@ -1,0 +1,15 @@
+{
+  "name": "diagram-engine",
+  "owner": {
+    "name": "k3-mt"
+  },
+  "description": "The diagram engine, distributed as a Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "diagram",
+      "source": "./plugin",
+      "description": "Prompt-driven architecture diagrams, rendered live in your browser.",
+      "version": "0.1.0"
+    }
+  ]
+}

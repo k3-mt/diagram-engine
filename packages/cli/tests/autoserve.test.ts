@@ -48,7 +48,7 @@ import { callTool } from '../src/mcp/tools.js';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 /** The built CLI the detached viewer is spawned from. Absent before a build. */
-const BUILT_CLI = path.join(REPO, 'packages/cli/dist/bin/diagram.js');
+const BUILT_CLI = path.join(REPO, 'packages/cli/dist/bin/diagram.mjs');
 
 // ---------------------------------------------------------------------------
 // scaffolding

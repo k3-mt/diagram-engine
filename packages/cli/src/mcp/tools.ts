@@ -67,6 +67,7 @@ import {
 import { runReset } from '../commands/reset.js';
 import {
   applyCollapsed,
+  applyDepth,
   missingDiagram,
   renderViewResult,
   runView,
@@ -314,7 +315,18 @@ const VIEW_SCHEMA: PlainJsonSchema = {
       items: { type: 'string' },
       description:
         'Explicit list of group ids to collapse, instead of a preset. ' +
-        'An empty array expands everything.',
+        'An empty array expands everything. A list is a one-off: it names ' +
+        'today\'s groups, so a group added later renders open.',
+    },
+    depth: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'Collapse by container LEVEL instead of by name: 0 shuts every ' +
+        'top-level boundary, 1 opens those and shuts their children. Stored ' +
+        'as a rule on the document and re-derived after every patch, so a ' +
+        'group added, renamed or reparented later is collapsed by the same ' +
+        'rule rather than missed. Prefer this over an explicit list.',
     },
   },
   additionalProperties: false,
@@ -327,7 +339,8 @@ const diagramView: ToolDefinition = {
     'Set which groups are collapsed — how the diagram reads, not what it ' +
     'means. Pass {"preset":"exec"} for a boardroom-level view, ' +
     '{"preset":"eng"} for everything, {"preset":"focus","id":"<group-id>"} to ' +
-    'open one boundary, or {"collapsed":["<group-id>",...]} to say it exactly. ' +
+    'open one boundary, {"depth":1} to collapse a container level by rule, ' +
+    'or {"collapsed":["<group-id>",...]} to say it exactly. ' +
     'Never moves or deletes anything, and diagram_undo puts the old view back.',
   inputSchema: VIEW_SCHEMA,
   annotations: { title: 'Set the view', idempotentHint: true },
@@ -337,6 +350,18 @@ const diagramView: ToolDefinition = {
     // Collapse state is presentation, not meaning, so it is not a patch op —
     // but it IS a document edit, and it is undoable like any other.
     if (!fs.existsSync(ctx.paths.graphFile)) return missingDiagram(ctx);
+
+    // Checked before `collapsed` and before `preset`: a depth is the durable
+    // form, and a caller that sends both meant the rule.
+    const depth = args['depth'];
+    if (depth !== undefined) {
+      if (typeof depth !== 'number') {
+        return refuse('depth must be a whole number of container levels', [
+          'example: {"depth": 1} — top-level boundaries open, their children collapsed',
+        ]);
+      }
+      return renderViewResult(ctx, applyDepth(ctx, depth));
+    }
 
     const explicit = args['collapsed'];
     if (explicit !== undefined) {
@@ -350,8 +375,8 @@ const diagramView: ToolDefinition = {
 
     const presetName = args['preset'];
     if (typeof presetName !== 'string' || presetName === '') {
-      return refuse('diagram_view needs a preset or a collapsed list', [
-        'e.g. {"preset": "exec"} or {"collapsed": ["vpc-private"]}',
+      return refuse('diagram_view needs a preset, a depth, or a collapsed list', [
+        'e.g. {"preset": "exec"}, {"depth": 1} or {"collapsed": ["vpc-private"]}',
       ]);
     }
     const id = args['id'];

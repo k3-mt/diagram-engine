@@ -48,16 +48,49 @@ whole retry subsystem simply does not exist.
 Language models are good at pulling structure out of prose and bad at spatial packing.
 Layout engines are the reverse. The document on disk contains no geometry of any kind.
 
-## Quick start
+## Installing
+
+**As a Claude Code plugin** — nothing is built or installed on your machine:
+
+```bash
+claude plugin marketplace add k3-mt/diagram-engine
+claude plugin install diagram@diagram-engine
+```
+
+The ten tools, the rules and a `/diagram-serve` command are simply there on next
+launch. There is no package manager step, because the plugin ships a prebuilt,
+bundled `dist/` and **no `package.json` and no lockfile** — installing it is a pure
+file fetch of an artifact that was built and audited once, rather than a build every
+engineer runs. `npm run verify:plugin` re-checks that artifact against the source.
+
+For a team, commit this to `.claude/settings.json` and nobody runs an install command
+at all:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "team-tools": { "source": { "source": "github", "repo": "k3-mt/diagram-engine" } }
+  },
+  "enabledPlugins": ["diagram@team-tools"]
+}
+```
+
+**From source**, which also gives you the `diagram` CLI:
 
 ```bash
 npm install
 npm run build
+npm link              # puts `diagram` on your PATH
 
 cd /path/to/your/project
 diagram init          # .mcp.json, .gitignore, agent rules, Claude Code skill
 diagram serve         # viewer on http://localhost:4400 — optional, see below
 ```
+
+`diagram init` is safe to run either way: under a plugin install it detects
+`CLAUDE_PLUGIN_ROOT`, writes only what is genuinely per-project (`.diagram/`, the
+`.gitignore` block) and skips the MCP config, the rules and the skill the plugin
+already provides — so the rules text can never end up on disk twice, drifting.
 
 `diagram serve` is optional from the first patch onwards: a patch that draws something
 starts the viewer itself if one is not already up, and says so
@@ -73,8 +106,8 @@ Then start your agent. It picks up the MCP server on next launch and gets ten to
 `diagram_export`, `diagram_check`, `diagram_analyse`, `diagram_blast_radius`,
 `diagram_reset`.
 
-The package is not published yet, so `diagram` must be on your `PATH` — `npm link` from
-this repo, or install it globally.
+Under a plugin install your client namespaces them — `mcp__plugin_diagram_diagram__diagram_get`
+and so on — which is why the rules describe tools by role rather than pinning exact names.
 
 **New here?** [TRYING-IT.md](TRYING-IT.md) is a ten-minute first session — install, talk to
 your agent, and check its work.
@@ -83,9 +116,9 @@ your agent, and check its work.
 
 ```
 agent ──stdio(MCP)──▶ diagram-mcp ──writes──▶ .diagram/graph.json
-                                                    │ chokidar
+                                                    │ fs.watch
                                                     ▼
-                                              diagram serve ──ws──▶ browser
+                                              diagram serve ──SSE──▶ browser
 ```
 
 The MCP process lives and dies with your agent session; the viewer should not. Putting the
@@ -140,7 +173,7 @@ packages/
   core/     schema, validation (V1–V13), patch application, history,
             views, the .diagram/ store, and rules.md — no DOM, no network
   cli/      the `diagram` and `diagram-mcp` binaries, the CLI commands,
-            the MCP server, and the viewer's HTTP + WebSocket host
+            the MCP server, and the viewer's HTTP + SSE host
   viewer/   the browser bundle: ELK layout, crossing/hop geometry,
             the SVG renderer, and headless SVG export
 docs/spec.md   the full product and build specification
@@ -198,10 +231,23 @@ Direction is scored separately for a reason. An agent can identify every connect
 correctly and draw all the arrows backwards, and precision and recall both stay at 1.0.
 That happened, and it is why rule 4 was rewritten.
 
+**Distribution** (Part 16). The engine ships as a Claude Code plugin, built by
+`npm run build:plugin` into `plugin/` — bundled with esbuild into two self-contained
+`.mjs` binaries, carrying no manifest and no lockfile so the auto-install path is
+unreachable rather than merely unused. `npm run verify:plugin` is the
+reproducible-build check §16.8 requires: a reviewer rebuilds the tag and confirms the
+committed bundle matches the source, file by file, or the artifact is unauditable and
+the whole supply-chain argument collapses.
+
+Getting there removed two runtime dependencies (§16.3). `chokidar` was the only reason
+a native binary was in the tree — and native code cannot be bundled at all, so it did
+not merely add review surface, it made the artifact impossible. `ws` was replaced by
+Server-Sent Events: the server only ever pushes and the browser never replies, so
+`EventSource` does the reconnecting the hand-rolled client used to, and both the
+dependency and the code went away.
+
 ### Not done
 
-- **Distribution** (Part 16). The package is not published, so `diagram` has to be on your
-  PATH via `npm link`. Specced, not built.
 - **The prose benchmark** (BUILD.md Phase 6). Both reference systems are repositories, so
   acceptance G1 — "a 100-word description produces a correct diagram, no follow-up" — is the
   headline criterion that nothing measures yet.

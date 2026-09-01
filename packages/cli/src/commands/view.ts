@@ -36,10 +36,14 @@ import {
   type GraphDoc,
 } from '../../../core/src/index.js';
 import {
+  collapsedAtDepth,
+  execDepth,
   existingGroupsLine,
+  MAX_VIEW_DEPTH,
   parseViewPreset,
   resolvePreset,
   VIEW_PRESET_NAMES,
+  type ViewSetting,
 } from '../../../core/src/index.js';
 import {
   createContext,
@@ -69,6 +73,8 @@ export type ViewResult =
       preset: string;
       /** The group ids now in doc.collapsed. */
       collapsed: string[];
+      /** The depth rule now stored on the document, or undefined for an explicit list. */
+      view?: ViewSetting;
       /** False when the document already held exactly this view — no write, no snapshot. */
       changed: boolean;
     }
@@ -114,7 +120,15 @@ export function applyView(ctx: DiagramContext, name: string, id?: string): ViewR
         ? `focus:${parsed.preset.id}`
         : parsed.preset.preset;
 
-    return writeCollapsed(ctx, doc, resolved.collapsed, label);
+    // `exec` is a LEVEL, so it stores the level and stays true through the
+    // next patch: add a fifth stage and it is collapsed with the other four,
+    // instead of appearing open because it was not on a list written earlier.
+    // `eng` and `focus` are not levels — eng opens everything however deep the
+    // tree grows, and focus names one boundary — so both clear the rule.
+    const rule: ViewSetting | undefined =
+      parsed.preset.preset === 'exec' ? { depth: execDepth(doc) } : undefined;
+
+    return writeCollapsed(ctx, doc, resolved.collapsed, label, rule);
   });
 }
 
@@ -152,6 +166,42 @@ export function applyCollapsed(ctx: DiagramContext, ids: string[]): ViewResult {
 }
 
 /**
+ * `diagram view --depth N` — store the view as a RULE and derive the list.
+ *
+ * This is the setting that survives editing. A depth says "draw containers N
+ * levels deep, collapse what is at that level", so a group added, renamed or
+ * reparented by a later patch is placed by the same rule rather than missed by
+ * a list nobody updated (applyPatch re-derives it — core's view/depth.ts).
+ *
+ * A depth past the bottom of the tree collapses nothing and is NOT an error:
+ * it is a legitimate "open everything, and keep it open only this far if the
+ * diagram grows deeper". The upper bound is the schema's, so the document
+ * cannot store a depth it could never mean.
+ */
+export function applyDepth(ctx: DiagramContext, depth: number): ViewResult {
+  return withLock(ctx.dir, (): ViewResult => {
+    const current = readDoc(ctx.paths.graphFile);
+    if (!current.ok) return { ok: false, errors: current.errors, read: true };
+    const doc = current.doc;
+
+    if (!Number.isInteger(depth) || depth < 0 || depth > MAX_VIEW_DEPTH) {
+      return {
+        ok: false,
+        errors: [
+          `depth must be a whole number from 0 to ${MAX_VIEW_DEPTH}, not ${JSON.stringify(depth)}.`,
+          'depth 0 collapses every top-level boundary; depth 1 opens those and collapses their children.',
+        ],
+        read: false,
+      };
+    }
+
+    return writeCollapsed(ctx, doc, collapsedAtDepth(doc, depth), `depth:${depth}`, {
+      depth,
+    });
+  });
+}
+
+/**
  * Write doc.collapsed and snapshot it. The single write both entry points end
  * at, so a preset and an explicit list cannot behave differently.
  * MUST be called with the lock already held — it is not reentrant.
@@ -161,18 +211,40 @@ function writeCollapsed(
   doc: GraphDoc,
   collapsed: string[],
   label: string,
+  view?: ViewSetting,
 ): ViewResult {
-  if (sameList(doc.collapsed, collapsed)) {
+  const sameRule = doc.view?.depth === view?.depth;
+  if (sameList(doc.collapsed, collapsed) && sameRule) {
     // Already this view: writing anyway would push a no-op onto history and
-    // make `undo` feel broken.
-    return { ok: true, doc, preset: label, collapsed, changed: false };
+    // make `undo` feel broken. The RULE counts as part of the view — the same
+    // list arrived at by hand and by a depth behave differently on the next
+    // patch, so switching between them is a real change.
+    return {
+      ok: true,
+      doc,
+      preset: label,
+      collapsed,
+      changed: false,
+      ...(view !== undefined ? { view } : {}),
+    };
   }
+  // An explicit list is a deliberate choice and must not keep re-deriving
+  // itself, so `view` absent means DELETE the stored rule, not leave it.
   const next: GraphDoc = { ...doc, collapsed };
+  if (view !== undefined) next.view = view;
+  else delete next.view;
   // snapshotHistory reads the pre-change graph.json to seed snapshot 0000,
   // so it must run before the write, not after.
   snapshotHistory(ctx.dir, next);
   writeDocAtomic(ctx.dir, next);
-  return { ok: true, doc: next, preset: label, collapsed, changed: true };
+  return {
+    ok: true,
+    doc: next,
+    preset: label,
+    collapsed,
+    changed: true,
+    ...(view !== undefined ? { view } : {}),
+  };
 }
 
 /**
@@ -189,9 +261,17 @@ export function renderView(result: Extract<ViewResult, { ok: true }>): string {
     result.collapsed.length > 0
       ? `${result.collapsed.join(', ')} (${result.collapsed.length} of ${plural(total, 'group')})`
       : 'none — every group open';
+  // The rule line is the difference between a view that will still be true
+  // after the next patch and one that will not, so it is worth a line of its
+  // own rather than being inferable from the preset label.
+  const rule =
+    result.view !== undefined
+      ? [`rule: depth ${result.view.depth} — kept in step as groups are added or renamed`]
+      : [];
   return [
     `ok — view ${result.preset}${result.changed ? '' : ' (unchanged)'}`,
     `collapsed: ${collapsed}`,
+    ...rule,
     `graph: ${renderCounts(result.doc)}`,
   ].join('\n');
 }
@@ -253,6 +333,13 @@ export function runViewCollapsed(ids: string[], opts: ContextOptions = {}): Comm
   return renderViewResult(ctx, applyCollapsed(ctx, ids));
 }
 
+/** `diagram view --depth N` — the CLI twin of diagram_view's `{"depth": N}`. */
+export function runViewDepth(depth: number, opts: ContextOptions = {}): CommandResult {
+  const ctx = createContext(opts);
+  if (!fs.existsSync(ctx.paths.graphFile)) return missingDiagram(ctx);
+  return renderViewResult(ctx, applyDepth(ctx, depth));
+}
+
 export function registerView(program: Command): void {
   program
     .command('view')
@@ -264,14 +351,28 @@ export function registerView(program: Command): void {
     // commander refused it before the action ran, and the documented way to
     // expand everything from the shell did not exist.
     .option('--collapsed [ids...]', 'collapse exactly these group ids, or none (instead of a preset)')
+    .option(
+      '--depth <n>',
+      `draw containers this many levels deep and collapse that level (0-${MAX_VIEW_DEPTH}); stored as a rule, so it survives new groups`,
+    )
     .option('--dir <path>', 'the .diagram directory (default: $DIAGRAM_DIR or ./.diagram)')
     .action(
       (
         preset: string | undefined,
         id: string | undefined,
-        opts: { dir?: string; collapsed?: string[] | boolean },
+        opts: { dir?: string; collapsed?: string[] | boolean; depth?: string },
       ) => {
         const dirOpt = opts.dir !== undefined ? { dir: opts.dir } : {};
+        if (opts.depth !== undefined) {
+          // Parsed as a NUMBER here rather than in applyDepth so "two" and
+          // "1.5" get the same message as an out-of-range integer: commander
+          // hands over a string, and Number('') is 0, which would silently
+          // become the exec-like view nobody asked for.
+          const raw = opts.depth.trim();
+          const depth = raw === '' ? Number.NaN : Number(raw);
+          emit(runViewDepth(depth, dirOpt));
+          return;
+        }
         if (opts.collapsed !== undefined) {
           // An optional variadic with no values arrives as `true`, not [].
           const ids = Array.isArray(opts.collapsed) ? opts.collapsed : [];

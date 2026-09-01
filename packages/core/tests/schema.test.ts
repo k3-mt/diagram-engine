@@ -8,6 +8,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { documentSlug } from '../src/document/ids.js';
 import {
   BindingSourceSchema,
   CardinalitySchema,
@@ -412,5 +413,36 @@ describe('bindings (spec §3.8)', () => {
     for (const s of ['repo', 'compose', 'terraform', 'k8s-manifest', 'package']) {
       expect(text).toContain(`"${s}"`);
     }
+  });
+});
+
+describe('documentSlug — the document names its own exports', () => {
+  it('is snake_case, not the kebab-case of an element id', () => {
+    expect(documentSlug('Source Registry')).toBe('source_registry');
+  });
+
+  it('folds punctuation, dashes and runs of spaces into one separator', () => {
+    expect(documentSlug('Open-source aggregator — source to landing')).toBe(
+      'open_source_aggregator_source_to_landing',
+    );
+    expect(documentSlug('  Tenders / awards  ')).toBe('tenders_awards');
+  });
+
+  it('strips accents so two spellings cannot become two files', () => {
+    expect(documentSlug('Réseau privé')).toBe('reseau_prive');
+  });
+
+  it('refuses to name a document that has no name', () => {
+    // The caller falls back to out.json: `untitled.json` would collide across
+    // every unnamed diagram on the machine.
+    expect(documentSlug('Untitled')).toBeNull();
+    expect(documentSlug('   ')).toBeNull();
+    expect(documentSlug('!!!')).toBeNull();
+  });
+
+  it('caps the length and never ends on a separator', () => {
+    const slug = documentSlug('a'.repeat(80));
+    expect(slug).toHaveLength(64);
+    expect(documentSlug(`${'word '.repeat(20)}`)?.endsWith('_')).toBe(false);
   });
 });

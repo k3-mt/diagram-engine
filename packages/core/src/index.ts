@@ -31,6 +31,10 @@ export * from './store/index.js';
 // server, so they belong on the public surface rather than behind a deep path.
 export * from './rules/load.js';
 export * from './view/presets.js';
+// view/depth.ts — the view stored as a rule (a container level) rather than a
+// list of ids, plus the reconcile pass that keeps doc.collapsed true after a
+// group is added, renamed or reparented.
+export * from './view/depth.js';
 
 // M7 Step 16: the collapse-and-merge pass that turns a document plus a
 // collapsed list into the document that is actually drawn. On the barrel

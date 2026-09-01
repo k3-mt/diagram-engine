@@ -14,6 +14,7 @@ import { compactRules, loadRules } from '../../core/src/rules/load.js';
 import {
   INIT_AGENTS,
   isInitAgent,
+  isPluginManaged,
   mcpServerEntry,
   renderInitResult,
   runInit,
@@ -386,7 +387,7 @@ describe('runInit — the agent instructions actually carry the rules (§4.4)', 
       // reason to shell out, must still see the numbered rules.
       expect(text, name).toContain(compactRules());
       expect(text, name).toContain('DO NOT INVENT');
-      expect(text, name).toContain('CALL diagram_get FIRST');
+      expect(text, name).toContain('READ THE DIAGRAM FIRST');
       // ...and the pointer to the full text survives alongside them.
       expect(text, name).toContain('diagram rules');
     }
@@ -415,5 +416,50 @@ describe('runInit — the agent instructions actually carry the rules (§4.4)', 
     const root = tempProject();
     runInit({ root });
     expect(read(root, '.gitignore')).toContain('.diagram/out.json');
+  });
+});
+
+describe('runInit — under a plugin install (spec §16.5)', () => {
+  it('detects the plugin from CLAUDE_PLUGIN_ROOT', () => {
+    expect(isPluginManaged({ CLAUDE_PLUGIN_ROOT: '/somewhere/diagram/1.0.0' })).toBe(true);
+    expect(isPluginManaged({})).toBe(false);
+    // An empty value is Claude Code NOT setting it, not a plugin at the
+    // filesystem root — treating '' as truthy would skip the rules for every
+    // ordinary install.
+    expect(isPluginManaged({ CLAUDE_PLUGIN_ROOT: '' })).toBe(false);
+  });
+
+  it('writes only what is per-project, and says what it skipped', () => {
+    const root = tempProject();
+    const result = runInit({ dir: root, pluginManaged: true });
+
+    // THE POINT: the plugin ships the rules, so init must not write a second
+    // copy. Two copies drift at the next plugin release, and in an
+    // architecture with no system prompt the rules text IS the prompt.
+    for (const f of ['.mcp.json', 'CLAUDE.md', 'AGENTS.md', '.claude/skills/diagram/SKILL.md']) {
+      expect(statusOf(result, f), f).toBe('skipped');
+      expect(fs.existsSync(path.join(root, f)), f).toBe(false);
+    }
+
+    // What IS per-project still happens.
+    expect(statusOf(result, '.gitignore')).toBe('created');
+    expect(statusOf(result, '.diagram/graph.json')).toBe('created');
+    expect(fs.existsSync(path.join(root, '.diagram', 'graph.json'))).toBe(true);
+
+    // A skipped file always carries a reason (§4.1): four files silently
+    // missing is indistinguishable from a broken run.
+    for (const f of result.files.filter((x) => x.status === 'skipped')) {
+      expect(f.reason, f.file).toBeTruthy();
+    }
+    expect(result.notes.join('\n')).toContain('plugin install detected');
+  });
+
+  it('still writes everything when there is no plugin', () => {
+    const root = tempProject();
+    const result = runInit({ dir: root, pluginManaged: false });
+    for (const f of ['.mcp.json', 'CLAUDE.md', 'AGENTS.md', '.claude/skills/diagram/SKILL.md']) {
+      expect(statusOf(result, f), f).not.toBe('skipped');
+      expect(fs.existsSync(path.join(root, f)), f).toBe(true);
+    }
   });
 });

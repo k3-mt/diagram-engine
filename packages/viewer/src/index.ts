@@ -197,20 +197,19 @@ export {
   type Viewport,
 } from './render/viewport.js';
 
-// --- M5 live document feed (spec §9) ---------------------------------------
+// --- M5 live document feed (spec §9, over SSE since §16.3) -----------------
 export {
   connectViewer,
-  defaultWsUrl,
+  defaultEventsUrl,
   parseDocMessage,
   parseServerMessage,
   DOWN_AFTER_MS,
-  RECONNECT_BASE_MS,
-  RECONNECT_MAX_MS,
+  EVENTS_PATH,
   type ConnectionState,
   type ServerFrame,
-  type ViewerSocket,
-  type ViewerSocketOptions,
-} from './ws.js';
+  type ViewerStream,
+  type ViewerStreamOptions,
+} from './live.js';
 
 // --- M7 headless SVG export (spec Part 10 Step 16) -------------------------
 // Node-side: it serialises the very components above through

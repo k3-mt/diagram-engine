@@ -26,18 +26,52 @@ import type { GraphDoc } from '@diagram-engine/core';
 import type { ViewPresetName } from '../../../core/src/view/presets.js';
 import {
   INITIAL_VIEW_STATE,
+  activeDepth,
   collapsedKey,
+  containerRows,
+  depthOptions,
+  revealGroup,
+  clearSelection,
+  selectedIds,
+  toggleSelected,
   resolveView,
+  selectDepth,
   selectPreset,
   syncToDoc,
+  toggleGroup,
+  viewSummaryText,
+  type ContainerRow,
+  type DepthOption,
   type ResolvedView,
   type ViewState,
 } from './viewState.js';
 
-/** What the status-bar buttons and the layout pipeline need. */
+/** What the status-bar buttons, the sidebar and the layout pipeline need. */
 export interface ViewOverride extends ResolvedView {
   /** Press a button. Local only — never writes to the document (§1.6). */
   select: (name: ViewPresetName, opts?: { reverse?: boolean }) => void;
+  /** The levels of grain on offer, coarsest first (sidebar, Grain section). */
+  depths: DepthOption[];
+  /** The level the picture is at, or null when it is not a uniform level. */
+  depth: number | null;
+  /** Set the grain to one uniform level. */
+  selectDepth: (depth: number) => void;
+  /** One row per container, with its level, state and contents. */
+  containers: ContainerRow[];
+  /** Open or shut ONE container, leaving the rest of the picture alone. */
+  toggleContainer: (id: string) => void;
+  /** Go to a container: open it and every boundary hiding it. */
+  revealContainer: (id: string) => void;
+  /** Add or remove a container from the "show only these" selection. */
+  selectContainer: (id: string) => void;
+  /** How many containers are picked out; 0 means no selection is active. */
+  selectedCount: number;
+  /** Drop the selection and open everything. */
+  clearSelection: () => void;
+  /** True while the picture is the document's own view, not a local choice. */
+  followingDocument: boolean;
+  /** The status strip's one-line readout of all of the above. */
+  summary: string;
 }
 
 export function useViewOverride(doc: GraphDoc | null): ViewOverride {
@@ -75,5 +109,50 @@ export function useViewOverride(doc: GraphDoc | null): ViewOverride {
     [doc],
   );
 
-  return { ...resolved, collapsed, select };
+  const onSelectDepth = useCallback(
+    (depth: number) => setState((s) => selectDepth(doc, s, depth)),
+    [doc],
+  );
+
+  const toggleContainer = useCallback(
+    (id: string) => setState((s) => toggleGroup(doc, s, id)),
+    [doc],
+  );
+
+  const revealContainer = useCallback(
+    (id: string) => setState((s) => revealGroup(doc, s, id)),
+    [doc],
+  );
+
+  const selectContainer = useCallback(
+    (id: string) => setState((s) => toggleSelected(doc, s, id)),
+    [doc],
+  );
+
+  const onClearSelection = useCallback(() => setState((s) => clearSelection(s)), []);
+
+  // The sidebar's three sections, derived fresh each render like `active` and
+  // `focusLabel` above: they are small lists over doc.groups, and a stale one
+  // would show a renamed container under its old name. Only `collapsed` needs
+  // a stable identity, and only because the layout pipeline keys off it.
+  const depths = depthOptions(doc);
+  const picked = selectedIds(current);
+  const containers = containerRows(doc, resolved.collapsed, picked);
+
+  return {
+    ...resolved,
+    collapsed,
+    select,
+    depths,
+    depth: activeDepth(doc, resolved.collapsed),
+    selectDepth: onSelectDepth,
+    containers,
+    toggleContainer,
+    revealContainer,
+    selectContainer,
+    selectedCount: picked.length,
+    clearSelection: onClearSelection,
+    followingDocument: current.local === null,
+    summary: viewSummaryText(doc, resolved.collapsed),
+  };
 }

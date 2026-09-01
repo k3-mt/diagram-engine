@@ -625,7 +625,7 @@ The agent picks it up on next launch. Seven tools:
 | `diagram_patch` | `{ ops[], summary }` | `ok` + change summary + notes, **or** the error list |
 | `diagram_undo` | `{ }` | New state summary |
 | `diagram_redo` | `{ }` | New state summary |
-| `diagram_view` | `{ preset }` or `{ collapsed[] }` | Confirmation |
+| `diagram_view` | `{ preset }`, `{ depth }` or `{ collapsed[] }` | Confirmation |
 | `diagram_export` | `{ format, path }` | Written path |
 | `diagram_reset` | `{ confirm: true }` | Confirmation |
 
@@ -696,6 +696,7 @@ diagram patch --stdin <<< '{"ops":[...]}'      # apply
 diagram patch --file ops.json
 diagram undo | diagram redo
 diagram view exec | eng | focus <id>
+diagram view --depth <n>                       # collapse a container level, by rule
 diagram export svg --out arch.svg
 diagram check                                  # validate without changing
 diagram rules                                  # print the agent instructions
@@ -1141,11 +1142,32 @@ Edges internal to a collapsed group are dropped. Correct — an exec doesn't nee
 
 | Preset | `collapsed` |
 |---|---|
-| `exec` | root-level group IDs |
+| `exec` | group IDs at the shallowest level holding more than one group |
 | `eng` | `[]` |
 | `focus <id>` | all group IDs − `[id]` − ancestors of `id` |
+| `--depth N` | group IDs exactly `N` boundaries in |
 
-Reachable from `diagram view <preset>`, the `diagram_view` MCP tool, or three buttons in the viewer's status bar. Viewer buttons are viewport controls, not document edits, so they don't violate model-dictation.
+`exec` skips levels holding a single group. Wrap a diagram in one outer
+container and "collapse the root groups" collapses the whole picture to that
+wrapper, which summarises nothing; the level that actually divides the system
+is the one below it.
+
+### The view as a rule — `view.depth`
+
+`collapsed` is a list of IDs, so it answers the question for the document as it
+stood. Rename a group, add a stage, or reparent a boundary and the answer is
+silently wrong: the new group renders open because nobody named it.
+
+`doc.view.depth` stores the intent — *draw containers this many levels deep,
+collapse that level* — and `collapsed` is re-derived from it on every
+structural change (`applyPatch`, and `import` for the document it is handed).
+`exec` and `diagram view --depth N` store the rule; `eng`, `focus` and an
+explicit `collapsed` list clear it, because an explicit list is a deliberate
+choice and must never silently re-derive itself. A depth past the bottom of the
+tree collapses nothing and is not an error.
+
+Reachable from `diagram view <preset>`, `diagram view --depth <n>`, the
+`diagram_view` MCP tool, or three buttons in the viewer's status bar. Viewer buttons are viewport controls, not document edits, so they don't violate model-dictation.
 
 ---
 
@@ -1795,10 +1817,26 @@ Highest value per day in the project. Slots in after M7 and disturbs nothing.
 
 # Part 16 — Distribution
 
-**Status: not a v2 requirement.** Out of scope for M0–M8. This Part records how the engine
-reaches a team, and the constraints that shape the build if you want it to get there
-cleanly. Two of them — bundling and the dependency list — are cheaper to honour early than
-to retrofit.
+**Status: BUILT.** M16a–M16e are done; see `scripts/build-plugin.mjs`,
+`scripts/verify-plugin.mjs` and `packages/cli/scripts/bundle.mjs`.
+
+Four things this Part predicted, as they turned out in practice:
+
+- **§16.9's smoke test passed.** `${CLAUDE_PLUGIN_ROOT}` expands in `args` AND `env`, is
+  also exported into the server's environment, and a plugin with no root `package.json`
+  launches normally. The server's cwd is the USER'S project directory, so `.diagram/`
+  resolution needed no change at all.
+- **§16.3 understated the chokidar problem.** Dropping it was not a review-surface
+  improvement that could be deferred: `fsevents` is a `.node` binary, esbuild refuses to
+  bundle one, and the build fails outright. M16b is a precondition for M16a, not a
+  companion to it.
+- **§16.5 overstated the rules problem.** Only rule 1 named a tool; rule 11 had already
+  been reworded. It changed to "READ THE DIAGRAM FIRST" — role, not name — which is one
+  character shorter, so the compact form's budget absorbed it with no rule dropped.
+- **A new constraint, not anticipated here.** The bundles must be `.mjs`. Node decides
+  ESM-vs-CommonJS by finding a `package.json` up the tree, and this Part's whole point is
+  that there isn't one — so the extension is the only channel left to declare the format.
+  A `.js` bundle in the plugin is parsed as CommonJS and dies on load.
 
 ## 16.1 Why the plugin shape fits
 

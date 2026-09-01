@@ -369,18 +369,26 @@ export type Launcher = (req: LaunchRequest) => number | undefined;
 /**
  * Locate the `diagram` binary this process was built alongside.
  *
- * Two layouts, because this module runs from two places (the same two
+ * Three layouts, because this module runs from three places (the same three
  * serve/http.ts documents for its public dir):
+ *   bundled:  dist/bin/diagram-mcp.mjs         → dist/bin/diagram.mjs (§16.2)
  *   compiled: dist/cli/src/serve/autoserve.js  → dist/bin/diagram.js
  *   TS source: packages/cli/src/serve/         → packages/cli/dist/bin/diagram.js
  *
- * Returns null when neither exists — running from source with nothing built.
+ * The bundled candidate is a SIBLING: after bundling, the MCP server and the
+ * CLI are two files in the same dist/bin. It is listed first because it is the
+ * layout a plugin install sees, and auto-serve is the thing standing between a
+ * plugin user and "the agent says it added four nodes and nothing appears on
+ * screen" (§16.5).
+ *
+ * Returns null when none exists — running from source with nothing built.
  * Auto-serve then does nothing at all, silently: a patch must not fail, or
  * even nag, because a convenience could not find a binary.
  */
 export function viewerEntry(): string | null {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    path.resolve(here, 'diagram.mjs'), // dist/bin → sibling (bundled)
     path.resolve(here, '../../../bin/diagram.js'), // dist/cli/src/serve → dist/bin
     path.resolve(here, '../bin/diagram.js'), // dist/cli/src/serve → dist/cli/src/bin
     path.resolve(here, '../../dist/bin/diagram.js'), // src/serve → cli/dist/bin

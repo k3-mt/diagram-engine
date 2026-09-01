@@ -8,11 +8,20 @@ const ALLOWED_RUNTIME = new Set([
   '@modelcontextprotocol/sdk',
   'elkjs',
   'commander',
-  'chokidar',
-  'ws',
   'react',
   'react-dom',
 ]);
+
+// REMOVED, and deliberately not re-addable without a gate (spec §16.3):
+//   chokidar — the only reason a NATIVE binary (fsevents) was in the tree.
+//              esbuild cannot inline a .node file, so it did not merely add
+//              review surface: it made the bundled, lockfile-free plugin
+//              artifact of §16.2 impossible. §9 watches exactly one file,
+//              which fs.watch covers.
+//   ws       — the server only ever pushes and the browser never replies, so
+//              this was never a WebSocket use case. SSE over the http module
+//              already in use, with EventSource on the client side, removed
+//              a dependency AND the hand-rolled reconnecting client.
 
 // Internal workspace packages, ignored: they resolve inside this repo and
 // carry no supply-chain risk of their own.

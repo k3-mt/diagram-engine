@@ -56,18 +56,21 @@ export function contentTypeFor(filePath: string): string | undefined {
 /**
  * Resolve the default public dir (the prebuilt viewer bundle, §2.4).
  *
- * Two candidates, because this module runs from two places:
+ * Three candidates, because this module runs from three places:
+ * - bundled: dist/bin/diagram.js → dist/public is ../public (§16.2). This is
+ *   the layout a plugin install sees, and it is FIRST because it is the one
+ *   real users get; the other two are development layouts.
  * - compiled: dist/cli/src/serve/http.js → dist/public is ../../../public
  * - TS source (vitest / dev): packages/cli/src/serve/http.ts →
  *   packages/cli/dist/public is ../../dist/public
  *
- * The first candidate that exists wins; if neither exists yet (viewer not
- * built), the compiled-layout candidate is returned and requests 404.
- * NOTE: the integrate step (viewer build wiring) may adjust these candidates.
+ * The first candidate that exists wins; if none exists yet (viewer not
+ * built), the bundled-layout candidate is returned and requests 404.
  */
 export function defaultPublicDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    path.resolve(here, '../public'), // from dist/bin → dist/public (bundled)
     path.resolve(here, '../../../public'), // from dist/cli/src/serve → dist/public
     path.resolve(here, '../../dist/public'), // from src/serve → cli/dist/public
   ];
@@ -91,6 +94,16 @@ export interface HttpServerOptions {
    * exercise static hosting; the path then 404s like any other unknown route.
    */
   identity?: () => unknown;
+  /**
+   * The live-document subscription (serve/watch.ts), offered every GET before
+   * static resolution. Returns true when it answered the request.
+   *
+   * A hook rather than an attachment because SSE is an ordinary route: the
+   * WebSocket version had to be handed the live http.Server so it could claim
+   * the upgrade, which forced the watcher to be constructed after the server
+   * was already listening (§16.3).
+   */
+  sse?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean;
 }
 
 export interface StaticServer {
@@ -130,12 +143,18 @@ function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   identity?: () => unknown,
+  sse?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean,
 ): void {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('method not allowed\n');
     return;
   }
+  // The event stream (§9), offered before identity and before any static
+  // resolution. It answers only its own path and returns false otherwise.
+  // HEAD is excluded deliberately: a stream that never ends has no headers
+  // worth probing, and answering one would hang the prober.
+  if (sse !== undefined && req.method === 'GET' && sse(req, res)) return;
   // The identity endpoint (§9.1, S2), answered before any static resolution:
   // it is how another process asks "is the thing on this port the viewer for
   // this document?" and gets an answer a bare TCP connect cannot give.
@@ -198,7 +217,7 @@ export async function startHttpServer(
   const requested = opts.port ?? DEFAULT_PORT;
   const publicDir = path.resolve(opts.publicDir ?? defaultPublicDir());
   const server = http.createServer((req, res) =>
-    handleRequest(publicDir, req, res, opts.identity),
+    handleRequest(publicDir, req, res, opts.identity, opts.sse),
   );
 
   const lastPort = requested === 0 ? 0 : requested + PORT_ATTEMPTS;

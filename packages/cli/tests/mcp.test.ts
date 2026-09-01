@@ -116,7 +116,7 @@ describe('diagram_patch description — the prompt', () => {
   const description = findTool('diagram_patch')!.description;
 
   it('carries the authoring rules, not just a blurb', async () => {
-    expect(description).toContain('CALL diagram_get FIRST');
+    expect(description).toContain('READ THE DIAGRAM FIRST');
     expect(description).toContain('lowercase-hyphenated');
     expect(description).toContain('MINIMAL OPS');
     expect(description).toContain('EDGE DIRECTION');
@@ -302,12 +302,13 @@ describe('diagram_view', () => {
     const ctx = await seeded();
     const result = await callTool('diagram_view', { preset: 'exec' }, ctx);
     expect(result.ok).toBe(true);
-    // The same three lines `diagram view exec` prints — the tool and the CLI
-    // run one body, so this pins that they cannot drift apart.
+    // The same lines `diagram view exec` prints — the tool and the CLI run one
+    // body, so this pins that they cannot drift apart.
     expect(result.text).toBe(
       [
         'ok — view exec',
         'collapsed: vpc (1 of 1 group)',
+        'rule: depth 0 — kept in step as groups are added or renamed',
         'graph: 2 nodes, 1 group, 1 edge',
       ].join(
         '\n',

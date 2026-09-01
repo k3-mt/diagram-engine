@@ -145,7 +145,7 @@ describe('compactRules', () => {
       .filter((n): n is string => n !== undefined)
       .map(Number);
     expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15]);
-    expect(compact).toContain('CALL diagram_get FIRST');
+    expect(compact).toContain('READ THE DIAGRAM FIRST');
     expect(compact).toContain('DO NOT INVENT');
     // Rule 9's edge-level prohibition. Rule 8 is entirely about BOXES ("a
     // mention is not a component"), so this sentence is the only thing in the
@@ -181,7 +181,7 @@ describe('compactRules', () => {
     // Rule 1 is wrapped across four lines in the markdown; a half-quoted rule
     // would read as a mangled instruction, so it must survive intact.
     expect(compact).toContain(
-      '1. CALL diagram_get FIRST if you are not sure of the current state. Reuse existing ids.',
+      '1. READ THE DIAGRAM FIRST if you are not sure of the current state. Reuse existing ids.',
     );
     for (const rule of compact.split('\n')) {
       if (/^\d+\. /.test(rule)) expect(rule.endsWith('.')).toBe(true);

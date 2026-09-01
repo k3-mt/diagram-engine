@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { GraphPatch } from '../../core/src/index.js';
 import { buildProgram } from '../src/bin/diagram.js';
+import { CLI_VERSION } from '../src/index.js';
 import { createContext, type DiagramContext } from '../src/commands/context.js';
 import { runAnalyse } from '../src/commands/analyse.js';
 import { runGet } from '../src/commands/get.js';
@@ -194,10 +195,11 @@ describe('the CLI and the MCP tools are one implementation', () => {
     const viaTool = (await callTool('diagram_view', { preset: 'exec' }, await seeded())).text;
     const viaCli = runView('exec', { dir: (await seeded()).dir }).text;
     expect(viaTool).toBe(viaCli);
-    // Three result lines and no fourth: the M7 caveat is gone now that the
-    // viewer and `export svg` both honour collapsed, and it has to disappear
-    // from both surfaces at once or neither.
-    expect(viaTool.split('\n')).toHaveLength(3);
+    // Headline, collapsed, the stored rule, counts — and no caveat line: the
+    // M7 caveat is gone now that the viewer and `export svg` both honour
+    // collapsed, and it has to disappear from both surfaces at once or neither.
+    expect(viaTool.split('\n')).toHaveLength(4);
+    expect(viaTool).toContain('rule: depth 0');
   });
 
   it('sets an explicit collapsed list identically on both surfaces', async () => {
@@ -373,13 +375,28 @@ describe('the CLI and the MCP tools are one implementation', () => {
 describe('the package declares both binaries', () => {
   const pkg = JSON.parse(
     fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf8'),
-  ) as { bin: Record<string, string> };
+  ) as { bin: Record<string, string>; version: string };
 
+  // .mjs, not .js, and that is load-bearing rather than cosmetic (§16.2):
+  // the plugin artifact ships NO package.json, so nothing tells Node these
+  // ESM bundles are ESM except their extension. A .js bundle there is parsed
+  // as CommonJS and dies on its own first import.
   it('maps diagram and diagram-mcp to stable dist/bin paths', async () => {
     expect(pkg.bin).toEqual({
-      diagram: 'dist/bin/diagram.js',
-      'diagram-mcp': 'dist/bin/diagram-mcp.js',
+      diagram: 'dist/bin/diagram.mjs',
+      'diagram-mcp': 'dist/bin/diagram-mcp.mjs',
     });
+  });
+
+  // CLI_VERSION is hand-synced with package.json, the same way rules.md is
+  // hand-synced with its embedded constant — so it gets the same treatment: a
+  // test, not good intentions. It matters more than a version string usually
+  // does, because build-plugin.mjs reads package.json to stamp plugin.json and
+  // the marketplace entry, and §16.7 makes that number the thing users PIN.
+  // A `diagram --version` disagreeing with the pinned plugin version is the
+  // kind of discrepancy that only surfaces while debugging something else.
+  it('reports the package version from `diagram --version`', async () => {
+    expect(CLI_VERSION).toBe(pkg.version);
   });
 
   it('has a source entry point for every declared binary', async () => {

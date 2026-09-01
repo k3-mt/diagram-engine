@@ -178,3 +178,35 @@ export function coerceOp(doc: GraphDoc, op: PatchOp): CoercedOp {
       return { op };
   }
 }
+
+/**
+ * The document's own file name, derived from its title (spec §3.1's title is
+ * the only human name a diagram has, so an export named after anything else
+ * is an export nobody can identify a month later).
+ *
+ * snake_case rather than the kebab-case of an element id: this names a FILE,
+ * and a file sitting beside code is read as a file — `source_registry.json`,
+ * not `source-registry.json`. The two conventions are deliberately different
+ * so a slug is never mistaken for a filename or the reverse.
+ *
+ * Returns null when the title yields nothing usable — empty, punctuation
+ * only, or the placeholder "Untitled" every new document starts with. A
+ * caller then falls back to its own default rather than writing `.json` or
+ * `untitled.json`, which would collide across every unnamed diagram on disk.
+ */
+export function documentSlug(title: string): string | null {
+  const normalised = title
+    .normalize('NFKD')
+    // Strip accents so "Rése" and "Rese" do not produce two different files.
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    // Em dashes, slashes and punctuation all become the one separator; a
+    // title reads as prose and must not leave shell-hostile characters in a
+    // filename.
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64)
+    .replace(/_+$/g, '');
+  if (normalised === '' || normalised === 'untitled') return null;
+  return normalised;
+}

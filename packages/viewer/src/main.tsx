@@ -94,6 +94,7 @@ import {
   type Caption,
 } from './render/OverlayCaption.js';
 import { BAR_HEIGHT, StatusBar, type DocError } from './render/StatusBar.js';
+import { SIDEBAR_WIDTH, Sidebar } from './render/Sidebar.js';
 import { SaveButtons } from './render/SaveButtons.js';
 import { theme } from './render/theme.js';
 import { ViewButtons } from './render/ViewButtons.js';
@@ -102,7 +103,7 @@ import { analysisPlan, blastPlan } from './view/overlayPlan.js';
 import { buildDrawnIndex } from './view/overlayState.js';
 import { useOverlay } from './view/useOverlay.js';
 import { useViewOverride } from './view/useViewOverride.js';
-import { connectViewer, type ConnectionState } from './ws.js';
+import { connectViewer, type ConnectionState } from './live.js';
 
 /** WorkerLike speaking the §5.4 protocol on this thread (see header note). */
 function makeLayoutWorker(): WorkerLike {
@@ -163,12 +164,21 @@ function buildFrame(pending: Pending, laidOut: LaidOut): Frame {
   };
 }
 
-/** Window size minus the status strip, tracked for fit-to-content (§8.3). */
-function useCanvasSize(): { vw: number; vh: number } {
+/**
+ * Window size minus the status strip AND the sidebar, tracked for
+ * fit-to-content (§8.3). The panel takes width away from the canvas rather
+ * than floating over it: fit-to-content has to fit the space the diagram
+ * actually has, or opening the panel would push half the picture underneath
+ * it. `panelWidth` is 0 while the panel is shut, and changing it re-fits.
+ */
+function useCanvasSize(panelWidth: number): { vw: number; vh: number } {
   const read = (): { vw: number; vh: number } =>
     typeof window === 'undefined'
       ? { vw: 0, vh: 0 }
-      : { vw: window.innerWidth, vh: Math.max(0, window.innerHeight - BAR_HEIGHT) };
+      : {
+          vw: Math.max(0, window.innerWidth - panelWidth),
+          vh: Math.max(0, window.innerHeight - BAR_HEIGHT),
+        };
   const [size, setSize] = useState(read);
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -176,7 +186,7 @@ function useCanvasSize(): { vw: number; vh: number } {
     window.addEventListener('resize', onResize);
     onResize();
     return () => window.removeEventListener('resize', onResize);
-  }, []);
+  }, [panelWidth]);
   return size;
 }
 
@@ -433,7 +443,11 @@ export function App(): JSX.Element {
     client.request(derived);
   }, [doc, detail, derived]);
 
-  const { vw, vh } = useCanvasSize();
+  // The panel is open by default: its whole reason to exist is that the levels
+  // of a nested diagram are invisible until something lists them.
+  const [panelOpen, setPanelOpen] = useState(true);
+  const panelWidth = panelOpen ? SIDEBAR_WIDTH : 0;
+  const { vw, vh } = useCanvasSize(panelWidth);
   const bounds = useMemo(
     () =>
       frame === null
@@ -621,7 +635,7 @@ export function App(): JSX.Element {
         onPointerLeave={view.onPointerLeave}
         style={{
           position: 'absolute',
-          left: 0,
+          left: panelWidth,
           right: 0,
           top: 0,
           bottom: BAR_HEIGHT,
@@ -695,12 +709,50 @@ export function App(): JSX.Element {
             decision. It carries the A4/A5/C2/C3 sentences verbatim. */}
         {caption === null ? null : <OverlayCaption caption={caption} />}
       </div>
+      {panelOpen ? (
+        <Sidebar
+          depths={views.depths}
+          activeDepth={views.depth}
+          onSelectDepth={views.selectDepth}
+          containers={views.containers}
+          onToggleContainer={views.toggleContainer}
+          onRevealContainer={views.revealContainer}
+          onSelectContainer={views.selectContainer}
+          selectedCount={views.selectedCount}
+          onClearSelection={views.clearSelection}
+          followingDocument={views.followingDocument}
+          onClose={() => setPanelOpen(false)}
+        />
+      ) : null}
       <StatusBar
         title={doc?.title ?? 'diagram'}
         counts={counts}
         connection={connection}
         lastUpdate={lastUpdate}
         docError={docError}
+        viewSummary={views.summary}
+        panel={
+          <button
+            type="button"
+            data-testid="panel-toggle"
+            aria-expanded={panelOpen}
+            aria-label="View controls"
+            title={panelOpen ? 'Hide the view panel' : 'Show the view panel'}
+            onClick={() => setPanelOpen((open) => !open)}
+            style={{
+              font: 'inherit',
+              lineHeight: 1,
+              padding: '3px 7px',
+              borderRadius: 4,
+              cursor: 'pointer',
+              background: panelOpen ? theme.text.primary : 'transparent',
+              border: `1px solid ${panelOpen ? theme.text.primary : theme.node.stroke}`,
+              color: panelOpen ? theme.canvas : theme.text.secondary,
+            }}
+          >
+            ☰
+          </button>
+        }
         views={
           <ViewButtons
             active={views.active}

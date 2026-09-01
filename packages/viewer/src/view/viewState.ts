@@ -63,6 +63,11 @@ import {
   resolvePreset,
   type ViewPresetName,
 } from '@diagram-engine/core/src/view/presets.js';
+import {
+  collapsedAtDepth,
+  depthOf,
+  maxGroupDepth,
+} from '@diagram-engine/core/src/view/depth.js';
 
 /**
  * The viewer's whole view state. Two fields, both nullable, both meaning
@@ -76,10 +81,25 @@ export interface ViewState {
   local: string[] | null;
   /** The group [focus] is currently pointed at, or null to infer one. */
   focus: string | null;
+  /**
+   * The containers the reader has picked out to see — "show me only these".
+   * `local` still says what is drawn; this remembers WHICH ROWS ARE LIT so
+   * membership can be toggled, and so the highlight in the list cannot
+   * disagree with the picture.
+   *
+   * Optional, and absent means none: every state built before this existed
+   * stays valid, and `selectedIds` is the one way to read it.
+   */
+  selected?: string[];
 }
 
-/** First paint: follow the document in both respects. */
-export const INITIAL_VIEW_STATE: ViewState = { local: null, focus: null };
+/** First paint: follow the document in every respect. */
+export const INITIAL_VIEW_STATE: ViewState = { local: null, focus: null, selected: [] };
+
+/** The picked-out containers, never undefined. */
+export function selectedIds(state: ViewState): string[] {
+  return state.selected ?? [];
+}
 
 /**
  * Order-insensitive identity for a collapsed list. Used both to decide
@@ -216,7 +236,7 @@ export function selectPreset(
 
   if (name !== 'focus') {
     const ids = collapsedFor(doc, name, null);
-    return ids === null ? state : { local: ids, focus: state.focus };
+    return ids === null ? state : { local: ids, focus: state.focus, selected: [] };
   }
 
   if (!canFocus(doc)) return state; // the button is disabled; be safe anyway
@@ -226,7 +246,7 @@ export function selectPreset(
     ? nextFocusTarget(doc, current, opts.reverse === true ? -1 : 1)
     : current;
   const ids = target === null ? null : collapsedFor(doc, 'focus', target);
-  return ids === null ? state : { local: ids, focus: target };
+  return ids === null ? state : { local: ids, focus: target, selected: [] };
 }
 
 /**
@@ -290,4 +310,336 @@ export function resolveView(doc: GraphDoc | null, state: ViewState): ResolvedVie
     focusLabel: focusCandidates(doc).find((g) => g.id === focus)?.label ?? null,
     focusEnabled: canFocus(doc),
   };
+}
+
+// ---------------------------------------------------------------------------
+// GRAIN AND PER-CONTAINER CONTROL (the sidebar)
+//
+// The three presets answer "which audience". They do not answer the two
+// questions a reader actually asks while looking at a nested diagram:
+//
+//   "show me one level less detail"      -> a LEVEL, uniformly applied
+//   "open just this one boundary"        -> ONE container, by name
+//
+// Both are still viewport controls in the §7 sense — they set the same local
+// override the buttons do, nothing is written, and a new doc.collapsed from
+// the agent still wins. What follows is only the pure logic; the components
+// live in render/Sidebar.tsx and its two children.
+// ---------------------------------------------------------------------------
+
+/** One selectable level of grain, with what it would collapse. */
+export interface DepthOption {
+  /** Container level, counted from the outside in: 0 is the top-level groups. */
+  depth: number;
+  /** The group ids this level collapses. */
+  ids: string[];
+  /** How many groups that is — what the row shows. */
+  count: number;
+}
+
+/**
+ * Every level worth offering, coarsest first, plus the "everything open" end
+ * of the range. A document with no groups offers nothing but that.
+ *
+ * The list stops at the deepest level that holds a group: offering level 7 on
+ * a three-level diagram would be a control that visibly does nothing.
+ */
+export function depthOptions(doc: GraphDoc | null): DepthOption[] {
+  if (doc === null || doc.groups.length === 0) return [];
+  const deepest = maxGroupDepth(doc);
+  const out: DepthOption[] = [];
+  for (let depth = 0; depth <= deepest; depth += 1) {
+    const ids = collapsedAtDepth(doc, depth);
+    out.push({ depth, ids, count: ids.length });
+  }
+  return out;
+}
+
+/**
+ * Which level the current picture is at, or null when the collapsed set is
+ * not a level at all — which is the honest answer after someone has opened
+ * one container by hand. Highlighting a level then would claim a uniformity
+ * the picture does not have.
+ */
+export function activeDepth(
+  doc: GraphDoc | null,
+  collapsed: readonly string[],
+): number | null {
+  if (doc === null) return null;
+  const key = collapsedKey(collapsed);
+  for (const option of depthOptions(doc)) {
+    if (collapsedKey(option.ids) === key) return option.depth;
+  }
+  return null;
+}
+
+/** Set the grain to one uniform level. */
+export function selectDepth(
+  doc: GraphDoc | null,
+  state: ViewState,
+  depth: number,
+): ViewState {
+  if (doc === null) return state;
+  // A level is a different way of deciding what is open, so it ends the
+  // "only these" selection rather than leaving a highlight that no longer
+  // describes the picture.
+  return { local: collapsedAtDepth(doc, depth), focus: state.focus, selected: [] };
+}
+
+/**
+ * Open or shut ONE container, leaving every other decision alone.
+ *
+ * This is the control the viewer never had: with only presets, seeing inside
+ * one boundary meant `focus`, which shuts every OTHER boundary as a side
+ * effect. Here the rest of the picture holds still.
+ */
+export function toggleGroup(
+  doc: GraphDoc | null,
+  state: ViewState,
+  id: string,
+): ViewState {
+  if (doc === null || !doc.groups.some((g) => g.id === id)) return state;
+  const current = effectiveCollapsed(doc, state);
+  const next = current.includes(id)
+    ? current.filter((c) => c !== id)
+    : [...current, id];
+  return { local: next, focus: state.focus, selected: [] };
+}
+
+/**
+ * The containers enclosing `id`, nearest first. A parent cycle terminates on
+ * the seen set rather than spinning (V4 rejects one, but this never assumes
+ * validation ran).
+ */
+export function ancestorIds(doc: GraphDoc, id: string): string[] {
+  const parentOf = new Map<string, string | null>();
+  for (const g of doc.groups) parentOf.set(g.id, g.parent);
+  const out: string[] = [];
+  const seen = new Set<string>([id]);
+  let cur = parentOf.get(id) ?? null;
+  while (cur !== null && !seen.has(cur)) {
+    out.push(cur);
+    seen.add(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return out;
+}
+
+/**
+ * GO TO a container: open it, and open everything hiding it.
+ *
+ * The difference from toggleGroup is the ancestors. A row three levels down
+ * may be perfectly "open" and still not on screen because a boundary above it
+ * is shut — opening only itself would leave the reader clicking a row that
+ * visibly does nothing, which is exactly the dead end this replaces. So the
+ * whole chain from the outermost boundary down to the target comes open, and
+ * every OTHER container keeps the state the reader gave it.
+ *
+ * Deliberately not `focus`: focus shuts every unrelated boundary to isolate
+ * one. This only opens; nothing else in the picture closes.
+ */
+export function revealGroup(
+  doc: GraphDoc | null,
+  state: ViewState,
+  id: string,
+): ViewState {
+  if (doc === null || !doc.groups.some((g) => g.id === id)) return state;
+  const open = new Set<string>([id, ...ancestorIds(doc, id)]);
+  const next = effectiveCollapsed(doc, state).filter((c) => !open.has(c));
+  return { local: next, focus: state.focus, selected: [] };
+}
+
+/**
+ * "Show me only these": the collapsed list that leaves `ids` open and shuts
+ * every other container.
+ *
+ * Ancestors of a selected container stay open too — they have to, or the
+ * selected one is inside a shut box and the whole point is lost. Everything
+ * else collapses, INCLUDING the descendants of a selection, so picking a
+ * container shows what is directly in it rather than exploding three levels
+ * of nesting onto the screen. Pick the child as well when you want that.
+ *
+ * An empty selection collapses nothing: with nothing picked out, "only these"
+ * has no meaning, and shutting everything would be a strange way to say it.
+ */
+export function isolateCollapsed(
+  doc: GraphDoc | null,
+  ids: readonly string[],
+): string[] {
+  if (doc === null || ids.length === 0) return [];
+  const open = new Set<string>();
+  for (const id of ids) {
+    open.add(id);
+    for (const a of ancestorIds(doc, id)) open.add(a);
+  }
+  return doc.groups.filter((g) => !open.has(g.id)).map((g) => g.id);
+}
+
+/**
+ * Add or remove one container from the selection, and redraw as "only these".
+ *
+ * Clearing the last one shows EVERYTHING rather than nothing. The alternative
+ * — falling back to whatever was on screen before the selection started —
+ * means the same gesture (unpick the last row) lands somewhere different
+ * depending on history, which is the kind of control people stop trusting.
+ */
+export function toggleSelected(
+  doc: GraphDoc | null,
+  state: ViewState,
+  id: string,
+): ViewState {
+  if (doc === null || !doc.groups.some((g) => g.id === id)) return state;
+  const current = selectedIds(state);
+  const next = current.includes(id)
+    ? current.filter((c) => c !== id)
+    : [...current, id];
+  return { local: isolateCollapsed(doc, next), focus: state.focus, selected: next };
+}
+
+/** Drop the selection and open everything. */
+export function clearSelection(state: ViewState): ViewState {
+  return { local: [], focus: state.focus, selected: [] };
+}
+
+/** One row of the container tree the sidebar draws. */
+export interface ContainerRow {
+  group: GGroup;
+  /** Container level, for the row's indent and its level badge. */
+  depth: number;
+  /** True when this group is itself collapsed. */
+  collapsed: boolean;
+  /**
+   * True when an ANCESTOR is collapsed, so this row is not on screen at all
+   * whatever its own state. The row stays listed and says so, because
+   * hiding it would leave the reader hunting for a group the diagram no
+   * longer shows.
+   */
+  hiddenByAncestor: boolean;
+  /**
+   * The NEAREST collapsed container above this one, or null when nothing is
+   * hiding it. Carried as a label rather than just a flag so the row can name
+   * the thing to open — "inside Landing zone, which is collapsed" is a hint
+   * someone can act on; a grey row is not.
+   */
+  hiddenBy: { id: string; label: string } | null;
+  /** Nodes directly inside, for the "what is in here" count. */
+  nodeCount: number;
+  /** Groups directly inside. */
+  groupCount: number;
+  /** True when this container is one of the picked-out set. */
+  selected: boolean;
+}
+
+/**
+ * The container tree in document order, with each row's depth, state and
+ * contents. Document order rather than sorted: it matches `focus`'s cycle and
+ * stays stable when a group is relabelled.
+ */
+export function containerRows(
+  doc: GraphDoc | null,
+  collapsed: readonly string[],
+  selected: readonly string[] = [],
+): ContainerRow[] {
+  if (doc === null) return [];
+  const picked = new Set(selected);
+  const shut = new Set(collapsed);
+  const labelOf = new Map(doc.groups.map((g) => [g.id, g.label]));
+  // Nearest first, so the name offered is the one boundary that actually has
+  // to open next — not the outermost one, which may be several steps away.
+  const hiderOf = (id: string): { id: string; label: string } | null => {
+    const hit = ancestorIds(doc, id).find((a) => shut.has(a));
+    return hit === undefined ? null : { id: hit, label: labelOf.get(hit) ?? hit };
+  };
+
+  return doc.groups.map((group) => {
+    const hiddenBy = hiderOf(group.id);
+    return {
+    group,
+    depth: depthOf(doc, group.id),
+    collapsed: shut.has(group.id),
+    hiddenByAncestor: hiddenBy !== null,
+    hiddenBy,
+    nodeCount: doc.nodes.filter((n) => n.parent === group.id).length,
+    groupCount: doc.groups.filter((g) => g.parent === group.id).length,
+    selected: picked.has(group.id),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// SAYING WHAT A ROW MEANS
+//
+// Three visual states were carrying meaning that only the author knew: dimmed,
+// tinted grey, and blue-barred. Colour alone is a poor way to say "this is not
+// on screen because something else is shut" — it is unreadable to anyone who
+// cannot separate the tones, and unguessable to everyone else. So every row
+// states its condition in words on hover, and the words name the container to
+// act on rather than describing the shade.
+// ---------------------------------------------------------------------------
+
+/** The short chip at the end of the row: its state, or what is inside it. */
+export function rowStateText(row: ContainerRow): string {
+  if (row.hiddenByAncestor) return 'not shown';
+  if (row.collapsed) return 'collapsed';
+  const parts: string[] = [];
+  if (row.nodeCount > 0) {
+    parts.push(`${row.nodeCount} node${row.nodeCount === 1 ? '' : 's'}`);
+  }
+  if (row.groupCount > 0) {
+    parts.push(`${row.groupCount} container${row.groupCount === 1 ? '' : 's'}`);
+  }
+  return parts.length === 0 ? 'empty' : parts.join(' · ');
+}
+
+/**
+ * The full sentence on hover: what this row's appearance means, and what
+ * pressing it will do. Ordered by what the reader is most likely confused
+ * about — being hidden beats being collapsed, which beats being ticked.
+ */
+export function rowHint(row: ContainerRow): string {
+  const name = row.group.label;
+  if (row.hiddenBy !== null) {
+    return (
+      `“${name}” is not on the diagram right now: “${row.hiddenBy.label}” is ` +
+      'collapsed around it. Click this name to go there — every container ' +
+      'above it opens, and nothing else closes.'
+    );
+  }
+  if (row.collapsed) {
+    return (
+      `“${name}” is drawn as a single box; what is inside it is hidden. ` +
+      'Click the chevron to open it in place.'
+    );
+  }
+  if (row.selected) {
+    return (
+      `“${name}” is one of the ticked containers, so it is open while every ` +
+      'unticked container is collapsed. Untick it to drop it from the set.'
+    );
+  }
+  return `“${name}” is open, showing ${rowStateText(row)}. The chevron collapses it.`;
+}
+
+/**
+ * The one-line readout the status strip carries: what the picture is showing
+ * right now, in the same words the sidebar uses.
+ *
+ *   "all containers open"
+ *   "level 1 · 5 of 8 containers collapsed"
+ *   "4 of 8 containers collapsed"      (a hand-picked set, no level)
+ *
+ * It lives here rather than in the bar because it is a statement about the
+ * VIEW, and the bar is deliberately dumb about views.
+ */
+export function viewSummaryText(
+  doc: GraphDoc | null,
+  collapsed: readonly string[],
+): string {
+  const total = doc?.groups.length ?? 0;
+  if (total === 0) return 'no containers';
+  const shut = new Set(collapsed).size;
+  if (shut === 0) return 'all containers open';
+  const depth = activeDepth(doc, collapsed);
+  const level = depth === null ? '' : `level ${depth} · `;
+  return `${level}${shut} of ${total} containers collapsed`;
 }

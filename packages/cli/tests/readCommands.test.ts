@@ -260,8 +260,11 @@ describe('diagram view', () => {
     expect(result.text.split('\n')).toEqual([
       'ok — view exec',
       'collapsed: vpc-private, edge (2 of 3 groups)',
-      // Exactly three lines: the collapse is honoured by the viewer and by
-      // `diagram export svg`, so there is nothing left to caveat.
+      // The level exec chose, stored on the document so a group added later is
+      // collapsed by the same rule instead of appearing open.
+      'rule: depth 0 — kept in step as groups are added or renamed',
+      // No fourth caveat line: the collapse is honoured by the viewer and by
+      // `diagram export svg`, so there is nothing left to say.
       'graph: 3 nodes, 3 groups, 1 edge',
     ]);
     expect(collapsedOnDisk(dir)).toEqual(['vpc-private', 'edge']);

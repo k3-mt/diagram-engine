@@ -77,7 +77,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Command } from 'commander';
-import type { GraphDoc } from '../../../core/src/index.js';
+import { documentSlug, type GraphDoc } from '../../../core/src/index.js';
 import { exportSvg } from '../../../viewer/src/export/toSvg.js';
 import {
   createContext,
@@ -111,16 +111,44 @@ export interface ExportOptions extends ContextOptions {
 }
 
 /**
- * The json export's default filename. Exported because the diagram_export MCP
- * tool advertises it in two separate strings (its description and its input
- * schema), and two hand-written copies of a filename is how the surface ends
- * up telling the agent one name and writing another.
+ * The json export's default filename, for a document with no usable title.
+ * Exported because the diagram_export MCP tool advertises it in two separate
+ * strings (its description and its input schema), and two hand-written copies
+ * of a filename is how the surface ends up telling the agent one name and
+ * writing another.
  */
 export const DEFAULT_JSON_OUT = 'out.json';
 
-/** Where a format writes when --out is not given. */
-export function defaultOutPath(ctx: DiagramContext, format: ExportFormat): string {
-  return format === 'svg' ? ctx.paths.svgFile : path.join(ctx.dir, DEFAULT_JSON_OUT);
+/**
+ * Where a format writes when --out is not given.
+ *
+ * THE FILE IS NAMED AFTER THE DOCUMENT. `diagram patch` with a setTitle op
+ * renames the exports that follow it, so the copy someone finds on disk
+ * carries the diagram's own name instead of `out.json` — which is
+ * indistinguishable from every other diagram's export the moment two of them
+ * are in a downloads folder together. The name is snake_case (documentSlug),
+ * not the kebab-case of an element id, because this is a filename.
+ *
+ * `title` absent, blank or still "Untitled" falls back to out.json/out.svg:
+ * an unnamed diagram must not claim a name, and `untitled.json` would collide
+ * across every unnamed diagram on the machine.
+ *
+ * Nothing here renames the STORE. `.diagram/graph.json` is resolved by path
+ * (core's store/paths.ts) and is what every tool opens; a document whose
+ * working file moved on every retitle would break discovery, history and the
+ * running viewer at once. The title names the copies you hand over, not the
+ * file the engine works in.
+ */
+export function defaultOutPath(
+  ctx: DiagramContext,
+  format: ExportFormat,
+  title?: string,
+): string {
+  const slug = title === undefined ? null : documentSlug(title);
+  if (slug === null) {
+    return format === 'svg' ? ctx.paths.svgFile : path.join(ctx.dir, DEFAULT_JSON_OUT);
+  }
+  return path.join(ctx.dir, `${slug}.${format}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +230,7 @@ function prepareExport(opts: ExportOptions): ExportStep {
   const out =
     opts.out !== undefined && opts.out !== ''
       ? path.resolve(opts.out)
-      : defaultOutPath(ctx, format);
+      : defaultOutPath(ctx, format, loaded.doc.title);
 
   if (format === 'json') {
     // --full is meaningless here (json is always the stored document), and

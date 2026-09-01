@@ -2,7 +2,7 @@
 //
 // Wires the three pieces:
 //   1. a static http server for the prebuilt viewer bundle (serve/http.ts),
-//   2. the graph.json watcher + WebSocket broadcast (serve/watch.ts),
+//   2. the graph.json watcher + SSE broadcast (serve/watch.ts),
 //   3. the browser, opened once via child_process (no `open` dependency).
 //
 // The .diagram/ directory is created on demand and seeded with an empty but
@@ -29,7 +29,7 @@ import {
   writeServeRecord,
   type ServeRecord,
 } from '../serve/autoserve.js';
-import { attachDocSync, type DocSync } from '../serve/watch.js';
+import { createDocSync, type DocSync } from '../serve/watch.js';
 
 export interface ServeOptions {
   /** Requested port; default 4400, auto-incremented on EADDRINUSE (§9). */
@@ -130,15 +130,20 @@ export async function runServe(opts: ServeOptions = {}): Promise<ServeHandle> {
   // (§9, 4400 → 4410) is precisely the case the probe has to see through.
   const graphFile = diagramPaths(dir).graphFile;
   let record: ServeRecord | undefined;
+  // The watcher is built BEFORE the server, which the WebSocket version could
+  // not do: it needed a listening server to claim the upgrade. An SSE route is
+  // an ordinary handler, so the watch is already live when the first byte can
+  // possibly arrive (§16.3).
+  const sync = createDocSync(dir);
+  // Do not announce the server before the file watch is live: a patch
+  // written in that window would otherwise be missed by every client.
+  await sync.ready;
   const httpServer = await startHttpServer({
     ...(opts.port !== undefined ? { port: opts.port } : {}),
     ...(opts.publicDir !== undefined ? { publicDir: opts.publicDir } : {}),
     identity: () => record ?? { contract: VIEWER_CONTRACT, document: graphFile, dir },
+    sse: (req, res) => sync.handleRequest(req, res),
   });
-  const sync = attachDocSync(httpServer.server, dir);
-  // Do not announce the server before the file watch is live: a patch
-  // written in that window would otherwise be missed by every client.
-  await sync.ready;
 
   // localhost (not 127.0.0.1) in the browser URL: same address, friendlier
   // in the address bar. The socket itself is bound to 127.0.0.1 only.

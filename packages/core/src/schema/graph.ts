@@ -291,6 +291,37 @@ export type GEdge = z.infer<typeof GEdgeSchema>;
 export const DirectionSchema = z.enum(['DOWN', 'RIGHT']);
 export type Direction = z.infer<typeof DirectionSchema>;
 
+/**
+ * Deepest container level a stored view may name. A diagram nested sixteen
+ * boundaries deep has a bigger problem than its view setting, and the bound
+ * keeps `{"depth": 1e9}` out of the document.
+ */
+export const MAX_VIEW_DEPTH = 16;
+
+/**
+ * ViewSetting — the stored view as a RULE rather than a list.
+ *
+ * `collapsed` is a list of group ids, so it answers "which groups are shut"
+ * for the document as it was when the view was set. Rename a group, add a
+ * fifth stage, wrap everything in a new outer boundary, and that answer is
+ * silently wrong: the new group renders open because nobody named it.
+ *
+ * `view.depth` says the thing the reader actually meant — "draw containers
+ * this many levels deep, collapse what is at that level" — and `collapsed` is
+ * re-derived from it on every structural change (see view/depth.ts). Absent
+ * means the document is holding an explicit list that someone chose by hand,
+ * which is still the escape hatch and is never overwritten.
+ */
+export const ViewSettingSchema = z.object({
+  /**
+   * How many container levels are drawn open. 0 collapses every top-level
+   * boundary; 1 opens those and collapses their children; a depth past the
+   * bottom of the tree collapses nothing.
+   */
+  depth: z.number().int().min(0).max(MAX_VIEW_DEPTH),
+});
+export type ViewSetting = z.infer<typeof ViewSettingSchema>;
+
 /** GraphDoc (spec §3.1). The single source of truth on disk. */
 export const GraphDocSchema = z.object({
   schemaVersion: z.literal(1),
@@ -300,5 +331,11 @@ export const GraphDocSchema = z.object({
   groups: z.array(GGroupSchema),
   edges: z.array(GEdgeSchema),
   collapsed: z.array(z.string()),
+  /**
+   * The rule `collapsed` was derived from, when there is one. Optional so
+   * every document written before this field existed still parses, and so an
+   * explicitly chosen list stays explicit.
+   */
+  view: ViewSettingSchema.optional(),
 });
 export type GraphDoc = z.infer<typeof GraphDocSchema>;

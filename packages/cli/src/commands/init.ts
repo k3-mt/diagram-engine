@@ -68,6 +68,14 @@ export interface InitOptions {
   dir?: string;
   /** Which agent's MCP config to write. Default: 'claude'. */
   agent?: InitAgent;
+  /**
+   * Treat this as a plugin install: the plugin already provides .mcp.json,
+   * the rules block and the skill, so init writes only what is per-project
+   * (§16.5). Default: detected from CLAUDE_PLUGIN_ROOT.
+   *
+   * Injectable so the behaviour is testable without mutating process.env.
+   */
+  pluginManaged?: boolean;
 }
 
 /** What happened to one file. `skipped` always carries a reason. */
@@ -273,6 +281,15 @@ function skillBody(): string {
 export const MCP_COMMAND = 'diagram';
 
 /** Told to the developer whenever we write that entry — see MCP_COMMAND. */
+/**
+ * Shown instead of MCP_PATH_NOTE under a plugin install. It has to say what
+ * did NOT happen: a user who runs `diagram init` and sees four files skipped
+ * needs to know that is the correct outcome and not a broken run.
+ */
+const PLUGIN_MANAGED_NOTE =
+  'plugin install detected — the plugin provides the MCP server, the rules and the skill; ' +
+  'init wrote only what is per-project';
+
 const MCP_PATH_NOTE =
   `\`${MCP_COMMAND}\` must be on PATH for the MCP server to start ` +
   '(the package is not on npm yet: `npm link` in the engine repo, or install it globally)';
@@ -427,6 +444,25 @@ function writeOwnedFile(file: string, rel: string, text: string): InitFileResult
  * Install the engine into a project. Creates nothing outside `root`, and
  * overwrites nothing the developer wrote.
  */
+/**
+ * Is this process running from inside an installed plugin (spec §16.5)?
+ *
+ * Claude Code sets CLAUDE_PLUGIN_ROOT for a plugin's own processes and expands
+ * it in the .mcp.json it ships, so its presence is the plugin telling us it is
+ * already providing the MCP config, the rules block and the skill.
+ *
+ * WHY THIS MATTERS MORE THAN IT LOOKS. If the plugin ships the rules AND init
+ * writes them, the agent sees two copies which drift apart at the next plugin
+ * release — and in an architecture with no system prompt, the rules text IS
+ * the prompt (§4.1). Two prompts disagreeing is the failure mode rule 4's
+ * rewrite already demonstrated once. Detection rather than a flag, because a
+ * flag someone forgets produces exactly the state we are avoiding.
+ */
+export function isPluginManaged(env: NodeJS.ProcessEnv = process.env): boolean {
+  const root = env['CLAUDE_PLUGIN_ROOT'];
+  return typeof root === 'string' && root !== '';
+}
+
 export function runInit(opts: InitOptions = {}): InitResult {
   const root =
     // `root` is the name; `dir` is the older one kept for callers that predate
@@ -442,38 +478,59 @@ export function runInit(opts: InitOptions = {}): InitResult {
   const files: InitFileResult[] = [];
   const notes: string[] = [];
 
-  // 1. MCP config (spec §4.1).
-  files.push(mergeMcpFile(path.join(root, '.mcp.json'), '.mcp.json', agent));
-  if (agent === 'cursor') {
-    // Cursor's project scope is .cursor/mcp.json; .mcp.json alone is not read.
-    files.push(
-      mergeMcpFile(path.join(root, '.cursor', 'mcp.json'), '.cursor/mcp.json', agent),
-    );
+  // Under a plugin install, steps 1, 3 and 4 are the PLUGIN's job (§16.5):
+  // it ships .mcp.json, the rules and the skill, versioned together. What is
+  // genuinely per-project — the .gitignore block and the seed document —
+  // still belongs here, which is the whole of what init shrinks to.
+  const pluginManaged = opts.pluginManaged ?? isPluginManaged();
+
+  if (pluginManaged) {
+    notes.push(PLUGIN_MANAGED_NOTE);
+    files.push({ file: '.mcp.json', status: 'skipped', reason: 'provided by the plugin' });
+    for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+      files.push({ file: name, status: 'skipped', reason: 'the plugin ships the rules' });
+    }
+    files.push({
+      file: '.claude/skills/diagram/SKILL.md',
+      status: 'skipped',
+      reason: 'the plugin ships the skill',
+    });
+  } else {
+    // 1. MCP config (spec §4.1).
+    files.push(mergeMcpFile(path.join(root, '.mcp.json'), '.mcp.json', agent));
+    if (agent === 'cursor') {
+      // Cursor's project scope is .cursor/mcp.json; .mcp.json alone is not read.
+      files.push(
+        mergeMcpFile(path.join(root, '.cursor', 'mcp.json'), '.cursor/mcp.json', agent),
+      );
+    }
+    if (agent === 'codex') notes.push(codexTomlNote());
+    // Say it out loud: a missing MCP server is invisible from inside an agent —
+    // the tools just never appear — so the one prerequisite goes in the summary.
+    notes.push(MCP_PATH_NOTE);
   }
-  if (agent === 'codex') notes.push(codexTomlNote());
-  // Say it out loud: a missing MCP server is invisible from inside an agent —
-  // the tools just never appear — so the one prerequisite goes in the summary.
-  notes.push(MCP_PATH_NOTE);
 
   // 2. .gitignore (spec §2.5) — graph.json is committed, so it is not here.
   files.push(
     upsertFile(path.join(root, '.gitignore'), '.gitignore', GITIGNORE_BODY, GI_BEGIN, GI_END),
   );
 
-  // 3. Agent instructions (spec §4.3, §4.4).
-  const md = markdownBody();
-  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
-    files.push(upsertFile(path.join(root, name), name, md, MD_BEGIN, MD_END));
-  }
+  if (!pluginManaged) {
+    // 3. Agent instructions (spec §4.3, §4.4).
+    const md = markdownBody();
+    for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+      files.push(upsertFile(path.join(root, name), name, md, MD_BEGIN, MD_END));
+    }
 
-  // 4. The Claude Code skill (spec §4.4).
-  files.push(
-    writeOwnedFile(
-      path.join(root, '.claude', 'skills', 'diagram', 'SKILL.md'),
-      '.claude/skills/diagram/SKILL.md',
-      skillBody(),
-    ),
-  );
+    // 4. The Claude Code skill (spec §4.4).
+    files.push(
+      writeOwnedFile(
+        path.join(root, '.claude', 'skills', 'diagram', 'SKILL.md'),
+        '.claude/skills/diagram/SKILL.md',
+        skillBody(),
+      ),
+    );
+  }
 
   // 5. Seed document (spec §2.5). Never overwrite an existing diagram.
   const diagramDir = path.join(root, '.diagram');

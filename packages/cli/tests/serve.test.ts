@@ -1,18 +1,23 @@
 // tests/serve.test.ts — `diagram serve` over real sockets (spec §9, M5).
 //
 // Everything here is end-to-end: real http server on an ephemeral port, a
-// real WebSocket client, a real temp .diagram/ directory, real atomic
-// (tmp + rename) writes picked up by chokidar. No mocks.
+// real SSE subscription over node http, a real temp .diagram/ directory, real
+// atomic (tmp + rename) writes picked up by fs.watch. No mocks.
+//
+// The client is hand-rolled here rather than imported, because there is
+// nothing left to import: SSE is plain HTTP with a framing convention, which
+// is the whole argument for it (§16.3). The `ws` package used to be a test
+// dependency as well as a runtime one.
 
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { WebSocket } from 'ws';
 import { emptyDoc, diagramPaths, type GraphDoc } from '../../core/src/index.js';
 import { startHttpServer, SERVE_HOST, contentTypeFor } from '../src/serve/http.js';
 import { runServe, type ServeHandle } from '../src/commands/serve.js';
+import { EVENTS_PATH } from '../src/serve/watch.js';
 
 /** Things to tear down after each test, newest first. */
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -66,16 +71,44 @@ function get(port: number, urlPath: string): Promise<{ status: number; body: str
   });
 }
 
-/** Connect a ws client and collect every message it receives. */
-async function connect(port: number): Promise<{ messages: unknown[]; ws: WebSocket; next(after: number, ms: number): Promise<unknown | undefined> }> {
-  const ws = new WebSocket(`ws://${SERVE_HOST}:${port}`);
+/**
+ * Subscribe to the event stream and collect every message it receives.
+ *
+ * SSE framing is `data: <json>\n\n`, so the parser is a split on the blank
+ * line and a prefix strip. The server's opening `retry:` line carries no
+ * data field and is skipped by the same rule.
+ */
+async function connect(
+  port: number,
+): Promise<{ messages: unknown[]; close(): void; next(after: number, ms: number): Promise<unknown | undefined> }> {
   const messages: unknown[] = [];
-  ws.on('message', (data) => messages.push(JSON.parse(String(data))));
-  cleanups.push(() => ws.close());
-  await new Promise<void>((resolve, reject) => {
-    ws.once('open', () => resolve());
-    ws.once('error', reject);
+  const res = await new Promise<http.IncomingMessage>((resolve, reject) => {
+    const req = http.get(
+      { host: SERVE_HOST, port, path: EVENTS_PATH, headers: { Accept: 'text/event-stream' } },
+      resolve,
+    );
+    req.on('error', reject);
+    cleanups.push(() => {
+      req.destroy();
+    });
   });
+  let buf = '';
+  res.setEncoding('utf8');
+  res.on('data', (chunk: string) => {
+    buf += chunk;
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('data: ')) messages.push(JSON.parse(line.slice(6)));
+      }
+    }
+  });
+  const close = (): void => {
+    res.destroy();
+  };
+  cleanups.push(close);
   const next = async (after: number, ms: number): Promise<unknown | undefined> => {
     const deadline = Date.now() + ms;
     while (Date.now() < deadline) {
@@ -84,7 +117,7 @@ async function connect(port: number): Promise<{ messages: unknown[]; ws: WebSock
     }
     return undefined;
   };
-  return { messages, ws, next };
+  return { messages, close, next };
 }
 
 /** Atomic write, exactly as the store does it (tmp + rename). */

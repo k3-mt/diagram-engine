@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest';
 import type { GBinding, GNode } from '@diagram-engine/core';
 import { HoverCard, cardHeight } from '../src/render/HoverCard.js';
 import { bindingHref, editorSchemeFrom } from '../src/render/bindingLink.js';
-import { parseServerMessage } from '../src/ws.js';
+import { parseServerMessage } from '../src/live.js';
 
 const ROOT = '/repo';
 

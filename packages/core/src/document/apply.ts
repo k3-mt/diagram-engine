@@ -12,6 +12,7 @@ import type { GraphPatch, PatchOp } from '../schema/patch.js';
 import { summarise } from '../format/summary.js';
 import { coerceOp, nearestId } from './ids.js';
 import { validate } from './validate.js';
+import { reconcileView } from '../view/depth.js';
 
 export type ApplyResult =
   | { ok: true; doc: GraphDoc; summary: string; notes: string[] }
@@ -241,8 +242,16 @@ export function applyPatch(doc: GraphDoc, patch: GraphPatch): ApplyResult {
   }
   if (errors.length) return { ok: false, errors };
 
-  const v = validate(next);
+  // A patch can add, rename or reparent a group, which is exactly when a
+  // stored collapsed LIST goes quietly wrong — the new group is not on it, so
+  // it renders open however the reader set the view. When the document holds a
+  // depth rule instead, re-derive the list here so the view keeps meaning what
+  // it said. A document with no rule is left alone: an explicit list is a
+  // deliberate choice, and overwriting it would be the same bug in reverse.
+  const reconciled = reconcileView(next);
+
+  const v = validate(reconciled);
   if (!v.ok) return { ok: false, errors: attributeErrors(v.errors, patch.ops) };
 
-  return { ok: true, doc: next, summary: summarise(doc, next), notes };
+  return { ok: true, doc: reconciled, summary: summarise(doc, reconciled), notes };
 }

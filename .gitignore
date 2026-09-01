@@ -1,5 +1,11 @@
 node_modules/
 dist/
+# ...but the PLUGIN's dist is the shipped artifact, not build output (§16.2,
+# §16.8). A marketplace install is a pure file fetch of this directory, so if
+# the blanket `dist/` above swallowed it, every install would silently arrive
+# with no binaries. It is committed deliberately, in a labelled release commit,
+# alongside the plugin.sha256 that makes it auditable.
+!plugin/dist/
 .diagram/history/
 .diagram/errors.txt
 .diagram/out.svg

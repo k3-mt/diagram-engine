@@ -10,7 +10,15 @@ normal use you run two of them (`init`, `serve`) and then never touch the CLI ag
 
 ## 1. Install it
 
-The package is not published yet, so link it from this repo:
+The quickest route installs nothing on your machine:
+
+```bash
+claude plugin marketplace add k3-mt/diagram-engine
+claude plugin install diagram@diagram-engine
+```
+
+That gives you the tools, the rules and `/diagram-serve`. The commands below use the
+`diagram` CLI to check the agent's work, and the CLI comes from the source install:
 
 ```bash
 cd /path/to/diagram-engine
@@ -29,6 +37,10 @@ cd ~/somewhere
 diagram init          # writes .mcp.json, .gitignore, agent rules, a Claude Code skill
 diagram serve         # opens http://localhost:4400 and stays running
 ```
+
+On a plugin install, `init` writes only `.diagram/` and the `.gitignore` block — the
+plugin already ships the rest — and `/diagram-serve` opens the viewer, so neither
+command is strictly needed.
 
 Leave `serve` running in its own terminal. It watches the document on disk and repaints the
 browser when it changes. It has no opinion about who changed it.

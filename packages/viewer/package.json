@@ -1,7 +1,7 @@
 {
   "name": "@diagram-engine/viewer",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Browser viewer: view derive, ELK layout worker, hop geometry, SVG renderer. Built into cli/dist/public.",
   "type": "module",
   "main": "src/index.ts",
@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@diagram-engine/core": "0.0.0",
+    "@diagram-engine/core": "0.1.0",
     "elkjs": "^0.9.3"
   },
   "devDependencies": {

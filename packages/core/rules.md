@@ -26,7 +26,7 @@ Every node and group needs "parent": a group id, or null for top level.
 
 ## Rules
 
-1. CALL diagram_get FIRST if you are not sure of the current state.
+1. READ THE DIAGRAM FIRST if you are not sure of the current state.
    Reuse existing ids. "the auth service", "auth", and "authsvc" all
    refer to an existing node with id "auth-service". Never create a
    second node for the same concept.

@@ -20,14 +20,14 @@ import { createContext, type CommandOutput } from '../src/commands/context.js';
 import { parsePatchText, runPatch, runPatchText } from '../src/commands/patch.js';
 import { runUndo } from '../src/commands/undo.js';
 import { runRedo } from '../src/commands/redo.js';
-import { defaultOutPath, runExport } from '../src/commands/export.js';
+import { DEFAULT_JSON_OUT, defaultOutPath, runExport } from '../src/commands/export.js';
 // The viewer's measurement seam. Not a mock of the export path — it is the
 // real knob §5.1 sizing turns, and the only honest way to drive the one
 // failure the renderer raises (a measurement that is not answering).
 import { setMeasureStrategy } from '../../viewer/src/layout/measure.js';
 import { parseDocText, runImport, runImportText } from '../src/commands/import.js';
 import { runReset } from '../src/commands/reset.js';
-import { runViewCollapsed } from '../src/commands/view.js';
+import { runView, runViewCollapsed, runViewDepth } from '../src/commands/view.js';
 
 /** Set doc.collapsed through the real locked write path, as `diagram view` does. */
 function applyCollapsedIds(dir: string, ids: string[]): CommandOutput {
@@ -781,5 +781,178 @@ describe('import warns about a collapsed id that names no group', () => {
     expect(out.code).toBe(0);
     expect(out.stdout).toContain('note: collapsed "a", "nosuch" are not groups');
     expect(out.stdout).toContain('this diagram has no groups');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The view stored as a rule: `diagram view --depth N`
+// ---------------------------------------------------------------------------
+
+describe('diagram view --depth', () => {
+  /** registry > (sources, pull), pull > inner — a wrapper, two stages, one nested. */
+  function stages(dir: string): void {
+    applyOk(dir, {
+      summary: 'a wrapped, two-stage diagram',
+      ops: [
+        { op: 'addGroup', group: { id: 'registry', kind: 'generic', label: 'Registry', parent: null } },
+        { op: 'addGroup', group: { id: 'sources', kind: 'generic', label: 'Sources', parent: 'registry' } },
+        { op: 'addGroup', group: { id: 'pull', kind: 'generic', label: 'Pull', parent: 'registry' } },
+        { op: 'addGroup', group: { id: 'inner', kind: 'generic', label: 'Inner', parent: 'pull' } },
+      ],
+    });
+  }
+
+  it('stores the level and derives the list from it', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    const out = runViewDepth(1, { dir });
+    expect(out.code).toBe(0);
+    expect(out.stdout).toContain('rule: depth 1');
+    const doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.view).toEqual({ depth: 1 });
+    expect(doc.ok && doc.doc.collapsed).toEqual(['sources', 'pull']);
+  });
+
+  it('keeps the view true when a later patch adds a group at that level', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    runViewDepth(1, { dir });
+    applyOk(dir, {
+      summary: 'add a third stage',
+      ops: [
+        { op: 'addGroup', group: { id: 'landing', kind: 'generic', label: 'Landing', parent: 'registry' } },
+      ],
+    });
+    const doc = readDoc(graphFile(dir));
+    // The list nobody re-set now includes the new stage, because the rule did.
+    expect(doc.ok && doc.doc.collapsed).toEqual(['sources', 'pull', 'landing']);
+  });
+
+  it('an explicit list clears the rule, and then stops following new groups', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    runViewDepth(1, { dir });
+    expect(runViewCollapsed(['sources'], { dir }).code).toBe(0);
+
+    let doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.view).toBeUndefined();
+
+    applyOk(dir, {
+      summary: 'add a third stage',
+      ops: [
+        { op: 'addGroup', group: { id: 'landing', kind: 'generic', label: 'Landing', parent: 'registry' } },
+      ],
+    });
+    doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.collapsed).toEqual(['sources']);
+  });
+
+  it('exec stores the level it chose, skipping the lone wrapper', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    const out = runView('exec', { dir });
+    expect(out.code).toBe(0);
+    expect(out.stdout).toContain('rule: depth 1');
+    const doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.collapsed).toEqual(['sources', 'pull']);
+  });
+
+  it('eng clears the rule so nothing re-collapses behind it', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    runViewDepth(1, { dir });
+    expect(runView('eng', { dir }).code).toBe(0);
+    const doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.view).toBeUndefined();
+    expect(doc.ok && doc.doc.collapsed).toEqual([]);
+  });
+
+  it('a depth past the bottom of the tree collapses nothing and is not an error', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    const out = runViewDepth(9, { dir });
+    expect(out.code).toBe(0);
+    const doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.collapsed).toEqual([]);
+    expect(doc.ok && doc.doc.view).toEqual({ depth: 9 });
+  });
+
+  it('rejects a depth that is not a whole number in range', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    for (const bad of [-1, 1.5, Number.NaN, 99]) {
+      const out = runViewDepth(bad, { dir });
+      expect(out.code).toBe(1);
+      expect(out.stderr).toContain('depth must be a whole number');
+    }
+    const doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.view).toBeUndefined();
+  });
+
+  it('undo puts the previous view back, rule and all', () => {
+    const dir = tempDiagramDir();
+    stages(dir);
+    runViewDepth(0, { dir });
+    runViewDepth(1, { dir });
+    expect(runUndo({ dir }).code).toBe(0);
+    const doc = readDoc(graphFile(dir));
+    expect(doc.ok && doc.doc.view).toEqual({ depth: 0 });
+    expect(doc.ok && doc.doc.collapsed).toEqual(['registry']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The export is named after the document
+// ---------------------------------------------------------------------------
+
+describe('diagram export names the file after the title', () => {
+  it('derives a snake_case filename from the title', async () => {
+    const dir = tempDiagramDir();
+    applyOk(dir, addApi);
+    applyOk(dir, { summary: 'name it', ops: [{ op: 'setTitle', title: 'Source Registry' }] });
+
+    const out = await runExport({ dir, format: 'json' });
+    expect(out.code).toBe(0);
+    expect(out.stdout).toContain(path.join(dir, 'source_registry.json'));
+    expect(fs.existsSync(path.join(dir, 'source_registry.json'))).toBe(true);
+  });
+
+  it('renames the next export when the title changes', async () => {
+    const dir = tempDiagramDir();
+    applyOk(dir, addApi);
+    applyOk(dir, { summary: 'first name', ops: [{ op: 'setTitle', title: 'Old Name' }] });
+    await runExport({ dir, format: 'json' });
+    applyOk(dir, { summary: 'rename', ops: [{ op: 'setTitle', title: 'New Name' }] });
+    await runExport({ dir, format: 'json' });
+
+    // The old file is left where it was: an export is a copy someone may have
+    // already picked up, and a retitle must not delete it behind their back.
+    expect(fs.existsSync(path.join(dir, 'old_name.json'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'new_name.json'))).toBe(true);
+  });
+
+  it('falls back to out.json for a document that has no name', async () => {
+    const dir = tempDiagramDir();
+    applyOk(dir, addApi); // still "Untitled"
+    const out = await runExport({ dir, format: 'json' });
+    expect(out.stdout).toContain(path.join(dir, DEFAULT_JSON_OUT));
+    expect(fs.existsSync(path.join(dir, DEFAULT_JSON_OUT))).toBe(true);
+  });
+
+  it('never renames the store — graph.json stays where every tool looks', async () => {
+    const dir = tempDiagramDir();
+    applyOk(dir, addApi);
+    applyOk(dir, { summary: 'name it', ops: [{ op: 'setTitle', title: 'Source Registry' }] });
+    expect(fs.existsSync(graphFile(dir))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'source_registry.json'))).toBe(false);
+  });
+
+  it('an explicit --out still wins', async () => {
+    const dir = tempDiagramDir();
+    applyOk(dir, addApi);
+    applyOk(dir, { summary: 'name it', ops: [{ op: 'setTitle', title: 'Source Registry' }] });
+    const chosen = path.join(dir, 'chosen.json');
+    await runExport({ dir, format: 'json', out: chosen });
+    expect(fs.existsSync(chosen)).toBe(true);
   });
 });
