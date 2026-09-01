@@ -131300,6 +131300,23 @@ var GGroupSchema = external_exports.object({
   /** enclosing group id, or null for a top-level boundary. Required. */
   parent: ParentSchema
 });
+var EdgeKindSchema = external_exports.enum([
+  "call",
+  "read",
+  "write",
+  "publish",
+  "consume"
+]);
+var RETURNING_KINDS = /* @__PURE__ */ new Set([
+  "call",
+  "read",
+  "consume"
+]);
+var ASYNC_KINDS = /* @__PURE__ */ new Set([
+  "publish",
+  "consume"
+]);
+var MAX_EDGE_SEQ = 99;
 var CardinalitySchema = external_exports.enum(["1:1", "1:N", "N:1", "N:M"]);
 var GEdgeSchema = external_exports.object({
   id: IdSchema,
@@ -131310,6 +131327,36 @@ var GEdgeSchema = external_exports.object({
   label: external_exports.string().min(1).max(24).optional(),
   style: external_exports.enum(["solid", "dashed"]).optional(),
   arrow: external_exports.enum(["forward", "both", "none"]).optional(),
+  /**
+   * What this line MEANS (spec §3.9). Sets how the edge is drawn — its
+   * dash, its arrowheads, and whether a return leg is painted back along
+   * it — so it REPLACES `style` and `arrow` rather than joining them (V20).
+   */
+  kind: EdgeKindSchema.optional(),
+  /**
+   * What comes back, 1–24 chars: the label on the return leg — "order[]",
+   * "200 OK", "job id". Only meaningful on a kind that HAS a return leg
+   * (V21); on a `write` or a `publish` nothing comes back, and a label on a
+   * leg that is not drawn is a claim the picture cannot show.
+   *
+   * The leg itself is drawn whenever the kind implies one. This field only
+   * names it, so `kind: "read"` alone still gets the arrow back — you do
+   * not have to know what the payload is called to say that there is one.
+   */
+  returns: external_exports.string().min(1).max(24).optional(),
+  /**
+   * Step number in a flow, 1–99 (spec §3.9). Rendered as a small numbered
+   * badge on the line, so a reader can follow "1 → 2 → 3" through the
+   * diagram instead of guessing which call happens first.
+   *
+   * ORDER, NOT IMPORTANCE. It says when this edge happens relative to the
+   * others, and it is deliberately not unique: two edges numbered 3 are two
+   * things that happen at the same step, which is exactly what a fan-out
+   * looks like. Numbers need not be contiguous either — a document that
+   * numbers only the four edges of its critical path is more readable than
+   * one that numbers all forty.
+   */
+  seq: external_exports.number().int().min(1).max(MAX_EDGE_SEQ).optional(),
   /**
    * Relationship multiplicity for ERD edges, drawn with crow's-foot markers.
    * "N:1" exists alongside "1:N" so direction is expressible without having
@@ -131337,6 +131384,16 @@ var GEdgeSchema = external_exports.object({
    */
   bindings: external_exports.array(GBindingSchema).max(MAX_EDGE_BINDINGS, `too many bindings: keep at most ${MAX_EDGE_BINDINGS} per edge; cite the call site you actually read`).optional()
 });
+function edgeIsAsync(edge) {
+  if (edge.style !== void 0)
+    return edge.style === "dashed";
+  return edge.kind !== void 0 && ASYNC_KINDS.has(edge.kind);
+}
+function edgeHasReturn(edge) {
+  if (edge.kind !== void 0)
+    return RETURNING_KINDS.has(edge.kind);
+  return edge.returns !== void 0;
+}
 var DirectionSchema = external_exports.enum(["DOWN", "RIGHT"]);
 var MAX_VIEW_DEPTH = 16;
 var ViewSettingSchema = external_exports.object({
@@ -131369,7 +131426,17 @@ var GGroupChangesSchema = GGroupSchema.omit({ id: true }).partial();
 var GEdgeChangesSchema = GEdgeSchema.omit({ id: true }).partial().extend({
   label: GEdgeSchema.shape.label.unwrap().nullable().optional(),
   cardinality: GEdgeSchema.shape.cardinality.unwrap().nullable().optional(),
-  alt: GEdgeSchema.shape.alt.unwrap().nullable().optional()
+  alt: GEdgeSchema.shape.alt.unwrap().nullable().optional(),
+  // §3.9's three, for the same reason as the three above: an edge relabelled
+  // from a call to a plain write has to be able to LOSE its `returns`, and
+  // an edge dropped out of a numbered flow has to be able to lose its `seq`
+  // — otherwise the only correction is removeEdge + addEdge, which rule 3
+  // forbids and which loses the edge id. `seq` is a number rather than a
+  // string, which changes nothing here: no GEdge property stores null, so
+  // null is still unambiguously "remove this".
+  kind: GEdgeSchema.shape.kind.unwrap().nullable().optional(),
+  returns: GEdgeSchema.shape.returns.unwrap().nullable().optional(),
+  seq: GEdgeSchema.shape.seq.unwrap().nullable().optional()
 });
 var AddNodeOpSchema = external_exports.object({
   op: external_exports.literal("addNode"),
@@ -132012,7 +132079,7 @@ function validate(doc) {
   for (const e of doc.edges) {
     if (e.alt === void 0)
       continue;
-    if (e.style === "dashed")
+    if (edgeIsAsync(e))
       continue;
     if (!allIdSet.has(e.from) || !allIdSet.has(e.to))
       continue;
@@ -132040,11 +132107,24 @@ function validate(doc) {
     }
   }
   for (const e of doc.edges) {
-    if (e.alt === void 0 || e.style !== "dashed")
+    if (e.alt === void 0 || !edgeIsAsync(e))
       continue;
     if (!allIdSet.has(e.from) || !allIdSet.has(e.to))
       continue;
-    errors.push(`edge "${e.id}" is dashed and carries alt "${e.alt}": asynchronous edges already contain failure; drop one`);
+    const because = e.style === "dashed" ? "is dashed" : `is a "${e.kind ?? ""}" edge`;
+    errors.push(`edge "${e.id}" ${because} and carries alt "${e.alt}": asynchronous edges already contain failure; drop one`);
+  }
+  for (const e of doc.edges) {
+    const conflicting = [
+      e.style === void 0 ? void 0 : "style",
+      e.arrow === void 0 ? void 0 : "arrow"
+    ].filter((k) => k !== void 0);
+    if (e.kind !== void 0 && conflicting.length > 0) {
+      errors.push(`edge "${e.id}" has kind "${e.kind}" and ${conflicting.join(" and ")}: kind already decides how the edge is drawn \u2014 drop ${conflicting.join(" and ")}`);
+    }
+    if (e.returns !== void 0 && e.kind !== void 0 && !RETURNING_KINDS.has(e.kind)) {
+      errors.push(`edge "${e.id}" has returns "${e.returns}" but kind "${e.kind}": nothing comes back along it \u2014 use kind ${[...RETURNING_KINDS].map((k) => `"${k}"`).join(", ")}, or drop returns`);
+    }
   }
   return errors.length ? { ok: false, errors } : { ok: true };
 }
@@ -133282,9 +133362,23 @@ function toTable(doc) {
   lines.push("");
   const anyCardinality = doc.edges.some((e) => e.cardinality !== void 0);
   const anyAlt = doc.edges.some((e) => e.alt !== void 0);
-  lines.push(`### Edges (id | from -> to | label | style${anyCardinality ? " | cardinality" : ""}${anyAlt ? " | alt" : ""})`);
+  const anyKind = doc.edges.some((e) => e.kind !== void 0);
+  const anyReturns = doc.edges.some((e) => e.returns !== void 0);
+  const anySeq = doc.edges.some((e) => e.seq !== void 0);
+  lines.push(`### Edges (id | from -> to | label | style${anyKind ? " | kind" : ""}${anyReturns ? " | returns" : ""}${anySeq ? " | seq" : ""}${anyCardinality ? " | cardinality" : ""}${anyAlt ? " | alt" : ""})`);
   lines.push(...alignRows(doc.edges.map((e) => {
-    const row2 = [e.id, `${e.from} -> ${e.to}`, e.label ?? "-", e.style ?? "solid"];
+    const row2 = [
+      e.id,
+      `${e.from} -> ${e.to}`,
+      e.label ?? "-",
+      edgeIsAsync(e) ? "dashed" : "solid"
+    ];
+    if (anyKind)
+      row2.push(e.kind ?? "-");
+    if (anyReturns)
+      row2.push(e.returns ?? "-");
+    if (anySeq)
+      row2.push(e.seq === void 0 ? "-" : String(e.seq));
     if (anyCardinality)
       row2.push(e.cardinality ?? "-");
     if (anyAlt)
@@ -133600,17 +133694,18 @@ Every node and group needs "parent": a group id, or null for top level.
 
 4. EDGE DIRECTION POINTS AT THE DEPENDENCY: caller to callee. A
    service that reads a database has an edge FROM the service TO the
-   database; the data flows back the other way, the arrow does not.
-   CHECK EVERY EDGE by reading it aloud as "<from> <label> <to>":
-   "orders reads postgres" is right, "s3 reads etl" is backwards. A
-   protocol label ("https", "grpc") is a noun, not a verb: there the
-   arrow still runs from whoever initiates the call.
+   database; the data comes back the other way, \`kind\` says so and
+   the arrow does not. CHECK EVERY EDGE by reading it aloud as
+   "<from> <label> <to>": "orders reads postgres" is right, "s3 reads
+   etl" is backwards. A protocol label ("https", "grpc") is a noun,
+   not a verb: there the arrow still runs from whoever initiates the
+   call.
 
-5. EDGE LABELS are 1-3 words: "reads", "publishes", "grpc". Omit the
-   label when the relationship is obvious from the types.
+5. EDGE LABELS are 1-3 words. Omit when the kind or types say it.
 
-6. DASHED for asynchronous relationships (queue consumption, events,
-   webhooks). Solid for synchronous calls.
+6. KIND says what a line means and draws it: call, read, write,
+   publish, consume. Use it INSTEAD of style and arrow. No kind:
+   dashed = async, solid = sync.
 
 7. GROUPS ARE TRUST AND DEPLOYMENT BOUNDARIES. Do not group things
    merely because they are related in topic.
@@ -133645,12 +133740,77 @@ Every node and group needs "parent": a group id, or null for top level.
 
 ---
 
-## Addendum \u2014 node metadata, redundancy and ERD mode
+## Addendum \u2014 edge kind, node metadata, redundancy and ERD mode
 
 The rules above are unchanged. What follows is additional capability,
 not a revision. (There is no rule 13; the number was reserved for
 bindings while they were unbuilt and they arrived as rule 15, so the
 gap is left rather than renumbering rules the benchmark was tuned on.)
+
+### Edge kind (\`kind\`, \`returns\`, \`seq\`) \u2014 what a line means
+
+Rule 4 fixes an edge's DIRECTION at the dependency, and that never
+changes: the arrow runs from whoever initiates. \`kind\` says what kind
+of relationship it is, so the picture can show the data moving without
+the arrow having to lie about who calls whom.
+
+    { "from": "orders", "to": "postgres", "kind": "read",
+      "label": "reads", "returns": "order[]", "seq": 3 }
+
+    call     a synchronous request that expects an answer
+    read     the source pulls data out of the target
+    write    the source pushes data into the target
+    publish  fire-and-forget onto a queue or topic
+    consume  the source pulls messages off a queue
+
+- \`kind\` REPLACES \`style\` and \`arrow\`. Setting both is rejected: it
+  would be the document saying two things about one line. \`publish\`
+  and \`consume\` draw dashed (rule 6's async), the other three solid.
+- \`call\`, \`read\` and \`consume\` draw a SECOND, OPEN ARROWHEAD back at
+  the source, on the same line, because something comes back along
+  them. You do not author that second arrow and you must not: one
+  relationship is one edge, and a literal response edge would make
+  every synchronous call a cycle and send \`diagram analyse\`
+  propagating failure backwards.
+- \`returns\` NAMES what comes back, 1-24 chars \u2014 "order[]", "200 OK",
+  "job id". Optional: the return arrow is drawn either way. Only on a
+  kind that has one; on a \`write\` or a \`publish\` it is rejected.
+- \`seq\` is a step number, 1-99, drawn as a badge on the line. Use it
+  when the user asks to see the ORDER of a flow. It need not be unique
+  (two edges numbered 3 happen at the same step) or contiguous \u2014
+  numbering only the critical path reads better than numbering all
+  forty edges. Leave it off otherwise.
+- To take any of the three off, \`updateEdge\` with \`null\`, as \`alt\`
+  does below.
+- NEVER REVERSE AN EDGE TO GET A LAYOUT. The viewer already reads
+  \`kind\` when it ranks the picture: a \`read\` or \`consume\` whose far
+  end is \`external\` or \`client\` is data ENTERING the system, so that
+  node is drawn FIRST and the diagram runs beginning-to-end down the
+  page. The arrow still points at the dependency, which is what
+  \`diagram analyse\` walks. Flipping \`from\`/\`to\` to move a box would
+  buy nothing and would invert the blast radius.
+- KIND IS READ, NEVER GUESSED. Rule 9 governs it like any other claim:
+  if you opened the call site, you know whether it awaits a response;
+  if you did not, leave \`kind\` off. An edge with no kind draws exactly
+  as edges always have.
+
+### Numbering a flow (\`1 \xB7 \`, \`2 \xB7 \`) \u2014 stated order
+
+A label that STARTS with a number and a separator states the reading
+order: \`"1 \xB7 Sources"\`, \`"2 \xB7 Pull"\`, \`"3 \xB7 Tag"\`. The viewer draws
+numbered siblings in numeric order \u2014 first at the top, or at the left
+under \`direction: "RIGHT"\` \u2014 even where no edge runs between them.
+
+- It orders SIBLINGS ONLY: numbers in one container say nothing about
+  numbers in another. A flow that must read 1-2-3-4-5 in order has to
+  live in one container, or the boxes are in different boundaries and
+  no layout can interleave them.
+- Number a flow when the user asks to see stages or an order. Do NOT
+  number ordinary components: \`"PostgreSQL 16/17"\` and \`"2 factor
+  auth"\` are names, not steps, and are left alone because the
+  separator is required.
+- Gaps are fine. \`2, 3, 5\` reads in that order.
+- Unnumbered siblings are not moved.
 
 ### Bindings (\`bindings\`) \u2014 where a claim was read
 
@@ -133955,7 +134115,25 @@ function mergedLabel(labels) {
   return room > 0 ? `${agreed.slice(0, room)}\u2026 ${suffix}` : suffix;
 }
 function mergedStyle(edges) {
-  return edges.every((e) => e.style === "dashed") ? "dashed" : "solid";
+  return edges.every((e) => edgeIsAsync(e)) ? "dashed" : "solid";
+}
+function mergedKind(edges) {
+  const first = edges[0]?.kind;
+  if (first === void 0)
+    return void 0;
+  return edges.every((e) => e.kind === first) ? first : void 0;
+}
+function mergedReturns(edges) {
+  const first = edges[0]?.returns;
+  if (first === void 0)
+    return void 0;
+  return edges.every((e) => e.returns === first) ? first : void 0;
+}
+function mergedSeq(edges) {
+  const first = edges[0]?.seq;
+  if (first === void 0)
+    return void 0;
+  return edges.every((e) => e.seq === first) ? first : void 0;
 }
 function mergedArrow(edges) {
   const arrows = edges.map((e) => e.arrow ?? "forward");
@@ -134035,14 +134213,26 @@ function deriveViewDetail(doc, collapsed = doc.collapsed) {
         delete kept.cardinality;
       edges.push(kept);
     } else {
-      edges.push({
+      const kind = mergedKind(group);
+      const merged = {
         id: first.id,
         from,
         to,
-        label: mergedLabel(group.map((e) => e.label)),
-        style: mergedStyle(group),
-        arrow: mergedArrow(group)
-      });
+        label: mergedLabel(group.map((e) => e.label))
+      };
+      if (kind === void 0) {
+        merged.style = mergedStyle(group);
+        merged.arrow = mergedArrow(group);
+      } else {
+        merged.kind = kind;
+        const returns = mergedReturns(group);
+        if (returns !== void 0)
+          merged.returns = returns;
+      }
+      const seq = mergedSeq(group);
+      if (seq !== void 0)
+        merged.seq = seq;
+      edges.push(merged);
     }
     sources.push({ id: first.id, sources: group.map((e) => e.id) });
   }
@@ -134069,7 +134259,7 @@ function isRuntimeNode(node) {
   return node.type !== EXCLUDED_NODE_TYPE;
 }
 function isSyncEdge(edge) {
-  return edge.style !== "dashed";
+  return !edgeIsAsync(edge);
 }
 function operationalMetaKeys(node) {
   if (node.meta === void 0)
@@ -135926,6 +136116,59 @@ function roundCorners(cmds, segs, hopsBySeg) {
   return out;
 }
 
+// dist/viewer/src/geometry/polyline.js
+function pathLength(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    total += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return total;
+}
+function pointNearStart(points, distance, maxFraction) {
+  if (points.length < 2)
+    return null;
+  const total = pathLength(points);
+  return pointAlong(points, Math.min(distance, total * maxFraction));
+}
+function pointAlong(points, distance) {
+  if (points.length < 2)
+    return null;
+  const seg = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len <= 0)
+      continue;
+    seg.push({ a, b, len });
+    total += len;
+  }
+  if (seg.length === 0) {
+    const a = points[0];
+    return { x: a.x, y: a.y, dx: 1, dy: 0 };
+  }
+  return pointAlongSegments(seg, Math.min(Math.max(distance, 0), total));
+}
+function pointAlongSegments(seg, want) {
+  let acc = 0;
+  for (const { a: a2, b: b2, len: len2 } of seg) {
+    if (acc + len2 < want) {
+      acc += len2;
+      continue;
+    }
+    const t = (want - acc) / len2;
+    const dx = (b2.x - a2.x) / len2;
+    const dy = (b2.y - a2.y) / len2;
+    return { x: a2.x + (b2.x - a2.x) * t, y: a2.y + (b2.y - a2.y) * t, dx, dy };
+  }
+  const last = seg[seg.length - 1];
+  const { a, b, len } = last;
+  return { x: b.x, y: b.y, dx: (b.x - a.x) / len, dy: (b.y - a.y) / len };
+}
+
 // dist/viewer/src/geometry/index.js
 function composePathWithSpans(edgePoints, spans) {
   const own = toSegments(edgePoints);
@@ -136100,6 +136343,91 @@ function sizeEntity(n) {
 // dist/viewer/src/layout/runLayout.js
 var import_elk_bundled = __toESM(require_elk_bundled(), 1);
 
+// dist/viewer/src/layout/flow.js
+var OUTSIDE_TYPES = /* @__PURE__ */ new Set([
+  "external",
+  "client"
+]);
+function flowReversedEdgeIds(doc) {
+  const typeOf = new Map(doc.nodes.map((n) => [n.id, n.type]));
+  const out = /* @__PURE__ */ new Set();
+  for (const e of doc.edges) {
+    if (e.kind !== "read" && e.kind !== "consume")
+      continue;
+    const far = typeOf.get(e.to);
+    if (far !== void 0 && OUTSIDE_TYPES.has(far))
+      out.add(e.id);
+  }
+  return out;
+}
+
+// dist/viewer/src/layout/order.js
+var ORDER_EDGE_PREFIX = "__order:";
+function isOrderingEdge(id) {
+  return id.startsWith(ORDER_EDGE_PREFIX);
+}
+function leadingOrdinal(label) {
+  const m = /^\s*(\d{1,3})\s*[·.):\-–—]\s+/.exec(label);
+  if (m === null)
+    return void 0;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : void 0;
+}
+function siblingsByParent(doc) {
+  const out = /* @__PURE__ */ new Map();
+  const push = (parent, el) => {
+    const list = out.get(parent);
+    if (list === void 0)
+      out.set(parent, [el]);
+    else
+      list.push(el);
+  };
+  for (const g of doc.groups)
+    push(g.parent, { id: g.id, label: g.label });
+  for (const n of doc.nodes)
+    push(n.parent, { id: n.id, label: n.label });
+  return out;
+}
+function orderingEdges(doc) {
+  const real = new Set(doc.edges.map((e) => `${e.from} ${e.to}`));
+  const out = /* @__PURE__ */ new Map();
+  for (const [parent, children] of siblingsByParent(doc)) {
+    const byOrdinal = /* @__PURE__ */ new Map();
+    for (const c of children) {
+      const n = leadingOrdinal(c.label);
+      if (n === void 0)
+        continue;
+      const list = byOrdinal.get(n);
+      if (list === void 0)
+        byOrdinal.set(n, [c.id]);
+      else
+        list.push(c.id);
+    }
+    if (byOrdinal.size < 2)
+      continue;
+    const steps = [...byOrdinal.keys()].sort((a, b) => a - b);
+    const edges = [];
+    for (let i = 0; i < steps.length - 1; i++) {
+      const from = byOrdinal.get(steps[i]);
+      const to = byOrdinal.get(steps[i + 1]);
+      for (const a of from) {
+        for (const b of to) {
+          if (real.has(`${a} ${b}`))
+            continue;
+          edges.push({
+            id: `${ORDER_EDGE_PREFIX}${a}>${b}`,
+            sources: [a],
+            targets: [b]
+          });
+        }
+      }
+    }
+    if (edges.length > 0)
+      out.set(parent, edges);
+  }
+  return out;
+}
+
 // dist/viewer/src/layout/options.js
 var ROOT_OPTIONS = (direction) => ({
   "elk.algorithm": "layered",
@@ -136156,11 +136484,13 @@ function toElk(doc) {
     const parent = n.parent !== null && containers.get(n.parent) || root;
     parent.children.push({ id: n.id, width, height });
   }
+  const flowReversed = flowReversedEdgeIds(doc);
   for (const e of doc.edges) {
+    const reversed = flowReversed.has(e.id);
     const edge = {
       id: e.id,
-      sources: [e.from],
-      targets: [e.to]
+      sources: [reversed ? e.to : e.from],
+      targets: [reversed ? e.from : e.to]
     };
     if (e.label !== void 0) {
       edge.labels = [
@@ -136174,6 +136504,10 @@ function toElk(doc) {
     }
     const container = lcaContainer(e.from, e.to, parentOf, containers) ?? root;
     container.edges.push(edge);
+  }
+  for (const [parent, edges] of orderingEdges(doc)) {
+    const container = parent !== null && containers.get(parent) || root;
+    container.edges.push(...edges);
   }
   return root;
 }
@@ -136198,7 +136532,8 @@ function lcaContainer(from, to, parentOf, containers) {
 }
 
 // dist/viewer/src/layout/fromElk.js
-function flatten(elkRoot) {
+var EMPTY = /* @__PURE__ */ new Set();
+function flatten(elkRoot, flowReversed = EMPTY) {
   const origins = /* @__PURE__ */ new Map();
   const nodes = /* @__PURE__ */ new Map();
   (function walk(n, ox, oy) {
@@ -136220,6 +136555,8 @@ function flatten(elkRoot) {
     const o = origins.get(n.id);
     if (o !== void 0) {
       for (const e of n.edges ?? []) {
+        if (isOrderingEdge(e.id))
+          continue;
         const l = (e.labels ?? [])[0];
         const label = l === void 0 ? void 0 : {
           text: l.text ?? "",
@@ -136230,6 +136567,8 @@ function flatten(elkRoot) {
         };
         for (const s of e.sections ?? []) {
           const pts = [s.startPoint, ...s.bendPoints ?? [], s.endPoint].map((p) => ({ x: p.x + o.x, y: p.y + o.y }));
+          if (flowReversed.has(e.id))
+            pts.reverse();
           edges.push(label !== void 0 ? { id: e.id, points: pts, label } : { id: e.id, points: pts });
         }
       }
@@ -136249,12 +136588,12 @@ var defaultElk = null;
 function bundledElk() {
   return defaultElk ??= new import_elk_bundled.default();
 }
-async function layoutElkGraph(graph, elk = bundledElk()) {
+async function layoutElkGraph(graph, elk = bundledElk(), flowReversed) {
   const laidOut = await elk.layout(graph);
-  return flatten(laidOut);
+  return flatten(laidOut, flowReversed);
 }
 async function layout(doc, elk) {
-  return layoutElkGraph(toElk(doc), elk);
+  return layoutElkGraph(toElk(doc), elk, flowReversedEdgeIds(doc));
 }
 
 // dist/viewer/src/render/Canvas.js
@@ -136299,6 +136638,10 @@ var ARROW_MARKER_ID = "arrow";
 function ArrowMarker() {
   return (0, import_jsx_runtime.jsx)("marker", { id: ARROW_MARKER_ID, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse", children: (0, import_jsx_runtime.jsx)("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "currentColor" }) });
 }
+var RETURN_MARKER_ID = "return-head";
+function ReturnMarker() {
+  return (0, import_jsx_runtime.jsx)("marker", { id: RETURN_MARKER_ID, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "9", markerHeight: "9", orient: "auto-start-reverse", children: (0, import_jsx_runtime.jsx)("path", { d: "M 2.5 1 L 9 5 L 2.5 9", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }) });
+}
 var ONE_MARKER_ID = "crow-one";
 var MANY_MARKER_ID = "crow-many";
 function CrowOneMarker() {
@@ -136315,28 +136658,45 @@ function cardinalityMarkers(cardinality) {
 var EDGE_DASH = "6 4";
 var HALO_PAD_X = 3;
 var HALO_PAD_Y = 1;
-function EdgePath({ edge, d }) {
+var RETURN_LABEL_FONT = "400 9px system-ui, sans-serif";
+var RETURN_LABEL_ANCHOR = 60;
+var RETURN_LABEL_MAX_FRACTION = 0.32;
+var RETURN_LABEL_OFFSET = 13;
+var SEQ_R = 8;
+var SEQ_ANCHOR = 22;
+var SEQ_ANCHOR_WITH_RETURN = 38;
+var SEQ_MAX_FRACTION = 0.25;
+var SEQ_FONT = "600 9px system-ui, sans-serif";
+var LIT_W = 2.5;
+function edgeDash(edge) {
+  return edgeIsAsync(edge) ? EDGE_DASH : void 0;
+}
+function EdgePath({ edge, d, points, lit }) {
   const arrow = edge.arrow ?? "forward";
   const crow = edge.cardinality === void 0 ? void 0 : cardinalityMarkers(edge.cardinality);
-  const startId = crow ? crow.start : arrow === "both" ? ARROW_MARKER_ID : void 0;
+  const returns = crow === void 0 && arrow !== "both" && arrow !== "none" && edgeHasReturn(edge);
+  const startId = crow ? crow.start : arrow === "both" ? ARROW_MARKER_ID : returns ? RETURN_MARKER_ID : void 0;
   const endId = crow ? crow.end : arrow === "forward" || arrow === "both" ? ARROW_MARKER_ID : void 0;
-  return (0, import_jsx_runtime.jsx)("path", {
-    "data-edge": edge.id,
-    "data-layer": "edge-path",
-    "data-cardinality": edge.cardinality,
-    d,
-    fill: "none",
-    stroke: theme.edge.stroke,
-    strokeWidth: theme.edge.width,
-    strokeLinecap: "round",
-    strokeLinejoin: "round",
-    strokeDasharray: edge.style === "dashed" ? EDGE_DASH : void 0,
-    markerStart: startId === void 0 ? void 0 : `url(#${startId})`,
-    markerEnd: endId === void 0 ? void 0 : `url(#${endId})`,
-    // The markers paint with currentColor, so `color` is what gives the
-    // arrowhead / crow's foot the same colour as the line.
-    style: { color: theme.edge.stroke }
-  });
+  const stroke = lit ?? theme.edge.stroke;
+  const path8 = (0, import_jsx_runtime.jsx)("path", { "data-edge": edge.id, "data-layer": "edge-path", "data-cardinality": edge.cardinality, "data-kind": edge.kind, "data-lit": lit === void 0 ? void 0 : "true", d, fill: "none", stroke, strokeWidth: lit === void 0 ? theme.edge.width : LIT_W, strokeLinecap: "round", strokeLinejoin: "round", strokeDasharray: edgeDash(edge), markerStart: startId === void 0 ? void 0 : `url(#${startId})`, markerEnd: endId === void 0 ? void 0 : `url(#${endId})`, style: { color: stroke } });
+  const seq = edge.seq;
+  const wantsLabel = returns && edge.returns !== void 0 && points !== void 0;
+  if (!wantsLabel && (seq === void 0 || points === void 0))
+    return path8;
+  const labelAt = wantsLabel ? pointNearStart(points, RETURN_LABEL_ANCHOR, RETURN_LABEL_MAX_FRACTION) : null;
+  const seqAt = seq === void 0 || points === void 0 ? null : pointNearStart(points, returns ? SEQ_ANCHOR_WITH_RETURN : SEQ_ANCHOR, SEQ_MAX_FRACTION);
+  return (0, import_jsx_runtime.jsxs)("g", { "data-edge-group": edge.id, children: [path8, labelAt === null ? null : (0, import_jsx_runtime.jsx)(ReturnLabel, { edge, at: labelAt }), seqAt === null || seq === void 0 ? null : (0, import_jsx_runtime.jsx)(SeqBadge, { edge, seq, at: seqAt })] });
+}
+function ReturnLabel({ edge, at }) {
+  const text = edge.returns;
+  const w = measureText(text, RETURN_LABEL_FONT);
+  const h = 11;
+  const cx = at.x + at.dy * RETURN_LABEL_OFFSET;
+  const cy = at.y - at.dx * RETURN_LABEL_OFFSET;
+  return (0, import_jsx_runtime.jsxs)("g", { "data-edge-returns": edge.id, "data-layer": "edge-return-label", children: [(0, import_jsx_runtime.jsx)("rect", { x: cx - w / 2 - HALO_PAD_X, y: cy - h / 2 - HALO_PAD_Y, width: w + HALO_PAD_X * 2, height: h + HALO_PAD_Y * 2, rx: 3, ry: 3, fill: theme.canvas }), (0, import_jsx_runtime.jsx)("text", { x: cx, y: cy, textAnchor: "middle", dominantBaseline: "central", fill: theme.text.secondary, opacity: 0.9, style: { font: RETURN_LABEL_FONT }, children: text })] });
+}
+function SeqBadge({ edge, seq, at }) {
+  return (0, import_jsx_runtime.jsxs)("g", { "data-edge-seq": edge.id, "data-seq": seq, "data-layer": "edge-seq", children: [(0, import_jsx_runtime.jsx)("circle", { cx: at.x, cy: at.y, r: SEQ_R, fill: theme.canvas, stroke: theme.text.primary, strokeWidth: 1 }), (0, import_jsx_runtime.jsx)("text", { x: at.x, y: at.y, textAnchor: "middle", dominantBaseline: "central", fill: theme.text.primary, style: { font: SEQ_FONT }, children: seq })] });
 }
 function EdgeLabel({ edge, label }) {
   return (0, import_jsx_runtime.jsxs)("g", { "data-edge-label": edge.id, "data-layer": "edge-label", children: [(0, import_jsx_runtime.jsx)("rect", { x: label.x - HALO_PAD_X, y: label.y - HALO_PAD_Y, width: label.width + HALO_PAD_X * 2, height: label.height + HALO_PAD_Y * 2, rx: 3, ry: 3, fill: theme.canvas }), (0, import_jsx_runtime.jsx)("text", { x: label.x + label.width / 2, y: label.y + label.height / 2, textAnchor: "middle", dominantBaseline: "central", fill: theme.text.secondary, style: { font: EDGE_LABEL_FONT }, children: label.text })] });
@@ -136558,13 +136918,16 @@ function placedEdges(doc, laidOut, paths) {
     const d = paths[i];
     if (edge === void 0 || d === void 0 || d === "")
       return [];
-    return [{ edge, d, label: abs.label }];
+    return [{ edge, d, points: abs.points, label: abs.label }];
   });
 }
-function FrameLayers({ doc, laidOut, paths, hoveredId, onHoverNode, onHoverMove, onNodeClick, hoverRing = true, hoverOverlay }) {
+function FrameLayers({ doc, laidOut, paths, hoveredId, onHoverNode, onHoverMove, onNodeClick, hoverRing = true, hoverOverlay, emphasis }) {
   const groups = orderedGroups(doc, laidOut);
   const nodes = placedNodes(doc, laidOut);
   const edges = placedEdges(doc, laidOut, paths);
+  const nodeOpacity = (id) => emphasis == null || emphasis.nodes.has(id) ? void 0 : emphasis.dim;
+  const edgeOpacity = (id) => emphasis == null || emphasis.edges.has(id) ? void 0 : emphasis.dim;
+  const edgeLit = (id) => emphasis?.edges.get(id);
   const hoverOf = (id) => onHoverNode === void 0 && onHoverMove === void 0 && onNodeClick === void 0 ? {} : {
     onMouseEnter: onHoverNode === void 0 ? void 0 : () => onHoverNode(id),
     onMouseLeave: onHoverNode === void 0 ? void 0 : () => onHoverNode(null),
@@ -136572,12 +136935,23 @@ function FrameLayers({ doc, laidOut, paths, hoveredId, onHoverNode, onHoverMove,
     onClick: onNodeClick === void 0 ? void 0 : (e) => onNodeClick(id, { toggle: extendChord(e) })
   };
   const hovered = !hoverRing || hoveredId === void 0 || hoveredId === null ? void 0 : nodes.find(({ node }) => node.id === hoveredId);
-  return (0, import_jsx_runtime6.jsxs)(import_jsx_runtime6.Fragment, { children: [(0, import_jsx_runtime6.jsx)("g", { "data-layer": "groups", children: groups.map(({ group, rect }) => (0, import_jsx_runtime6.jsx)(GroupRect, { group, rect }, group.id)) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "group-labels", children: groups.map(({ group, rect }) => (0, import_jsx_runtime6.jsx)(GroupLabel, { group, rect }, group.id)) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "edges", children: edges.map(({ edge, d }) => (0, import_jsx_runtime6.jsx)(EdgePath, { edge, d }, edge.id)) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "edge-labels", children: edges.map(({ edge, label }) => label === void 0 ? null : (0, import_jsx_runtime6.jsx)(EdgeLabel, { edge, label }, edge.id)) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "nodes", children: nodes.map(({ node, rect }) => {
+  return (0, import_jsx_runtime6.jsxs)(import_jsx_runtime6.Fragment, { children: [(0, import_jsx_runtime6.jsx)("g", { "data-layer": "groups", children: groups.map(({ group, rect }) => (0, import_jsx_runtime6.jsx)(GroupRect, { group, rect }, group.id)) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "group-labels", children: groups.map(({ group, rect }) => (0, import_jsx_runtime6.jsx)(GroupLabel, { group, rect }, group.id)) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "edges", children: edges.map(({ edge, d, points }) => {
+    const o = edgeOpacity(edge.id);
+    const lit = edgeLit(edge.id);
+    return o === void 0 ? (0, import_jsx_runtime6.jsx)(EdgePath, { edge, d, points, lit }, edge.id) : (0, import_jsx_runtime6.jsx)("g", { opacity: o, children: (0, import_jsx_runtime6.jsx)(EdgePath, { edge, d, points }) }, edge.id);
+  }) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "edge-labels", children: edges.map(({ edge, label }) => {
+    if (label === void 0)
+      return null;
+    const o = edgeOpacity(edge.id);
+    return o === void 0 ? (0, import_jsx_runtime6.jsx)(EdgeLabel, { edge, label }, edge.id) : (0, import_jsx_runtime6.jsx)("g", { opacity: o, children: (0, import_jsx_runtime6.jsx)(EdgeLabel, { edge, label }) }, edge.id);
+  }) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "nodes", children: nodes.map(({ node, rect }) => {
     const Box = isEntityTable(node) ? EntityBox : NodeBox;
-    return (0, import_jsx_runtime6.jsx)(Box, { node, rect, ...hoverOf(node.id) }, node.id);
+    const o = nodeOpacity(node.id);
+    return o === void 0 ? (0, import_jsx_runtime6.jsx)(Box, { node, rect, ...hoverOf(node.id) }, node.id) : (0, import_jsx_runtime6.jsx)("g", { opacity: o, children: (0, import_jsx_runtime6.jsx)(Box, { node, rect, ...hoverOf(node.id) }) }, node.id);
   }) }), (0, import_jsx_runtime6.jsx)("g", { "data-layer": "node-content", children: nodes.map(({ node, rect }) => {
     const Content = isEntityTable(node) ? EntityContent : NodeContent;
-    return (0, import_jsx_runtime6.jsx)(Content, { node, rect, ...hoverOf(node.id) }, node.id);
+    const o = nodeOpacity(node.id);
+    return o === void 0 ? (0, import_jsx_runtime6.jsx)(Content, { node, rect, ...hoverOf(node.id) }, node.id) : (0, import_jsx_runtime6.jsx)("g", { opacity: o, children: (0, import_jsx_runtime6.jsx)(Content, { node, rect, ...hoverOf(node.id) }) }, node.id);
   }) }), hovered === void 0 && hoverOverlay === void 0 ? null : (0, import_jsx_runtime6.jsxs)("g", { "data-layer": "hover", pointerEvents: "none", children: [hovered === void 0 ? null : (0, import_jsx_runtime6.jsx)("rect", { "data-hover-ring": hovered.node.id, x: hovered.rect.x - HOVER_RING_PAD, y: hovered.rect.y - HOVER_RING_PAD, width: hovered.rect.width + HOVER_RING_PAD * 2, height: hovered.rect.height + HOVER_RING_PAD * 2, rx: theme.node.radius + HOVER_RING_PAD, ry: theme.node.radius + HOVER_RING_PAD, fill: "none", stroke: theme.accent[hovered.node.type], strokeWidth: HOVER_RING_W, opacity: 0.55 }), hoverOverlay] })] });
 }
 
@@ -136625,6 +136999,10 @@ function renderSvgString(doc, laidOut, paths, options = {}) {
   const title = options.title ?? doc.title;
   const defs = [
     (0, import_server2.renderToStaticMarkup)((0, import_react2.createElement)(ArrowMarker)),
+    // §3.9's open return head. Absent from the <defs> an edge that references
+    // it renders with NO head at that end and no error anywhere — the export
+    // would silently drop the half of the picture that says a call answers.
+    (0, import_server2.renderToStaticMarkup)((0, import_react2.createElement)(ReturnMarker)),
     (0, import_server2.renderToStaticMarkup)((0, import_react2.createElement)(CrowOneMarker)),
     (0, import_server2.renderToStaticMarkup)((0, import_react2.createElement)(CrowManyMarker))
   ].join("");
@@ -137495,7 +137873,7 @@ async function callTool(name, args, ctx) {
 }
 
 // dist/cli/src/index.js
-var CLI_VERSION = "0.1.0";
+var CLI_VERSION = "0.2.0";
 
 // dist/cli/src/mcp/server.js
 function logStderr(message) {

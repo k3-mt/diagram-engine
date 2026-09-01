@@ -1,6 +1,6 @@
 {
   "name": "diagram",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Turn prose into architecture diagrams, drawn by the agent you are already running. No API keys, no model in the engine.",
   "author": {
     "name": "diagram-engine"
